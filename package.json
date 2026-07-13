@@ -43,7 +43,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "openclaw": "^2026.6.0"
+    "openclaw": "2026.6.11"
   },
   "devDependencies": {
     "typescript": "^5.9.0"

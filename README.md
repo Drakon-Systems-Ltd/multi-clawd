@@ -49,20 +49,32 @@ openclaw plugins install openclaw-claude-multi
    #   ~/.claude-icloud/oauth-token
    ```
 
-2. Configure the plugin (in `openclaw.json`):
+2. Configure the plugin (in `openclaw.json`; if `plugins.allow` is set, add
+   `"claude-multi"` to it):
 
    ```jsonc
    {
      "plugins": {
-       "claude-multi": {
-         "accounts": [
-           {
-             "id": "claude-icloud",
-             "label": "iCloud Max",
-             "configDir": "~/.claude-icloud",
-             "oauthTokenFile": "~/.claude-icloud/oauth-token"
+       "entries": {
+         "claude-multi": {
+           "enabled": true,
+           "config": {
+             "accounts": [
+               {
+                 "id": "claude-icloud",
+                 "label": "iCloud Max",
+                 "configDir": "~/.claude-icloud",
+                 "oauthTokenFile": "~/.claude-icloud/oauth-token"
+               }
+             ]
            }
-         ]
+         }
+       }
+     },
+     "agents": {
+       "defaults": {
+         // allow the model for agents (separate from the failover chain)
+         "models": { "claude-icloud/claude-fable-5": {} }
        }
      }
    }

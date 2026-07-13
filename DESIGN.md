@@ -75,32 +75,76 @@ Key `CliBackendPlugin` fields we mirror from the bundled `claude-cli`:
     or resolved `oauthTokenRef`)
 - `liveTest.defaultModelRef` for `openclaw models status --probe`.
 
-### Model catalog
+### Model catalog (resolved 2026-07-13, openclaw 2026.6.11)
 
 Because the backend id is not `claude-cli`, OpenClaw needs a model catalog for
-the new provider id (otherwise "Unknown model … no matching
-`models.providers[<id>].models[]`"). **Implementation task:** confirm whether
-`registerCliBackend` auto-contributes the Claude model catalog for the new id,
-or whether we must also contribute a catalog (mirroring the bundled Claude CLI
-catalog: fable-5 ctx 1,000,000; opus-4-8/4-7 ctx 1,048,576; sonnet-5 ctx
-200,000; etc., `reasoning: true`, `input: ["text","image"]`). Verify against the
-plugin SDK types in `openclaw/plugin-sdk/cli-backend` and the bundled Anthropic
-plugin. This is the one field the scaffold marks TODO.
+the new provider id (otherwise "Unknown model …"). Verified against the real
+SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
+`dist/providers-*.js`) and the bundled Anthropic plugin
+(`register.runtime-*.js`):
+
+- **`registerCliBackend` does NOT auto-contribute a catalog.** It only records
+  the backend in the CLI-backend registry (which makes `isCliProvider` true and
+  routes runs through the CLI runner with the full `bundleMcp`/native-tools
+  harness — that's the plugin-owned `baseUrl` exemption).
+- The bundled plugin publishes the `claude-cli/*` rows through its
+  **ProviderPlugin's `augmentModelCatalog` hook**
+  (`augmentModelCatalog: () => buildClaudeCliCatalogEntries()` on the
+  `anthropic` provider). Catalog entries carry `provider: "claude-cli"` even
+  though no provider with that id is registered — entry provider ids are
+  independent of the registered provider id.
+- We mirror that: per account, `api.registerProvider({ id, label, auth: [],
+  augmentModelCatalog, resolveSyntheticAuth })`. `augmentModelCatalog` returns
+  the Claude CLI rows under the account's provider id (fable-5 ctx 1,000,000;
+  opus-4-8/4-7/4-6 + sonnet-4-6 ctx 1,048,576; sonnet-5/haiku-4-5 ctx 200,000;
+  `reasoning: true`, `input: ["text","image"]`, `mediaInput.image` maxSidePx
+  2576 for opus-4-8/4-7 else 1568). `resolveSyntheticAuth` returns the account
+  token (mode `"token"`) so status/failover surfaces treat the backend as
+  authenticated, mirroring `resolveClaudeCliSyntheticAuth`.
+- **Manifest gate:** `resolveCatalogHookProviderPluginIds` only calls
+  `augmentModelCatalog` for plugins whose manifest declares a non-empty
+  `providers` list AND `modelCatalog.runtimeAugment: true` (the latter is
+  implied for non-bundled plugins with providers, but we declare it
+  explicitly). Hence `openclaw.plugin.json` carries
+  `"providers": ["claude-icloud"]`, `"cliBackends": ["claude-icloud"]`,
+  `"modelCatalog": {"runtimeAugment": true}`. The gate is plugin-level, so
+  accounts with ids other than the manifest defaults still get catalog rows.
+- **Env ordering is safe:** the runner applies the backend `clearEnv` to the
+  inherited host env first, then merges the env returned by
+  `prepareExecution`, so mirroring the bundled `CLAUDE_CLI_CLEAR_ENV` (which
+  strips `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_OAUTH_TOKEN` from the host) does not
+  clobber our injected per-account login.
+- **Agent allowlist:** `agents.defaults.models` acts as a per-agent model
+  allowlist; `claude-icloud/claude-fable-5` must be added there (empty object
+  is enough) or the gateway rejects the override. This is separate from the
+  failover chain (`agents.defaults.model.primary`/`fallbacks`).
 
 ## Config (user-facing)
 
 ```jsonc
 {
   "plugins": {
-    "claude-multi": {
-      "accounts": [
-        {
-          "id": "claude-icloud",
-          "label": "iCloud Max",
-          "configDir": "~/.claude-icloud",
-          "oauthTokenFile": "~/.claude-icloud/oauth-token"
+    // if plugins.allow is set, add "claude-multi" to it
+    "entries": {
+      "claude-multi": {
+        "enabled": true,
+        "config": {
+          "accounts": [
+            {
+              "id": "claude-icloud",
+              "label": "iCloud Max",
+              "configDir": "~/.claude-icloud",
+              "oauthTokenFile": "~/.claude-icloud/oauth-token"
+            }
+          ]
         }
-      ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      // allow the model for agents (separate from the failover chain)
+      "models": { "claude-icloud/claude-fable-5": {} }
     }
   }
 }
