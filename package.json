@@ -20,6 +20,9 @@
     "plugin"
   ],
   "openclaw": {
+    "build": {
+      "openclawVersion": "2026.6.11"
+    },
     "extensions": [
       "./src/index.ts"
     ],
