@@ -29,6 +29,7 @@
  *   "token") without an OpenClaw auth profile.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import {
   CLI_FRESH_WATCHDOG_DEFAULTS,
   CLI_RESUME_WATCHDOG_DEFAULTS,
@@ -342,7 +343,17 @@ export default definePluginEntry({
   description:
     "Register additional Claude Code logins as first-class OpenClaw CLI backends for cross-account failover.",
   register(api) {
-    const cfg = (api.pluginConfig ?? {}) as { accounts?: AccountConfig[] };
+    // api.pluginConfig has been observed arriving empty on some registration
+    // passes even though plugins.entries["multi-clawd"].config is present and
+    // schema-valid in the resolved runtime config (api.config). Fall back to
+    // reading it directly so a loader-side pass that drops pluginConfig can't
+    // silently no-op this plugin (that's what let a stale/partial "claw2"
+    // registration linger and serve turns unparsed — see incident 2026-07-13).
+    const pluginConfig =
+      api.pluginConfig && Object.keys(api.pluginConfig).length > 0
+        ? api.pluginConfig
+        : (resolvePluginConfigObject(api.config, "multi-clawd") ?? {});
+    const cfg = pluginConfig as { accounts?: AccountConfig[] };
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
     if (accounts.length === 0) {
       api.logger.warn(
