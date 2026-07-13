@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/multi-clawd-hero.png" alt="multi-clawd — the lobster with two extra claws" width="760">
+<img src="assets/multi-clawd-hero.jpg" alt="multi-clawd — the lobster with two extra claws" width="760">
 
 # 🦞 multi-clawd
 
