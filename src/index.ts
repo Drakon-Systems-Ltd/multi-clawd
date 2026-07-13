@@ -274,7 +274,7 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
       imagePathScope: "workspace",
       sessionArg: "--session-id",
       sessionMode: "always",
-      reseedFromRawTranscriptWhenUncompacted: true,
+      reseedFromRawTranscriptWhenUncompacted: false,
       sessionIdFields: ["session_id", "sessionId", "conversation_id", "conversationId"],
       systemPromptFileArg: "--append-system-prompt-file",
       systemPromptMode: "append",
