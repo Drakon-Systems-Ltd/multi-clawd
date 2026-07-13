@@ -1,45 +1,82 @@
-# multi-clawd
+<div align="center">
 
-**Multi-account Claude Code failover for [OpenClaw](https://docs.openclaw.ai).**
+<img src="assets/multi-clawd-hero.png" alt="multi-clawd — the lobster with two extra claws" width="760">
 
-Register additional Claude (Max/Pro) logins as first-class OpenClaw CLI
-backends, so your failover chain pools **all** your Claude accounts before ever
-dropping a model tier — with the full skills/MCP tool harness intact on every
-account.
+# 🦞 multi-clawd
 
-> Built by [Drakon Systems Ltd](https://drakonsystems.com). MIT licensed.
+**One Claude is never enough.**
+
+Pool every Claude Max account you own into a single failover chain —
+same model, next account, full harness on every hop.
+
+[![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
+[![version](https://img.shields.io/badge/version-0.1.0-4c9aff)](package.json)
+[![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
+
+*A normal lobster has two claws. This one has four.*
+
+</div>
+
+---
 
 ## Why
 
-OpenClaw's bundled `claude-cli` backend runs one Claude Code process on a
-**single** login. When that account hits a usage limit, OpenClaw can't move the
-running subprocess onto a second Claude account — it drops to the next *model*
-(e.g. Opus) instead. If you own two Claude Max accounts, the second one's
-capacity just sits idle.
+OpenClaw's bundled `claude-cli` backend runs Claude Code on a **single**
+login. When that account hits its usage limit, OpenClaw can't move the
+running subprocess onto your second Claude account — it drops down to the
+next *model* instead. If you own two Claude Max accounts, the second one's
+capacity just sits there, idle, while you get downgraded.
 
-This plugin fixes that. It registers each extra account as its own backend
-(`claw2/…`, `claude-work/…`, …) that OpenClaw can step to as a normal
-fallback — same model, next account — keeping Claude Code's native tools,
-skills, and the OpenClaw MCP bridge on every hop.
+**multi-clawd fixes that.** Each extra account becomes its own first-class
+backend that slots into the failover chain like any other model — so a limit
+on account #1 rolls to account #2 *on the same model* before any tier drop:
 
 ```
-claude-cli/claude-fable-5      # main login
-  → claw2/claude-fable-5   # 2nd login (this plugin) — same model, harness intact
-    → anthropic/claude-opus-4-8    # only now drop a tier
+claude-cli/claude-fable-5        # main login
+  → claw2/claude-fable-5         # 2nd login (this plugin) — same model
+    → claw3/claude-fable-5       # 3rd login? go on then
+      → anthropic/claude-opus-4-8   # only NOW drop a tier
 ```
+
+## What you get
+
+- 🦞 **Extra claws** — every account registers as a real CLI backend
+  (`claw2/…`, `claw3/…`), resolvable in model refs, fallback chains, and
+  per-agent overrides. No API keys, no `baseUrl` hacks.
+- 🧰 **Full harness on every hop** — each backend is a genuine Claude Code
+  subprocess: native tools, skills, MCP bridge, and native compaction all
+  stay intact when failover steps across accounts.
+- 🔁 **Same-model failover** — exhaust the account, not the model. Tier
+  drops become the last resort instead of the default.
+- 🔐 **Token hygiene** — setup-tokens are read at launch and passed only via
+  the child process env. Never committed, never logged.
+- 🧯 **Self-healing config** — registration re-reads the resolved runtime
+  config if the loader hands it an empty block, so a flaky registration pass
+  can't silently no-op the plugin.
 
 ## Install
 
+**From source (today):**
+
 ```bash
-openclaw plugins install multi-clawd
+git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
+cd multi-clawd && npm install && npm run build
+openclaw plugins install "$(pwd)"
 ```
 
-(or clone + `npm install && npm run build`, then
-`openclaw plugins install /path/to/multi-clawd`)
+**From ClawHub (landing shortly):**
+
+```bash
+openclaw plugins install clawhub:drakon-systems/multi-clawd
+```
+
+**Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
+second Claude subscription you own.
 
 ## Set up a second account
 
-1. Create an isolated config dir and capture that account's Claude Code
+1. Give the account an isolated config dir and capture its Claude Code
    setup-token into it:
 
    ```bash
@@ -62,7 +99,7 @@ openclaw plugins install multi-clawd
              "accounts": [
                {
                  "id": "claw2",
-                 "label": "iCloud Max",
+                 "label": "Second Max",
                  "configDir": "~/.claw2",
                  "oauthTokenFile": "~/.claw2/oauth-token"
                }
@@ -93,15 +130,51 @@ openclaw plugins install multi-clawd
    ```
 
 4. Restart the gateway. Done — a limit on the main account now rolls to the
-   iCloud account on the same model before any tier drop.
+   second account on the same model before any tier drop.
+
+## How it works
+
+Three moves, all through the official plugin SDK (details in
+[`DESIGN.md`](./DESIGN.md)):
+
+1. **`registerCliBackend`** mirrors the bundled `claude-cli` backend — same
+   argv, same JSONL stream parsing, same MCP config-file bridge — scoped to
+   one account id.
+2. **A minimal provider per account** implements `resolveDynamicModel` +
+   `augmentModelCatalog`, which is what makes `claw2/claude-fable-5`
+   resolvable without an API key (installed extensions can't use the
+   bundled plugins' static-catalog path — this is the supported alternative).
+3. **`prepareExecution`** injects that account's own login
+   (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`) into the child process
+   env, after the host's ambient Claude credentials are stripped.
 
 ## Security
 
-Tokens are never committed and never logged. Prefer a secret reference
-(`oauthTokenRef`) over a plaintext file; when a file is used, keep it `0600`.
-See [`DESIGN.md`](./DESIGN.md).
+- Tokens are never committed and never logged; `.gitignore` blocks token
+  and account directories by default.
+- Prefer a secret reference (`oauthTokenRef`, roadmap v0.3) over a plaintext
+  file; when a file is used, keep it `0600`.
+- Use only accounts you own, within your provider's terms of service.
 
-## Status
+## Status & roadmap
 
-Early (v0.1). See [`DESIGN.md`](./DESIGN.md) for the design, the approaches that
-*don't* work, and the roadmap.
+Early but real (v0.1) — built for and dogfooded on our own fleet.
+
+- **v0.1** — single extra account, verified end-to-end ✅
+- **v0.2** — N accounts, priority ordering, per-account cooldown surfacing
+- **v0.3** — `oauthTokenRef` secret-manager resolvers (1Password), guided
+  setup helper
+- **v1.0** — tests, npm + ClawHub parity releases
+
+See [`DESIGN.md`](./DESIGN.md) for the architecture, the three obvious
+approaches that *don't* work, and why.
+
+---
+
+<div align="center">
+
+Built by [Drakon Systems Ltd](https://drakonsystems.com) · MIT licensed
+
+🦞 *Claws out.*
+
+</div>

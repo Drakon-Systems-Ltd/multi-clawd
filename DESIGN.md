@@ -132,7 +132,7 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
           "accounts": [
             {
               "id": "claw2",
-              "label": "iCloud Max",
+              "label": "Second Max",
               "configDir": "~/.claw2",
               "oauthTokenFile": "~/.claw2/oauth-token"
             }
@@ -171,12 +171,12 @@ Then reference `claw2/claude-fable-5` in the fallback chain.
    Expect a reply AND visible OpenClaw MCP tools (proves `bundleMcp`).
 3. **Live failover** — add `claw2/claude-fable-5` as the first fallback
    after the primary; restart; exhaust the main account's Fable pool; confirm
-   the reply is served by the iCloud backend on **Fable**, not by a tier drop to
+   the reply is served by the second account's backend on **Fable**, not by a tier drop to
    Opus (gateway log: `next=claw2/claude-fable-5`, no model-tier drop).
 
 ## Roadmap
 
-- v0.1 — single extra account (iCloud), verified end-to-end.
+- v0.1 — single extra account, verified end-to-end.
 - v0.2 — N accounts, round-robin/priority ordering, per-account cooldown surfacing.
 - v0.3 — `oauthTokenRef` secret-manager resolvers (1Password), setup helper
   (`claude setup-token` capture into an isolated dir).
