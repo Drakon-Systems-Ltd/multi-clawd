@@ -1,6 +1,6 @@
 {
-  "id": "claude-multi",
-  "name": "Claude Multi-Account",
+  "id": "multi-clawd",
+  "name": "multi-clawd",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
   "cliBackends": ["claude-icloud"],
   "providers": ["claude-icloud"],

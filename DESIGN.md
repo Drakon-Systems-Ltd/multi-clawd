@@ -1,4 +1,4 @@
-# DESIGN — openclaw-claude-multi
+# DESIGN — multi-clawd
 
 Multi-account Claude Code failover for OpenClaw.
 
@@ -124,9 +124,9 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
 ```jsonc
 {
   "plugins": {
-    // if plugins.allow is set, add "claude-multi" to it
+    // if plugins.allow is set, add "multi-clawd" to it
     "entries": {
-      "claude-multi": {
+      "multi-clawd": {
         "enabled": true,
         "config": {
           "accounts": [
@@ -165,7 +165,7 @@ Then reference `claude-icloud/claude-fable-5` in the fallback chain.
 
 1. **Unit / load** — `npm run build`; install locally
    (`openclaw plugins install <path>` or link); `openclaw plugins list` shows
-   `claude-multi` active.
+   `multi-clawd` active.
 2. **Backend resolves + harness** — one-shot:
    `openclaw agent --agent main --model claude-icloud/claude-fable-5 --message "confirm + list mcp__openclaw__* tools"`.
    Expect a reply AND visible OpenClaw MCP tools (proves `bundleMcp`).

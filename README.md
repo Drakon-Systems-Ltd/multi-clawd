@@ -1,4 +1,4 @@
-# openclaw-claude-multi
+# multi-clawd
 
 **Multi-account Claude Code failover for [OpenClaw](https://docs.openclaw.ai).**
 
@@ -31,11 +31,11 @@ claude-cli/claude-fable-5      # main login
 ## Install
 
 ```bash
-openclaw plugins install openclaw-claude-multi
+openclaw plugins install multi-clawd
 ```
 
 (or clone + `npm install && npm run build`, then
-`openclaw plugins install /path/to/openclaw-claude-multi`)
+`openclaw plugins install /path/to/multi-clawd`)
 
 ## Set up a second account
 
@@ -50,13 +50,13 @@ openclaw plugins install openclaw-claude-multi
    ```
 
 2. Configure the plugin (in `openclaw.json`; if `plugins.allow` is set, add
-   `"claude-multi"` to it):
+   `"multi-clawd"` to it):
 
    ```jsonc
    {
      "plugins": {
        "entries": {
-         "claude-multi": {
+         "multi-clawd": {
            "enabled": true,
            "config": {
              "accounts": [

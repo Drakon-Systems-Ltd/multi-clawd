@@ -1,5 +1,5 @@
 /**
- * openclaw-claude-multi
+ * multi-clawd
  * Register additional Claude Code logins as first-class OpenClaw CLI backends,
  * so failover can pool multiple Claude accounts before dropping a model tier —
  * with the full skills/MCP harness intact on every account.
@@ -152,11 +152,11 @@ function resolveToken(account: AccountConfig): string {
   if (account.oauthTokenRef) {
     // Roadmap v0.3: resolve via a secret-manager reference (e.g. 1Password).
     throw new Error(
-      `[claude-multi] oauthTokenRef not yet implemented for account "${account.id}" — use oauthTokenFile`,
+      `[multi-clawd] oauthTokenRef not yet implemented for account "${account.id}" — use oauthTokenFile`,
     );
   }
   throw new Error(
-    `[claude-multi] account "${account.id}" needs oauthTokenFile or oauthTokenRef`,
+    `[multi-clawd] account "${account.id}" needs oauthTokenFile or oauthTokenRef`,
   );
 }
 
@@ -255,7 +255,7 @@ function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
       try {
         return {
           apiKey: resolveToken(account),
-          source: `claude-multi ${account.id} token`,
+          source: `multi-clawd ${account.id} token`,
           mode: "token",
         };
       } catch {
@@ -267,8 +267,8 @@ function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
 }
 
 export default definePluginEntry({
-  id: "claude-multi",
-  name: "Claude Multi-Account",
+  id: "multi-clawd",
+  name: "multi-clawd",
   description:
     "Register additional Claude Code logins as first-class OpenClaw CLI backends for cross-account failover.",
   register(api) {
@@ -276,7 +276,7 @@ export default definePluginEntry({
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
     if (accounts.length === 0) {
       api.logger.warn(
-        "[claude-multi] no accounts configured — nothing to register",
+        "[multi-clawd] no accounts configured — nothing to register",
       );
       return;
     }
@@ -284,12 +284,12 @@ export default definePluginEntry({
     for (const account of accounts) {
       const id = account?.id?.trim();
       if (!id) {
-        api.logger.warn("[claude-multi] skipping account without id");
+        api.logger.warn("[multi-clawd] skipping account without id");
         continue;
       }
       if (id === "claude-cli" || seen.has(id)) {
         api.logger.warn(
-          `[claude-multi] skipping account "${id}" — id collides with an existing backend`,
+          `[multi-clawd] skipping account "${id}" — id collides with an existing backend`,
         );
         continue;
       }
