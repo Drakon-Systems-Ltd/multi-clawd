@@ -41,7 +41,7 @@ Result — a failover chain that pools accounts before dropping a tier:
 
 ```
 claude-cli/claude-fable-5   (native login, main account)
-  → claude-icloud/claude-fable-5   (second login, this plugin)
+  → claw2/claude-fable-5   (second login, this plugin)
     → anthropic/claude-opus-4-8
       → …
 ```
@@ -106,7 +106,7 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
   `providers` list AND `modelCatalog.runtimeAugment: true` (the latter is
   implied for non-bundled plugins with providers, but we declare it
   explicitly). Hence `openclaw.plugin.json` carries
-  `"providers": ["claude-icloud"]`, `"cliBackends": ["claude-icloud"]`,
+  `"providers": ["claw2"]`, `"cliBackends": ["claw2"]`,
   `"modelCatalog": {"runtimeAugment": true}`. The gate is plugin-level, so
   accounts with ids other than the manifest defaults still get catalog rows.
 - **Env ordering is safe:** the runner applies the backend `clearEnv` to the
@@ -115,7 +115,7 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
   strips `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_OAUTH_TOKEN` from the host) does not
   clobber our injected per-account login.
 - **Agent allowlist:** `agents.defaults.models` acts as a per-agent model
-  allowlist; `claude-icloud/claude-fable-5` must be added there (empty object
+  allowlist; `claw2/claude-fable-5` must be added there (empty object
   is enough) or the gateway rejects the override. This is separate from the
   failover chain (`agents.defaults.model.primary`/`fallbacks`).
 
@@ -131,10 +131,10 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
         "config": {
           "accounts": [
             {
-              "id": "claude-icloud",
+              "id": "claw2",
               "label": "iCloud Max",
-              "configDir": "~/.claude-icloud",
-              "oauthTokenFile": "~/.claude-icloud/oauth-token"
+              "configDir": "~/.claw2",
+              "oauthTokenFile": "~/.claw2/oauth-token"
             }
           ]
         }
@@ -144,13 +144,13 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
   "agents": {
     "defaults": {
       // allow the model for agents (separate from the failover chain)
-      "models": { "claude-icloud/claude-fable-5": {} }
+      "models": { "claw2/claude-fable-5": {} }
     }
   }
 }
 ```
 
-Then reference `claude-icloud/claude-fable-5` in the fallback chain.
+Then reference `claw2/claude-fable-5` in the fallback chain.
 
 ## Security
 
@@ -167,12 +167,12 @@ Then reference `claude-icloud/claude-fable-5` in the fallback chain.
    (`openclaw plugins install <path>` or link); `openclaw plugins list` shows
    `multi-clawd` active.
 2. **Backend resolves + harness** — one-shot:
-   `openclaw agent --agent main --model claude-icloud/claude-fable-5 --message "confirm + list mcp__openclaw__* tools"`.
+   `openclaw agent --agent main --model claw2/claude-fable-5 --message "confirm + list mcp__openclaw__* tools"`.
    Expect a reply AND visible OpenClaw MCP tools (proves `bundleMcp`).
-3. **Live failover** — add `claude-icloud/claude-fable-5` as the first fallback
+3. **Live failover** — add `claw2/claude-fable-5` as the first fallback
    after the primary; restart; exhaust the main account's Fable pool; confirm
    the reply is served by the iCloud backend on **Fable**, not by a tier drop to
-   Opus (gateway log: `next=claude-icloud/claude-fable-5`, no model-tier drop).
+   Opus (gateway log: `next=claw2/claude-fable-5`, no model-tier drop).
 
 ## Roadmap
 

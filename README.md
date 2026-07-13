@@ -18,13 +18,13 @@ running subprocess onto a second Claude account — it drops to the next *model*
 capacity just sits idle.
 
 This plugin fixes that. It registers each extra account as its own backend
-(`claude-icloud/…`, `claude-work/…`, …) that OpenClaw can step to as a normal
+(`claw2/…`, `claude-work/…`, …) that OpenClaw can step to as a normal
 fallback — same model, next account — keeping Claude Code's native tools,
 skills, and the OpenClaw MCP bridge on every hop.
 
 ```
 claude-cli/claude-fable-5      # main login
-  → claude-icloud/claude-fable-5   # 2nd login (this plugin) — same model, harness intact
+  → claw2/claude-fable-5   # 2nd login (this plugin) — same model, harness intact
     → anthropic/claude-opus-4-8    # only now drop a tier
 ```
 
@@ -43,10 +43,10 @@ openclaw plugins install multi-clawd
    setup-token into it:
 
    ```bash
-   mkdir -p ~/.claude-icloud && chmod 700 ~/.claude-icloud
-   CLAUDE_CONFIG_DIR=~/.claude-icloud claude setup-token   # log in as the 2nd account
+   mkdir -p ~/.claw2 && chmod 700 ~/.claw2
+   CLAUDE_CONFIG_DIR=~/.claw2 claude setup-token   # log in as the 2nd account
    # store the token where the plugin can read it (0600):
-   #   ~/.claude-icloud/oauth-token
+   #   ~/.claw2/oauth-token
    ```
 
 2. Configure the plugin (in `openclaw.json`; if `plugins.allow` is set, add
@@ -61,10 +61,10 @@ openclaw plugins install multi-clawd
            "config": {
              "accounts": [
                {
-                 "id": "claude-icloud",
+                 "id": "claw2",
                  "label": "iCloud Max",
-                 "configDir": "~/.claude-icloud",
-                 "oauthTokenFile": "~/.claude-icloud/oauth-token"
+                 "configDir": "~/.claw2",
+                 "oauthTokenFile": "~/.claw2/oauth-token"
                }
              ]
            }
@@ -74,7 +74,7 @@ openclaw plugins install multi-clawd
      "agents": {
        "defaults": {
          // allow the model for agents (separate from the failover chain)
-         "models": { "claude-icloud/claude-fable-5": {} }
+         "models": { "claw2/claude-fable-5": {} }
        }
      }
    }
@@ -86,7 +86,7 @@ openclaw plugins install multi-clawd
    "agents": { "defaults": { "model": {
      "primary": "anthropic/claude-fable-5",
      "fallbacks": [
-       "claude-icloud/claude-fable-5",
+       "claw2/claude-fable-5",
        "anthropic/claude-opus-4-8"
      ]
    } } }

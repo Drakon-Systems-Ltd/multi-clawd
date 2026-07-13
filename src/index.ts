@@ -8,14 +8,18 @@
  * - `api.registerCliBackend(...)` mirrors the bundled `claude-cli` backend
  *   (same argv, jsonl stream parsing, `bundleMcp` claude-config-file bridge,
  *   always-on native tools, native compaction) but scoped to one account id.
- * - `registerCliBackend` does NOT contribute a model catalog. Like the bundled
- *   Anthropic plugin (which registers the `claude-cli` catalog through its
- *   provider's `augmentModelCatalog` hook), we register a minimal
- *   `ProviderPlugin` per account whose `augmentModelCatalog` returns the
- *   Claude CLI model rows under the account's provider id. This is what makes
- *   `claude-icloud/claude-fable-5` resolvable without any `baseUrl`/API key.
- *   (Requires the manifest to declare a non-empty `providers` list plus
- *   `modelCatalog.runtimeAugment: true` so the catalog hook loads the plugin.)
+ * - `registerCliBackend` does NOT contribute a model catalog. The bundled
+ *   Anthropic plugin makes `claude-cli/*` resolvable through its manifest
+ *   `modelCatalog.providers` static rows — but the resolver only reads
+ *   manifest static rows from plugins with origin "bundled"
+ *   (model.static-catalog listBundledStaticCatalogPlugins), so an installed
+ *   extension cannot use that path. Instead we register a minimal
+ *   `ProviderPlugin` per account that implements `resolveDynamicModel` —
+ *   the plugin dynamic-model hook the resolver consults on every lookup
+ *   (resolvePluginDynamicModelWithRegistry → runProviderDynamicModel). This
+ *   is what makes `claw2/claude-fable-5` resolvable without any
+ *   `baseUrl`/API key. `augmentModelCatalog` additionally feeds the model
+ *   catalog list (`openclaw models list`).
  * - `prepareExecution(ctx)` injects the account's own login into the child
  *   process env (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`). The runner
  *   applies `clearEnv` to the host env first and merges prepared env after,
@@ -33,6 +37,7 @@ import {
   type CliBackendPreparedExecution,
 } from "openclaw/plugin-sdk/cli-backend";
 import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
+import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
@@ -128,6 +133,17 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-haiku-4-5": 200000,
 };
 
+/** Mirrors the bundled anthropic manifest maxTokens per model. */
+const MODEL_MAX_TOKENS: Record<string, number> = {
+  "claude-opus-4-8": 128000,
+  "claude-opus-4-7": 64000,
+  "claude-opus-4-6": 64000,
+  "claude-sonnet-4-6": 64000,
+  "claude-sonnet-5": 64000,
+  "claude-fable-5": 128000,
+  "claude-haiku-4-5": 64000,
+};
+
 const MODEL_NAMES: Record<string, string> = {
   "claude-opus-4-8": "Claude Opus 4.8",
   "claude-opus-4-7": "Claude Opus 4.7",
@@ -158,6 +174,54 @@ function resolveToken(account: AccountConfig): string {
   throw new Error(
     `[multi-clawd] account "${account.id}" needs oauthTokenFile or oauthTokenRef`,
   );
+}
+
+/** Canonicalize a requested model id via the CLI alias table. */
+function canonicalModelId(modelId: string): string | undefined {
+  const trimmed = modelId?.trim();
+  if (!trimmed) return undefined;
+  const aliased = MODEL_ALIASES[trimmed] ?? trimmed;
+  return (MODEL_IDS as readonly string[]).includes(aliased) ? aliased : undefined;
+}
+
+/**
+ * Runtime model record for the resolver's plugin dynamic-model hook.
+ * Mirrors the bundled anthropic plugin's forward-compat model shape
+ * (buildAnthropicForwardCompatModel): anthropic-messages transport against
+ * api.anthropic.com. Full agent turns never use that transport — the run
+ * executor routes this provider through the CLI-backend registry
+ * (isCliProvider) and drives the Claude Code subprocess — but the local
+ * simple-completion transport (`openclaw infer model run`) calls the
+ * Anthropic API directly with this account's setup token (sk-ant-oat…
+ * tokens get the OAuth beta headers automatically).
+ */
+function buildRuntimeModel(
+  account: AccountConfig,
+  modelId: string,
+): ProviderRuntimeModel | undefined {
+  const id = canonicalModelId(modelId);
+  if (!id) return undefined;
+  const label = account.label ?? account.id;
+  const maxSidePx =
+    id === "claude-opus-4-8" || id === "claude-opus-4-7" ? 2576 : 1568;
+  return {
+    id,
+    name: `${MODEL_NAMES[id] ?? id} (${label})`,
+    provider: account.id,
+    api: "anthropic-messages",
+    baseUrl: "https://api.anthropic.com",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: MODEL_CONTEXT_WINDOWS[id] ?? 200000,
+    maxTokens: MODEL_MAX_TOKENS[id] ?? 64000,
+    ...(id === "claude-fable-5"
+      ? { thinkingLevelMap: { xhigh: "xhigh", max: "max" } }
+      : {}),
+    mediaInput: {
+      image: { maxSidePx, preferredSidePx: maxSidePx, tokenMode: "provider" },
+    },
+  };
 }
 
 function buildCatalogEntries(account: AccountConfig): ModelCatalogEntry[] {
@@ -263,6 +327,12 @@ function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
       }
     },
     augmentModelCatalog: () => buildCatalogEntries(account),
+    // The hook the model resolver actually consults for provider-owned model
+    // ids that are absent from models.json / generated catalogs. Manifest
+    // modelCatalog static rows only resolve for bundled plugins, so an
+    // installed extension must answer here (resolvePluginDynamicModelWithRegistry
+    // → runProviderDynamicModel → this hook).
+    resolveDynamicModel: (ctx) => buildRuntimeModel(account, ctx.modelId),
   };
 }
 

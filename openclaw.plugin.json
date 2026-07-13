@@ -2,8 +2,8 @@
   "id": "multi-clawd",
   "name": "multi-clawd",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
-  "cliBackends": ["claude-icloud"],
-  "providers": ["claude-icloud"],
+  "cliBackends": ["claw2"],
+  "providers": ["claw2"],
   "modelCatalog": {
     "runtimeAugment": true
   },
@@ -16,7 +16,7 @@
     "properties": {
       "accounts": {
         "type": "array",
-        "description": "Additional Claude accounts to register as CLI backends. Each becomes a provider prefix usable in model refs and fallback chains, e.g. claude-icloud/claude-fable-5.",
+        "description": "Additional Claude accounts to register as CLI backends. Each becomes a provider prefix usable in model refs and fallback chains, e.g. claw2/claude-fable-5.",
         "items": {
           "type": "object",
           "additionalProperties": false,
@@ -24,7 +24,7 @@
           "properties": {
             "id": {
               "type": "string",
-              "description": "Backend id / provider prefix, e.g. 'claude-icloud'. Must be unique and not collide with the bundled 'claude-cli'."
+              "description": "Backend id / provider prefix, e.g. 'claw2'. Must be unique and not collide with the bundled 'claude-cli'."
             },
             "label": {
               "type": "string",
