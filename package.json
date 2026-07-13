@@ -1,0 +1,51 @@
+{
+  "name": "openclaw-claude-multi",
+  "version": "0.1.0",
+  "description": "Multi-account Claude Code failover for OpenClaw — register additional Claude (Max/Pro) logins as first-class CLI backends and keep the full skills/MCP harness across every account.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Drakon Systems Ltd",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Drakon-Systems-Ltd/openclaw-claude-multi.git"
+  },
+  "keywords": [
+    "openclaw",
+    "claude",
+    "claude-code",
+    "cli-backend",
+    "failover",
+    "multi-account",
+    "anthropic",
+    "plugin"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    }
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "openclaw": "^2026.6.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

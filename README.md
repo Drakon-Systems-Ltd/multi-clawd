@@ -1,0 +1,95 @@
+# openclaw-claude-multi
+
+**Multi-account Claude Code failover for [OpenClaw](https://docs.openclaw.ai).**
+
+Register additional Claude (Max/Pro) logins as first-class OpenClaw CLI
+backends, so your failover chain pools **all** your Claude accounts before ever
+dropping a model tier — with the full skills/MCP tool harness intact on every
+account.
+
+> Built by [Drakon Systems Ltd](https://drakonsystems.com). MIT licensed.
+
+## Why
+
+OpenClaw's bundled `claude-cli` backend runs one Claude Code process on a
+**single** login. When that account hits a usage limit, OpenClaw can't move the
+running subprocess onto a second Claude account — it drops to the next *model*
+(e.g. Opus) instead. If you own two Claude Max accounts, the second one's
+capacity just sits idle.
+
+This plugin fixes that. It registers each extra account as its own backend
+(`claude-icloud/…`, `claude-work/…`, …) that OpenClaw can step to as a normal
+fallback — same model, next account — keeping Claude Code's native tools,
+skills, and the OpenClaw MCP bridge on every hop.
+
+```
+claude-cli/claude-fable-5      # main login
+  → claude-icloud/claude-fable-5   # 2nd login (this plugin) — same model, harness intact
+    → anthropic/claude-opus-4-8    # only now drop a tier
+```
+
+## Install
+
+```bash
+openclaw plugins install openclaw-claude-multi
+```
+
+(or clone + `npm install && npm run build`, then
+`openclaw plugins install /path/to/openclaw-claude-multi`)
+
+## Set up a second account
+
+1. Create an isolated config dir and capture that account's Claude Code
+   setup-token into it:
+
+   ```bash
+   mkdir -p ~/.claude-icloud && chmod 700 ~/.claude-icloud
+   CLAUDE_CONFIG_DIR=~/.claude-icloud claude setup-token   # log in as the 2nd account
+   # store the token where the plugin can read it (0600):
+   #   ~/.claude-icloud/oauth-token
+   ```
+
+2. Configure the plugin (in `openclaw.json`):
+
+   ```jsonc
+   {
+     "plugins": {
+       "claude-multi": {
+         "accounts": [
+           {
+             "id": "claude-icloud",
+             "label": "iCloud Max",
+             "configDir": "~/.claude-icloud",
+             "oauthTokenFile": "~/.claude-icloud/oauth-token"
+           }
+         ]
+       }
+     }
+   }
+   ```
+
+3. Slot the backend into your fallback chain:
+
+   ```jsonc
+   "agents": { "defaults": { "model": {
+     "primary": "anthropic/claude-fable-5",
+     "fallbacks": [
+       "claude-icloud/claude-fable-5",
+       "anthropic/claude-opus-4-8"
+     ]
+   } } }
+   ```
+
+4. Restart the gateway. Done — a limit on the main account now rolls to the
+   iCloud account on the same model before any tier drop.
+
+## Security
+
+Tokens are never committed and never logged. Prefer a secret reference
+(`oauthTokenRef`) over a plaintext file; when a file is used, keep it `0600`.
+See [`DESIGN.md`](./DESIGN.md).
+
+## Status
+
+Early (v0.1). See [`DESIGN.md`](./DESIGN.md) for the design, the approaches that
+*don't* work, and the roadmap.

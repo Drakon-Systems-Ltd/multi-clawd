@@ -1,0 +1,46 @@
+{
+  "id": "claude-multi",
+  "name": "Claude Multi-Account",
+  "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "accounts": {
+        "type": "array",
+        "description": "Additional Claude accounts to register as CLI backends. Each becomes a provider prefix usable in model refs and fallback chains, e.g. claude-icloud/claude-fable-5.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Backend id / provider prefix, e.g. 'claude-icloud'. Must be unique and not collide with the bundled 'claude-cli'."
+            },
+            "label": {
+              "type": "string",
+              "description": "Human-friendly label shown in status/catalog."
+            },
+            "configDir": {
+              "type": "string",
+              "description": "Isolated CLAUDE_CONFIG_DIR for this login (keeps its sessions separate from the native login and other accounts)."
+            },
+            "oauthTokenFile": {
+              "type": "string",
+              "description": "Path to a file (0600) containing this account's Claude Code setup-token. Read at launch and passed as CLAUDE_CODE_OAUTH_TOKEN. Mutually exclusive with oauthTokenRef."
+            },
+            "oauthTokenRef": {
+              "type": "object",
+              "description": "Secret reference (e.g. 1Password) resolving to this account's Claude Code setup-token. Preferred over oauthTokenFile.",
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

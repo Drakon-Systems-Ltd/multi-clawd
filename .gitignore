@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Secrets — NEVER commit tokens or per-account login dirs
+*.token
+*.oauth
+.env
+.env.*
+secrets/
+accounts/
+.claude-*/
+
+# Logs / OS
+*.log
+.DS_Store
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
