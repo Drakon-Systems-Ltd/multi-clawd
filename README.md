@@ -54,6 +54,22 @@ claude-cli/claude-fable-5        # main login
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime
   config if the loader hands it an empty block, so a flaky registration pass
   can't silently no-op the plugin.
+- 🔎 **Observable registration** — every `register()` pass logs which config
+  source won and which backends it registered, so a silent no-op can't hide
+  in a long-running gateway.
+
+## Platform support
+
+multi-clawd is pure Node (no native modules, no shell-outs) and mirrors the
+bundled `claude-cli` backend 1:1 — it runs anywhere OpenClaw's normal Claude
+Code backend runs.
+
+| Platform | Status |
+|---|---|
+| Linux | ✅ Verified in production (x64 and arm64) |
+| macOS | ✅ Supported — no platform-specific code paths |
+| Windows (WSL2) | ✅ Supported — OpenClaw's recommended gateway runtime on Windows; follow the Linux instructions inside WSL |
+| Windows (native) | ⚠️ Expected to work (the gateway spawns `claude` for this plugin exactly as it does for the bundled backend), not yet verified by us — reports welcome |
 
 ## Install
 
@@ -63,6 +79,13 @@ claude-cli/claude-fable-5        # main login
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
 cd multi-clawd && npm install && npm run build
 openclaw plugins install "$(pwd)"
+```
+
+```powershell
+# Windows (native, PowerShell)
+git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
+cd multi-clawd; npm install; npm run build
+openclaw plugins install (Get-Location).Path
 ```
 
 **From ClawHub (landing shortly):**
@@ -77,7 +100,9 @@ second Claude subscription you own.
 ## Set up a second account
 
 1. Give the account an isolated config dir and capture its Claude Code
-   setup-token into it:
+   setup-token into it.
+
+   **macOS / Linux / WSL2:**
 
    ```bash
    mkdir -p ~/.claw2 && chmod 700 ~/.claw2
@@ -86,8 +111,19 @@ second Claude subscription you own.
    #   ~/.claw2/oauth-token
    ```
 
+   **Windows (native, PowerShell):**
+
+   ```powershell
+   New-Item -ItemType Directory -Force "$HOME\.claw2" | Out-Null
+   $env:CLAUDE_CONFIG_DIR = "$HOME\.claw2"
+   claude setup-token   # log in as the 2nd account
+   # store the token as $HOME\.claw2\oauth-token, then lock it to your user:
+   icacls "$HOME\.claw2\oauth-token" /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
+   ```
+
 2. Configure the plugin (in `openclaw.json`; if `plugins.allow` is set, add
-   `"multi-clawd"` to it):
+   `"multi-clawd"` to it). `~` expands on every platform; absolute Windows
+   paths (`C:\\Users\\you\\.claw2`) work too:
 
    ```jsonc
    {
@@ -148,20 +184,46 @@ Three moves, all through the official plugin SDK (details in
    (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`) into the child process
    env, after the host's ambient Claude credentials are stripped.
 
+## Known issue: idle backends can be evicted by OpenClaw core
+
+On OpenClaw ≤ 2026.7.1, core's *scoped* harness activation can silently drop
+a plugin-registered CLI backend from the live registry: when an agent turn
+selects a harness owned by a different plugin and that scoped set isn't
+already fully loaded, core rebuilds the plugin registry with **only** that
+plugin (+ the memory plugin) and swaps it in globally. Your `claw2` backend
+then fails with `Unknown CLI backend: claw2` — while `openclaw infer model
+list` (a separate cache) still lists its models. A common real-world trigger
+is an hourly heartbeat running on a model served by another harness.
+
+- Upstream bug: [openclaw#107408](https://github.com/openclaw/openclaw/issues/107408)
+- Upstream fix: [openclaw#107596](https://github.com/openclaw/openclaw/pull/107596)
+
+**Until that lands:** a gateway restart always restores the backend (startup
+loads are full-scope), and backends that are in regular use effectively
+re-assert themselves. If your extra account sits idle in a fallback chain,
+consider a periodic probe-and-restart watchdog on the
+`Unknown CLI backend` signature.
+
 ## Security
 
 - Tokens are never committed and never logged; `.gitignore` blocks token
   and account directories by default.
 - Prefer a secret reference (`oauthTokenRef`, roadmap v0.3) over a plaintext
-  file; when a file is used, keep it `0600`.
+  file; when a file is used, keep it `0600` (POSIX) or locked to your user
+  with `icacls` (Windows).
 - Use only accounts you own, within your provider's terms of service.
 
 ## Status & roadmap
 
-Early but real (v0.1) — built for and dogfooded on our own fleet.
+Early but real — built for and dogfooded on our own fleet.
 
 - **v0.1** — single extra account, verified end-to-end ✅
-- **v0.2** — N accounts, priority ordering, per-account cooldown surfacing
+- **v0.1.1** — `jsonlDialect` declared on registered backends, fixing raw
+  stream-JSON reaching connected channels on live turns ✅
+- **v0.1.2** — registration-pass logging (config-source attribution +
+  registered-backend summary) ✅
+- **v0.2** — N accounts, priority ordering, per-account cooldown surfacing,
+  native-Windows verification
 - **v0.3** — `oauthTokenRef` secret-manager resolvers (1Password), guided
   setup helper
 - **v1.0** — tests, npm + ClawHub parity releases
