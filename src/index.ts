@@ -396,12 +396,27 @@ export default definePluginEntry({
       accounts?: AccountConfig[];
     };
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
+    const sourceNames = [
+      "runtime-live",
+      "static-api-config",
+      "startup-pluginConfig",
+    ];
     if (accounts.length === 0) {
       api.logger.warn(
-        "[multi-clawd] no accounts configured — nothing to register",
+        `[multi-clawd] no accounts configured — nothing to register (sources: ${candidates
+          .map(
+            (c, i) =>
+              `${sourceNames[i]}=${hasAccounts(c) ? "ok" : c ? "empty" : "absent"}`,
+          )
+          .join(", ")})`,
       );
       return;
     }
+    api.logger.info(
+      `[multi-clawd] register() pass — config source: ${
+        sourceNames[candidates.findIndex(hasAccounts)] ?? "unknown"
+      }, accounts: ${accounts.length}`,
+    );
     const seen = new Set<string>();
     for (const account of accounts) {
       const id = account?.id?.trim();
@@ -420,5 +435,8 @@ export default definePluginEntry({
       api.registerCliBackend(buildBackend(normalized));
       api.registerProvider(buildCatalogProvider(normalized));
     }
+    api.logger.info(
+      `[multi-clawd] registered ${seen.size} backend(s)+provider(s): ${[...seen].join(", ")}`,
+    );
   },
 });
