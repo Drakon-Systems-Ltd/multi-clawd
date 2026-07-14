@@ -272,6 +272,16 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
       output: "jsonl",
       liveSession: "claude-stdio",
       input: "stdin",
+      // The bundled claude-cli backend is recognised as a Claude stream-json
+      // source by its provider id alone. A plugin-registered backend has a
+      // different id (claw2), so core's isClaudeStreamJson checks
+      // (supportsCliJsonlToolEvents / shouldUseClaudeLiveSession) fall through
+      // and the batch parser dumps the RAW stream — SessionStart hook events
+      // and all — straight to the channel. Declaring the dialect explicitly is
+      // the supported non-id path (same mechanism gemini-cli uses) and makes
+      // the parser strip the envelope down to assistant text. Without it every
+      // live chat turn on this backend leaks raw JSONL. See DESIGN.md.
+      jsonlDialect: "claude-stream-json",
       modelArg: "--model",
       modelAliases: { ...MODEL_ALIASES },
       imageArg: "@",
