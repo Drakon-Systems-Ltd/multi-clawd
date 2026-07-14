@@ -29,7 +29,10 @@
  *   "token") without an OpenClaw auth profile.
  */
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
+import {
+  resolvePluginConfigObject,
+  resolveLivePluginConfigObject,
+} from "openclaw/plugin-sdk/plugin-config-runtime";
 import {
   CLI_FRESH_WATCHDOG_DEFAULTS,
   CLI_RESUME_WATCHDOG_DEFAULTS,
@@ -343,17 +346,45 @@ export default definePluginEntry({
   description:
     "Register additional Claude Code logins as first-class OpenClaw CLI backends for cross-account failover.",
   register(api) {
-    // api.pluginConfig has been observed arriving empty on some registration
+    // Resolve this plugin's config defensively across OpenClaw versions.
+    //
+    // `api.pluginConfig` has been observed arriving empty on some registration
     // passes even though plugins.entries["multi-clawd"].config is present and
-    // schema-valid in the resolved runtime config (api.config). Fall back to
-    // reading it directly so a loader-side pass that drops pluginConfig can't
-    // silently no-op this plugin (that's what let a stale/partial "claw2"
-    // registration linger and serve turns unparsed — see incident 2026-07-13).
-    const pluginConfig =
-      api.pluginConfig && Object.keys(api.pluginConfig).length > 0
-        ? api.pluginConfig
-        : (resolvePluginConfigObject(api.config, "multi-clawd") ?? {});
-    const cfg = pluginConfig as { accounts?: AccountConfig[] };
+    // schema-valid. Historically we fell back to `resolvePluginConfigObject(
+    // api.config, …)`, but 2026.7.x builds the register() api with `api.config`
+    // empty in the real registration pass and expose the live config behind
+    // `api.runtime.config.current()` instead (mirrors the bundled active-memory
+    // / thread-ownership plugins). Reading only `api.config` therefore silently
+    // no-ops the plugin on 2026.7.x — claw2 never registers (incident 2026-07-14
+    // after the 2026.6.11 → 2026.7.1 upgrade).
+    //
+    // Preference order, robust on both 2026.6.x and 2026.7.x:
+    //   1. live runtime config via api.runtime.config.current()  (2026.7.x)
+    //   2. the injected startup pluginConfig                     (both)
+    //   3. the static api.config snapshot                        (2026.6.x)
+    // The runtime config accessor returns a deeply-readonly config; the
+    // resolver only reads it, so cast to its exact expected loader type
+    // (readonly→mutable variance is cosmetic here).
+    const runtimeConfigLoader = (
+      api.runtime?.config?.current
+        ? () => api.runtime.config.current()
+        : undefined
+    ) as Parameters<typeof resolveLivePluginConfigObject>[0];
+    // Try each config source in order and take the FIRST that actually carries
+    // accounts. A plain ?? chain doesn't work here: resolveLivePluginConfigObject
+    // returns {} (not undefined) when it falls back to an empty startup config,
+    // which would short-circuit the chain before the api.config fallback runs.
+    const candidates: Array<Record<string, unknown> | undefined> = [
+      resolveLivePluginConfigObject(runtimeConfigLoader, "multi-clawd", api.pluginConfig),
+      resolvePluginConfigObject(api.config, "multi-clawd"),
+      api.pluginConfig,
+    ];
+    const hasAccounts = (c: Record<string, unknown> | undefined): boolean =>
+      Array.isArray((c as { accounts?: unknown } | undefined)?.accounts) &&
+      ((c as { accounts?: unknown[] }).accounts?.length ?? 0) > 0;
+    const cfg = (candidates.find(hasAccounts) ?? {}) as {
+      accounts?: AccountConfig[];
+    };
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
     if (accounts.length === 0) {
       api.logger.warn(
