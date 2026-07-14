@@ -94,6 +94,16 @@ openclaw plugins install (Get-Location).Path
 openclaw plugins install clawhub:drakon-systems/multi-clawd
 ```
 
+**Or let your agent install it.** Running an OpenClaw assistant or Claude
+Code on the target machine already? Paste it this and go make coffee:
+
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/master/SETUP-AGENT.md
+> and follow it to set up multi-clawd on this machine. I own a second
+> Claude account — ask me when you need me to log in.
+
+The guide has the guardrails built in (config backup, merge-don't-overwrite,
+never print tokens, ask before touching routing).
+
 **Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
 second Claude subscription you own.
 
