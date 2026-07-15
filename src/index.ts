@@ -45,14 +45,34 @@ import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  MODEL_ALIASES,
+  buildCatalogEntries,
+  canonicalModelId,
+  resolveModelSpec,
+} from "./models.js";
+import { resolveBaseModelIds } from "./catalog-source.js";
+import { classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
+import type { AccountHealthState } from "./shim-core.js";
 
 interface AccountConfig {
   id: string;
   label?: string;
+  /**
+   * Use the machine's native Claude login (default config dir + OS keychain).
+   * No configDir/token: on macOS the keychain is only consulted when
+   * CLAUDE_CONFIG_DIR is unset, so a native account must not override it.
+   */
+  native?: boolean;
   configDir?: string;
   oauthTokenFile?: string;
   oauthTokenRef?: Record<string, unknown>;
+  /** Extra model ids to expose for this account beyond the mirrored catalog. */
+  models?: string[];
+  /** Model used for live probes (openclaw models status). */
+  defaultModel?: string;
 }
 
 /** Mirrors the bundled claude-cli backend argv (extensions/anthropic/cli-backend.ts). */
@@ -101,71 +121,20 @@ const CLEAR_ENV = [
   "CLAUDE_CODE_USE_VERTEX",
 ];
 
-/** Model aliases mirrored from the bundled backend (CLAUDE_CLI_MODEL_ALIASES). */
-const MODEL_ALIASES: Record<string, string> = {
-  opus: "opus",
-  "opus-4.8": "claude-opus-4-8",
-  "opus-4.7": "claude-opus-4-7",
-  "opus-4.6": "claude-opus-4-6",
-  "claude-opus-4-8": "claude-opus-4-8",
-  "claude-opus-4-7": "claude-opus-4-7",
-  "claude-opus-4-6": "claude-opus-4-6",
-  sonnet: "sonnet",
-  "sonnet-4.6": "claude-sonnet-4-6",
-  "claude-sonnet-4-6": "claude-sonnet-4-6",
-  haiku: "haiku",
-};
-
-/** Mirror of the bundled Claude CLI catalog (extensions/anthropic/cli-catalog.ts). */
-const MODEL_IDS = [
-  "claude-opus-4-8",
-  "claude-opus-4-7",
-  "claude-sonnet-4-6",
-  "claude-opus-4-6",
-  "claude-sonnet-5",
-  "claude-fable-5",
-  "claude-haiku-4-5",
-] as const;
-
-const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  "claude-opus-4-8": 1048576,
-  "claude-opus-4-7": 1048576,
-  "claude-opus-4-6": 1048576,
-  "claude-sonnet-4-6": 1048576,
-  "claude-sonnet-5": 200000,
-  "claude-fable-5": 1000000,
-  "claude-haiku-4-5": 200000,
-};
-
-/** Mirrors the bundled anthropic manifest maxTokens per model. */
-const MODEL_MAX_TOKENS: Record<string, number> = {
-  "claude-opus-4-8": 128000,
-  "claude-opus-4-7": 64000,
-  "claude-opus-4-6": 64000,
-  "claude-sonnet-4-6": 64000,
-  "claude-sonnet-5": 64000,
-  "claude-fable-5": 128000,
-  "claude-haiku-4-5": 64000,
-};
-
-const MODEL_NAMES: Record<string, string> = {
-  "claude-opus-4-8": "Claude Opus 4.8",
-  "claude-opus-4-7": "Claude Opus 4.7",
-  "claude-opus-4-6": "Claude Opus 4.6",
-  "claude-sonnet-4-6": "Claude Sonnet 4.6",
-  "claude-sonnet-5": "Claude Sonnet 5",
-  "claude-fable-5": "Claude Fable 5",
-  "claude-haiku-4-5": "Claude Haiku 4.5",
-};
-
 function expandHome(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
   return resolve(p);
 }
 
-/** Resolve this account's setup-token. Never logged; passed only via child env. */
-function resolveToken(account: AccountConfig): string {
+/**
+ * Resolve this account's setup-token. Never logged; passed only via child env.
+ * Returns undefined for config-dir-only accounts: those use the native login
+ * already present in that CLAUDE_CONFIG_DIR (this is how the machine's main
+ * account joins the pool without duplicating its credentials).
+ */
+function resolveToken(account: AccountConfig): string | undefined {
+  if (account.native) return undefined;
   if (account.oauthTokenFile) {
     return readFileSync(expandHome(account.oauthTokenFile), "utf8").trim();
   }
@@ -175,17 +144,10 @@ function resolveToken(account: AccountConfig): string {
       `[multi-clawd] oauthTokenRef not yet implemented for account "${account.id}" — use oauthTokenFile`,
     );
   }
+  if (account.configDir) return undefined;
   throw new Error(
-    `[multi-clawd] account "${account.id}" needs oauthTokenFile or oauthTokenRef`,
+    `[multi-clawd] account "${account.id}" needs oauthTokenFile, oauthTokenRef, or configDir`,
   );
-}
-
-/** Canonicalize a requested model id via the CLI alias table. */
-function canonicalModelId(modelId: string): string | undefined {
-  const trimmed = modelId?.trim();
-  if (!trimmed) return undefined;
-  const aliased = MODEL_ALIASES[trimmed] ?? trimmed;
-  return (MODEL_IDS as readonly string[]).includes(aliased) ? aliased : undefined;
 }
 
 /**
@@ -206,52 +168,44 @@ function buildRuntimeModel(
   const id = canonicalModelId(modelId);
   if (!id) return undefined;
   const label = account.label ?? account.id;
-  const maxSidePx =
-    id === "claude-opus-4-8" || id === "claude-opus-4-7" ? 2576 : 1568;
+  const spec = resolveModelSpec(id);
   return {
     id,
-    name: `${MODEL_NAMES[id] ?? id} (${label})`,
+    name: `${spec.name} (${label})`,
     provider: account.id,
     api: "anthropic-messages",
     baseUrl: "https://api.anthropic.com",
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: MODEL_CONTEXT_WINDOWS[id] ?? 200000,
-    maxTokens: MODEL_MAX_TOKENS[id] ?? 64000,
-    ...(id === "claude-fable-5"
+    contextWindow: spec.contextWindow,
+    maxTokens: spec.maxTokens,
+    ...(id === "claude-fable-5" || id === "claude-mythos-5"
       ? { thinkingLevelMap: { xhigh: "xhigh", max: "max" } }
       : {}),
     mediaInput: {
-      image: { maxSidePx, preferredSidePx: maxSidePx, tokenMode: "provider" },
+      image: {
+        maxSidePx: spec.imageMaxSidePx,
+        preferredSidePx: spec.imageMaxSidePx,
+        tokenMode: "provider",
+      },
     },
   };
 }
 
-function buildCatalogEntries(account: AccountConfig): ModelCatalogEntry[] {
-  const label = account.label ?? account.id;
-  return MODEL_IDS.map((id) => {
-    const maxSidePx =
-      id === "claude-opus-4-8" || id === "claude-opus-4-7" ? 2576 : 1568;
-    return {
-      id,
-      name: `${MODEL_NAMES[id] ?? id} (${label})`,
-      provider: account.id,
-      reasoning: true,
-      input: ["text", "image"],
-      mediaInput: {
-        image: { maxSidePx, preferredSidePx: maxSidePx, tokenMode: "provider" },
-      },
-      contextWindow: MODEL_CONTEXT_WINDOWS[id] ?? 200000,
-    } as ModelCatalogEntry;
-  });
+/** dist/shim.js sits next to dist/index.js in the installed extension. */
+const SHIM_PATH = fileURLToPath(new URL("./shim.js", import.meta.url));
+
+/** Per-account health state written by the shim, read by the steering hook. */
+export function healthStateFile(accountId: string): string {
+  return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.json`);
 }
 
 function buildBackend(account: AccountConfig): CliBackendPlugin {
   return {
     id: account.id,
     liveTest: {
-      defaultModelRef: `${account.id}/claude-fable-5`,
+      defaultModelRef: `${account.id}/${account.defaultModel ?? "claude-fable-5"}`,
       defaultImageProbe: true,
       defaultMcpProbe: true,
       docker: {
@@ -266,9 +220,12 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     config: {
-      command: "claude",
-      args: [...BASE_ARGS],
-      resumeArgs: [...BASE_ARGS, "--resume", "{sessionId}"],
+      // Spawn our transparent shim (which spawns `claude`) so the plugin can
+      // observe rate_limit_event records for near-limit account rotation.
+      // process.execPath = the node running the gateway; always present.
+      command: process.execPath,
+      args: [SHIM_PATH, ...BASE_ARGS],
+      resumeArgs: [SHIM_PATH, ...BASE_ARGS, "--resume", "{sessionId}"],
       output: "jsonl",
       liveSession: "claude-stdio",
       input: "stdin",
@@ -306,15 +263,29 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
     prepareExecution(
       _ctx: CliBackendPrepareExecutionContext,
     ): CliBackendPreparedExecution {
-      const env: Record<string, string> = {
-        CLAUDE_CODE_OAUTH_TOKEN: resolveToken(account),
-      };
-      if (account.configDir) {
-        env.CLAUDE_CONFIG_DIR = expandHome(account.configDir);
-      }
-      return { env };
+      return { env: buildAccountEnv(account) };
     },
   };
+}
+
+/**
+ * Child-process env for one account. Token-file accounts authenticate via
+ * env; config-dir accounts rely on the file-based login in that
+ * CLAUDE_CONFIG_DIR; native accounts set NEITHER — the child falls back to
+ * the default config dir, which is the only mode where the OS keychain login
+ * is consulted (macOS).
+ */
+function buildAccountEnv(account: AccountConfig): Record<string, string> {
+  const env: Record<string, string> = {
+    MULTI_CLAWD_ACCOUNT_ID: account.id,
+    MULTI_CLAWD_STATE_FILE: healthStateFile(account.id),
+  };
+  const token = resolveToken(account);
+  if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  if (!account.native && account.configDir) {
+    env.CLAUDE_CONFIG_DIR = expandHome(account.configDir);
+  }
+  return env;
 }
 
 /**
@@ -331,8 +302,10 @@ function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
     auth: [],
     resolveSyntheticAuth: () => {
       try {
+        const token = resolveToken(account);
+        if (!token) return undefined;
         return {
-          apiKey: resolveToken(account),
+          apiKey: token,
           source: `multi-clawd ${account.id} token`,
           mode: "token",
         };
@@ -340,7 +313,14 @@ function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
         return undefined;
       }
     },
-    augmentModelCatalog: () => buildCatalogEntries(account),
+    // Async on purpose: mirrors the bundled claude-cli catalog at catalog-build
+    // time (falling back to the built-in list), so new subscription models
+    // shipped by OpenClaw appear on this account automatically.
+    augmentModelCatalog: async () =>
+      buildCatalogEntries(
+        account,
+        await resolveBaseModelIds(),
+      ) as unknown as ModelCatalogEntry[],
     // The hook the model resolver actually consults for provider-owned model
     // ids that are absent from models.json / generated catalogs. Manifest
     // modelCatalog static rows only resolve for bundled plugins, so an
@@ -394,6 +374,7 @@ export default definePluginEntry({
       ((c as { accounts?: unknown[] }).accounts?.length ?? 0) > 0;
     const cfg = (candidates.find(hasAccounts) ?? {}) as {
       accounts?: AccountConfig[];
+      pool?: PoolConfig;
     };
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
     const sourceNames = [
@@ -435,8 +416,120 @@ export default definePluginEntry({
       api.registerCliBackend(buildBackend(normalized));
       api.registerProvider(buildCatalogProvider(normalized));
     }
+    registerPoolBackend(api, cfg.pool, accounts, seen);
+
     api.logger.info(
       `[multi-clawd] registered ${seen.size} backend(s)+provider(s): ${[...seen].join(", ")}`,
     );
   },
 });
+
+interface PoolConfig {
+  /** Backend id for the pooled backend (e.g. "clawd"). */
+  id?: string;
+  label?: string;
+  /** Account ids in preference order; the first is the home account. */
+  accounts?: string[];
+  utilizationThreshold?: number;
+  staleAfterMs?: number;
+  models?: string[];
+  defaultModel?: string;
+}
+
+function readHealthState(accountId: string): AccountHealthState | undefined {
+  try {
+    return JSON.parse(
+      readFileSync(healthStateFile(accountId), "utf8"),
+    ) as AccountHealthState;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The pooled backend: one backend id (default "clawd") that fronts several
+ * Claude accounts. Every launch, prepareExecution reads the health state the
+ * shim captured for each pooled account (rate_limit_event: status,
+ * utilization, resetsAt) and injects the login of the first account that is
+ * not nearly maxed out. The home account naturally reclaims the pool when its
+ * window resets (its "rejected" verdict un-binds once resetsAt passes).
+ *
+ * This deliberately does NOT use plugin hooks: on OpenClaw 2026.7.1 the
+ * before_model_resolve hook never fires for gateway RPC turns and
+ * before_agent_start's overrides are ignored on the prompt path (verified
+ * 2026-07-15). prepareExecution runs on every subprocess launch on every
+ * turn path, so account choice lives here instead.
+ *
+ * When the whole pool is exhausted the home account is used anyway — the
+ * launch fails with a real limit error and OpenClaw's reactive chain drops
+ * to the next provider (e.g. OpenAI → xAI), exactly as configured.
+ *
+ * Known limitation: switching accounts mid-conversation loses the Claude CLI
+ * session (it lives in the previous account's config dir); OpenClaw's
+ * fresh-session retry recovers the turn. Rotation only happens at limit
+ * boundaries, so this is rare by construction.
+ */
+function registerPoolBackend(
+  api: Parameters<Parameters<typeof definePluginEntry>[0]["register"]>[0],
+  pool: PoolConfig | undefined,
+  accounts: AccountConfig[],
+  registeredIds: Set<string>,
+): void {
+  const logger = api.logger;
+  if (!pool) return;
+  const poolId = pool.id?.trim() || "clawd";
+  const memberIds = (pool.accounts ?? []).filter((id) => registeredIds.has(id));
+  const members = memberIds
+    .map((id) => accounts.find((a) => a.id.trim() === id))
+    .filter((a): a is AccountConfig => a !== undefined);
+  if (members.length < 2) {
+    logger.warn(
+      `[multi-clawd] pool "${poolId}" has ${members.length} registered account(s) — need at least 2; pool not registered`,
+    );
+    return;
+  }
+  if (poolId === "claude-cli" || registeredIds.has(poolId)) {
+    logger.warn(
+      `[multi-clawd] pool id "${poolId}" collides with an existing backend — pool not registered`,
+    );
+    return;
+  }
+  const options = {
+    utilizationThreshold: pool.utilizationThreshold,
+    staleAfterMs: pool.staleAfterMs,
+  };
+  const poolAccount: AccountConfig = {
+    id: poolId,
+    label: pool.label ?? `Claude pool (${memberIds.join("+")})`,
+    models: pool.models,
+    defaultModel: pool.defaultModel,
+  };
+  const backend = buildBackend(poolAccount);
+  backend.prepareExecution = () => {
+    const now = Date.now();
+    const verdicts = members.map((a) => ({
+      id: a.id,
+      health: classifyAccountHealth(readHealthState(a.id), options, now),
+    }));
+    const chosenId = pickPoolAccountForLaunch(
+      verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })),
+    );
+    const chosen = members.find((a) => a.id === chosenId) ?? members[0];
+    if (chosenId !== members[0].id) {
+      const home = verdicts[0];
+      logger.info(
+        `[multi-clawd] pool ${poolId}: launching on ${chosenId} instead of ${home.id} (${home.health.reason ?? home.health.verdict})`,
+      );
+    }
+    return { env: buildAccountEnv(chosen) };
+  };
+  api.registerCliBackend(backend);
+  api.registerProvider(buildCatalogProvider(poolAccount));
+  registeredIds.add(poolId);
+  logger.info(
+    `[multi-clawd] pool "${poolId}" active — accounts: ${memberIds.join(" → ")}, threshold: ${
+      options.utilizationThreshold ?? 0.85
+    }`,
+  );
+}
+

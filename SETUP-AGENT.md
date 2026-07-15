@@ -92,25 +92,48 @@ grep -o "MC_SETUP_OK" /tmp/mc-setup-probe.out | head -1
 
 `MC_SETUP_OK` = the second account works end-to-end.
 
-## 6. Routing — **ASK YOUR HUMAN**
+## 6. Optional: the pool (proactive rotation) — **ASK YOUR HUMAN**
 
-Ask whether they want `claw2/claude-fable-5` in the failover chain
-(typical: first fallback after their primary), as the primary, or left
-unrouted for manual/per-agent use. Apply only what they choose, same
-merge discipline, and confirm the final chain back to them.
+Ask whether they want the pooled backend: one id (`clawd`) fronting all
+their Claude accounts, where each launch runs on the first account that is
+not nearly maxed out (live `rate_limit_event` health; hand over BEFORE the
+limit error, return home when the window resets). If yes, merge:
 
-## 7. Known issue you should warn about
+- Add the main login as a pooled account:
+  `{ "id": "claw1", "label": "Main Claude", "native": true }`
+  (native = default config dir / OS keychain; set NO configDir and NO token
+  for it — on macOS the keychain is only consulted when CLAUDE_CONFIG_DIR
+  is unset).
+- `plugins.entries["multi-clawd"].config.pool` =
+  `{ "id": "clawd", "accounts": ["claw1", "claw2"] }`
+- `agents.defaults.models["clawd/claude-fable-5"]` = `{}`
+
+Schema note: if the currently-installed copy of the plugin predates these
+config keys, `openclaw plugins install --force` validates the live config
+against the OLD manifest and refuses. Order matters: strip the new keys
+from openclaw.json → force-install → re-add the keys → restart.
+
+## 7. Routing — **ASK YOUR HUMAN**
+
+Ask whether they want `clawd/claude-fable-5` (pool) or `claw2/claude-fable-5`
+(single account) in the failover chain — typical: pool as primary with
+non-Anthropic providers as fallbacks, or first fallback after their current
+primary — or left unrouted for manual/per-agent use. Apply only what they
+choose, same merge discipline, and confirm the final chain back to them.
+
+## 8. Known issue you should warn about
 
 On OpenClaw ≤ 2026.7.1, an **idle** plugin CLI backend can be silently
 evicted by core's scoped harness activation
 ([openclaw#107408](https://github.com/openclaw/openclaw/issues/107408),
 fix pending in [openclaw#107596](https://github.com/openclaw/openclaw/pull/107596)).
 Symptom: `Unknown CLI backend: claw2` while the model catalog still lists
-it. A gateway restart always heals it. If claw2 will sit idle in a
-fallback chain, suggest a periodic probe-and-restart watchdog on that
-error signature until the upstream fix ships.
+it. A gateway restart always heals it. If any backend will sit idle in a
+fallback chain, offer to schedule the bundled watchdog
+(`node scripts/eviction-watchdog.mjs` from cron/launchd every ~5 min) until
+the upstream fix ships.
 
-## 8. Report
+## 9. Report
 
 Tell your human: what was installed and where, the exact config keys
 added, the backup file path, the probe result, and the routing decision

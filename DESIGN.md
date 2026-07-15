@@ -119,6 +119,112 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
   is enough) or the gateway rejects the override. This is separate from the
   failover chain (`agents.defaults.model.primary`/`fallbacks`).
 
+## The pool (v0.2): proactive near-limit rotation
+
+Michael's requirement: roll to the second account when the first is **nearly**
+maxed out (not after it hard-fails), and when both accounts / Anthropic are
+down, let the chain drop to OpenAI then xAI. Reactive failover alone can't do
+"nearly" — it needs a usage signal and a pre-error decision point.
+
+### The usage signal
+
+The Claude CLI's stream-json output emits an undocumented top-level
+`rate_limit_event` record after each turn (verified live 2026-07-15,
+cross-checked with Jarvis's 13-Jul captures):
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{
+  "status":"allowed_warning",       // allowed | allowed_warning | rejected
+  "resetsAt":1784595600,            // epoch seconds
+  "rateLimitType":"seven_day",      // five_hour | seven_day | ...
+  "utilization":0.3,                // 0..1 (absent on some windows)
+  "isUsingOverage":false}}
+```
+
+Fields vary by account/window (Jarvis's sample had `overageStatus`; ours had
+`utilization`) — hence the tolerant parser in `shim-core.ts`: unknown
+statuses/windows pass through, missing fields are fine, junk is ignored.
+
+**OpenClaw never parses this record** (verified against 2026.7.1 internals:
+the CLI runner extracts only token usage and error text). So the plugin
+captures it itself: the backend spawns `dist/shim.js` (a transparent wrapper)
+instead of `claude` directly. The shim passes stdin/stdout/stderr/argv/exit
+through untouched — passthrough always wins over capture — and folds each
+event into `~/.openclaw/state/multi-clawd/<account>.json`.
+
+### The decision point: prepareExecution, not hooks
+
+Plugin lifecycle hooks were the obvious mechanism and they do not work
+(verified empirically on 2026.7.1, gateway RPC turns):
+
+- `before_model_resolve` (returns `providerOverride`/`modelOverride`) is a
+  **conversation hook**: non-bundled plugins need
+  `plugins.entries.<id>.hooks.allowConversationAccess=true` — and even with
+  that granted, the hook **never fires** for gateway RPC turns; the
+  `resolveHookModelSelection` path that consults it is not reached
+  (`session_start` from the same plugin fires fine).
+- `before_agent_start` (legacy, same override fields) fires — but from the
+  **prompt-build** call site (`agent-harness-runtime`), which ignores
+  override fields. Its model-resolve call site never ran.
+
+So rotation lives where the plugin has guaranteed, every-turn control:
+`prepareExecution` on a dedicated **pool backend** (`pool.id`, default
+`clawd`). Per launch it classifies each pooled account from its health file
+and injects the login env of the first usable one:
+
+- `rejected` + future `resetsAt` → **exhausted**, skipped (auto-unbinds when
+  the reset passes — the home account reclaims the pool with no timer).
+- any window `utilization >= utilizationThreshold` (default 0.85) →
+  **near_limit**, skipped while a healthier account exists.
+- `allowed_warning` alone does NOT rotate: the seven-day window warns at 0.3
+  utilization in practice; only the utilization number is trusted.
+- missing/stale health (default > 6 h) → **no_data**, treated as healthy:
+  rotate only on positive evidence.
+- whole pool exhausted → home account anyway, so the launch fails with a
+  real limit error and OpenClaw's reactive chain drops provider
+  (OpenAI → xAI), exactly as configured.
+
+Trade-off: `CliBackendPrepareExecutionContext` has no session id, so
+selection is stateless; a mid-conversation handover loses the Claude CLI's
+native session (it lives in the previous account's config dir) and OpenClaw's
+fresh-session retry recovers the turn. Rotation only happens at limit
+boundaries, so this is rare by construction. Sticky per-session selection is
+v0.3 material.
+
+### Native accounts
+
+`"native": true` pools the machine's main login without copying credentials.
+Crucial macOS detail: the OS keychain is only consulted when
+`CLAUDE_CONFIG_DIR` is **unset** — pointing it at `~/.claude` explicitly
+switches the CLI to file-based credentials and fails with "Not logged in".
+Native accounts therefore set neither the config dir nor a token.
+
+### Future-proof model resolution
+
+Nothing is gated on a hardcoded model list (the flagship subscription model
+is expected to change, e.g. Fable 5 → Opus 5):
+
+- `resolveDynamicModel` accepts **any** modern lowercase `claude-*` id
+  (mirroring core's own Anthropic forward-compat resolver); known ids get
+  real specs, unknown ones conservative defaults (200k ctx / 64k out).
+- `augmentModelCatalog` mirrors the bundled claude-cli catalog **live** at
+  catalog-build time (`dist/extensions/anthropic/cli-catalog.js`, resolved
+  by file path since the exports map hides it), falling back to a built-in
+  list when unavailable. New models OpenClaw ships appear on our backends
+  automatically.
+- Per-account `models` / `defaultModel` config provides operator overrides.
+
+### Eviction (openclaw#107408): why there is no in-process fix
+
+Verified against the 2026.7.1 loader: `register()` runs once, synchronously,
+during registry build; `registerCliBackend`/`registerProvider` are **not**
+late-callable (the guarded api proxy silently no-ops them after close);
+there is no registry-rebuilt event, no timer hook, and no plugin API that
+forces a rebuild. The eviction is a *narrower registry snapshot becoming
+active*, not a removal — recovery is a full-scope rebuild (gateway restart
+re-runs `register()`). Hence `scripts/eviction-watchdog.mjs` (log-signature →
+restart, once per event) until upstream PR openclaw#107596 lands.
+
 ## Config (user-facing)
 
 ```jsonc
@@ -130,13 +236,16 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
         "enabled": true,
         "config": {
           "accounts": [
+            { "id": "claw1", "label": "Main Claude", "native": true },
             {
               "id": "claw2",
               "label": "Second Max",
               "configDir": "~/.claw2",
               "oauthTokenFile": "~/.claw2/oauth-token"
             }
-          ]
+          ],
+          // optional: pooled backend with proactive near-limit rotation
+          "pool": { "id": "clawd", "accounts": ["claw1", "claw2"] }
         }
       }
     }

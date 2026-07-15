@@ -2,8 +2,8 @@
   "id": "multi-clawd",
   "name": "multi-clawd",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
-  "cliBackends": ["claw2"],
-  "providers": ["claw2"],
+  "cliBackends": ["claw1", "claw2", "clawd"],
+  "providers": ["claw1", "claw2", "clawd"],
   "modelCatalog": {
     "runtimeAugment": true
   },
@@ -14,6 +14,43 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "pool": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Pooled backend: one backend id fronting several accounts. Every launch runs on the first pooled account that is not nearly maxed out (from each account's rate_limit_event health state), so a near-limit home account hands over BEFORE it hard-fails. Route your chain at <pool.id>/<model> to get proactive same-model account failover.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Backend id / provider prefix for the pool. Default \"clawd\"."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human-friendly label shown in status/catalog."
+          },
+          "accounts": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Account ids (from accounts[]) in preference order; the first is the home account and reclaims the pool when its usage window resets."
+          },
+          "utilizationThreshold": {
+            "type": "number",
+            "description": "Hand over when any rate-limit window's utilization reaches this fraction. Default 0.85."
+          },
+          "staleAfterMs": {
+            "type": "number",
+            "description": "Ignore health data older than this. Default 21600000 (6h)."
+          },
+          "models": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extra model ids to expose on the pool backend."
+          },
+          "defaultModel": {
+            "type": "string",
+            "description": "Model id used for live probes. Defaults to claude-fable-5."
+          }
+        }
+      },
       "accounts": {
         "type": "array",
         "description": "Additional Claude accounts to register as CLI backends. Each becomes a provider prefix usable in model refs and fallback chains, e.g. claw2/claude-fable-5.",
@@ -30,6 +67,10 @@
               "type": "string",
               "description": "Human-friendly label shown in status/catalog."
             },
+            "native": {
+              "type": "boolean",
+              "description": "Use the machine's native Claude login (default config dir; OS keychain on macOS). Sets neither CLAUDE_CONFIG_DIR nor a token. Use this to include the main account in the rotation pool."
+            },
             "configDir": {
               "type": "string",
               "description": "Isolated CLAUDE_CONFIG_DIR for this login (keeps its sessions separate from the native login and other accounts)."
@@ -42,6 +83,15 @@
               "type": "object",
               "description": "Secret reference (e.g. 1Password) resolving to this account's Claude Code setup-token. Preferred over oauthTokenFile.",
               "additionalProperties": true
+            },
+            "models": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Extra model ids to expose for this account beyond the mirrored claude-cli catalog (e.g. a brand-new model OpenClaw doesn't list yet). Unknown modern claude-* ids also resolve on demand without being listed here."
+            },
+            "defaultModel": {
+              "type": "string",
+              "description": "Model id used for live probes (openclaw models status). Defaults to claude-fable-5."
             }
           }
         }

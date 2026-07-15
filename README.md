@@ -10,7 +10,7 @@ Pool every Claude Max account you own into a single failover chain —
 same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
-[![version](https://img.shields.io/badge/version-0.1.2-4c9aff)](package.json)
+[![version](https://img.shields.io/badge/version-0.2.0-4c9aff)](package.json)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -44,11 +44,28 @@ claude-cli/claude-fable-5        # main login
 - 🦞 **Extra claws** — every account registers as a real CLI backend
   (`claw2/…`, `claw3/…`), resolvable in model refs, fallback chains, and
   per-agent overrides. No API keys, no `baseUrl` hacks.
+- 🎱 **The pool (v0.2)** — one backend id (`clawd/…`) fronting all your
+  accounts. Every launch runs on the first account that is **not nearly
+  maxed out**, using live `rate_limit_event` health (status, utilization,
+  reset time) captured from each account's own Claude stream. Hand over
+  *before* the limit error; return home automatically when the window
+  resets; when the whole pool is exhausted, fail for real so your chain
+  drops provider (OpenAI → xAI → …) exactly as configured.
+- 📈 **Usage-aware accounts** — a transparent shim tees each account's
+  stream-json and records per-window health to
+  `~/.openclaw/state/multi-clawd/<account>.json`. Passthrough-first: a state
+  write can never break a live turn.
 - 🧰 **Full harness on every hop** — each backend is a genuine Claude Code
   subprocess: native tools, skills, MCP bridge, and native compaction all
   stay intact when failover steps across accounts.
-- 🔁 **Same-model failover** — exhaust the account, not the model. Tier
-  drops become the last resort instead of the default.
+- 🔮 **Future-proof models (v0.2)** — model ids are not hardcoded: the
+  catalog mirrors the bundled claude-cli list live (with a built-in
+  fallback), and *any* modern `claude-*` id resolves on demand. When the
+  flagship subscription model changes (Fable 5 → Opus 5), `clawd/claude-opus-5`
+  just works — no plugin update.
+- 🏠 **Native accounts (v0.2)** — `"native": true` pools the machine's main
+  Claude login (default config dir / OS keychain) without duplicating its
+  credentials.
 - 🔐 **Token hygiene** — setup-tokens are read at launch and passed only via
   the child process env. Never committed, never logged.
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime
@@ -57,6 +74,9 @@ claude-cli/claude-fable-5        # main login
 - 🔎 **Observable registration** — every `register()` pass logs which config
   source won and which backends it registered, so a silent no-op can't hide
   in a long-running gateway.
+- 🐶 **Eviction watchdog** — `scripts/eviction-watchdog.mjs` mitigates
+  upstream openclaw#107408 (idle plugin backends silently dropped) by
+  restarting the gateway when the `Unknown CLI backend` signature appears.
 
 ## Platform support
 
@@ -178,6 +198,61 @@ second Claude subscription you own.
 4. Restart the gateway. Done — a limit on the main account now rolls to the
    second account on the same model before any tier drop.
 
+## The pool: proactive rotation (v0.2)
+
+Individual backends (`claw2/…`) fail over *reactively* — OpenClaw steps the
+chain when a turn actually dies with a limit error. The pool goes one better:
+it watches each account's own usage signal and hands over **before** the
+error.
+
+```jsonc
+"plugins": { "entries": { "multi-clawd": { "enabled": true, "config": {
+  "accounts": [
+    { "id": "claw1", "label": "Main Claude", "native": true },
+    { "id": "claw2", "label": "Second Max", "configDir": "~/.claw2",
+      "oauthTokenFile": "~/.claw2/oauth-token" }
+  ],
+  "pool": {
+    "id": "clawd",
+    "accounts": ["claw1", "claw2"],   // preference order; first = home
+    "utilizationThreshold": 0.85      // hand over at 85% of any window
+  }
+} } } },
+"agents": { "defaults": {
+  "models": { "clawd/claude-fable-5": {} },
+  "model": {
+    "primary": "clawd/claude-fable-5",        // the pool IS the Claude lane
+    "fallbacks": [
+      "openai/gpt-5.6",                        // both accounts exhausted
+      "xai/grok-4.5"                           // ...or Anthropic is down
+    ]
+  }
+} }
+```
+
+How it decides, per launch (all data from each account's live
+`rate_limit_event` stream, captured by the shim):
+
+| Account state | Effect |
+|---|---|
+| `rejected` + reset in the future | skipped until `resetsAt` passes |
+| any window utilization ≥ threshold | skipped (nearly maxed — the point of the pool) |
+| `allowed_warning` alone | still used — weekly windows warn early; only the utilization number rotates |
+| no data / stale data | used — never rotate on missing evidence |
+| whole pool exhausted | home account anyway → real limit error → your chain drops provider |
+
+Notes:
+
+- Rotation happens at limit boundaries only. A mid-conversation handover
+  costs the Claude CLI its native session (it lives in the previous
+  account's config dir); OpenClaw's fresh-session retry recovers the turn.
+- Plugin lifecycle hooks were investigated and ruled out for this job: on
+  OpenClaw ≤ 2026.7.1, `before_model_resolve` never fires for gateway RPC
+  turns and `before_agent_start` overrides are ignored on the prompt path.
+  The pool therefore decides inside the backend's own `prepareExecution`,
+  which runs on every launch on every turn path. Details in
+  [`DESIGN.md`](./DESIGN.md).
+
 ## How it works
 
 Three moves, all through the official plugin SDK (details in
@@ -210,9 +285,19 @@ is an hourly heartbeat running on a model served by another harness.
 
 **Until that lands:** a gateway restart always restores the backend (startup
 loads are full-scope), and backends that are in regular use effectively
-re-assert themselves. If your extra account sits idle in a fallback chain,
-consider a periodic probe-and-restart watchdog on the
-`Unknown CLI backend` signature.
+re-assert themselves. This repo ships a ready-made mitigation —
+`scripts/eviction-watchdog.mjs` — which tails the gateway log for the
+`Unknown CLI backend` signature and restarts the gateway at most once per
+eviction event. Run it every few minutes from cron/launchd/systemd:
+
+```bash
+node scripts/eviction-watchdog.mjs                    # restart on detection
+MULTI_CLAWD_WATCHDOG_DRY=1 node scripts/eviction-watchdog.mjs   # report only
+```
+
+An in-process fix was investigated and is impossible by design:
+`registerCliBackend` is not late-callable, there is no registry-rebuilt
+event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
 ## Security
 
@@ -232,11 +317,14 @@ Early but real — built for and dogfooded on our own fleet.
   stream-JSON reaching connected channels on live turns ✅
 - **v0.1.2** — registration-pass logging (config-source attribution +
   registered-backend summary) ✅
-- **v0.2** — N accounts, priority ordering, per-account cooldown surfacing,
-  native-Windows verification
+- **v0.2** — the pool: proactive near-limit rotation from live
+  `rate_limit_event` health; native (keychain) accounts; future-proof model
+  resolution (mirrored catalog + permissive `claude-*` pass-through);
+  eviction watchdog; vitest suite ✅
 - **v0.3** — `oauthTokenRef` secret-manager resolvers (1Password), guided
-  setup helper
-- **v1.0** — tests, npm + ClawHub parity releases
+  setup helper, per-session sticky pool selection, native-Windows
+  verification
+- **v1.0** — npm + ClawHub parity releases
 
 See [`DESIGN.md`](./DESIGN.md) for the architecture, the three obvious
 approaches that *don't* work, and why.
