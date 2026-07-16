@@ -61,11 +61,13 @@ function persistState(): void {
   if (!stateFile) return;
   try {
     // Read-merge-write on every persist: windows observed by earlier
-    // invocations (or a concurrent shim on the same account) must survive a
-    // turn that only emits a different window type — otherwise a
-    // five_hour-only response erases the last seven_day utilization and a
-    // near-limit crossing becomes invisible. Per-window `seenAt` decides
-    // which side wins; expiring old windows is the reader's job (health.ts).
+    // invocations must survive a turn that only emits a different window
+    // type — otherwise a five_hour-only response erases the last seven_day
+    // utilization and a near-limit crossing becomes invisible. Per-window
+    // `seenAt` decides which side wins; expiring old windows is the reader's
+    // job (health.ts). Sequential-safe only: two truly concurrent shims for
+    // the SAME account can still race read→write, and last-rename-wins
+    // drops whichever event lost the race.
     const disk = readPersistedState();
     if (disk) state = mergeHealthStates(disk, state);
     mkdirSync(dirname(stateFile), { recursive: true });

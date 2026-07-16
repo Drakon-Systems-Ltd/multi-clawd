@@ -322,6 +322,18 @@ An in-process fix was investigated and is impossible by design:
 `registerCliBackend` is not late-callable, there is no registry-rebuilt
 event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
+## Known limitations
+
+- **Shim window persistence is sequential-safe, not concurrent-writer-safe.**
+  `persistState()` in `src/shim.ts` does a read-merge-write on every save so a
+  turn that only reports one window type (say `five_hour`) doesn't clobber
+  the last-seen `seven_day` data — but the read, merge, and rename aren't
+  atomic together. Two truly concurrent shim processes for the *same*
+  account can still race each other and drop an event on last-rename-wins.
+  In practice this needs two in-flight turns on one account at once, which
+  is rare, but it's a real gap. A per-account lock/retry protocol is tracked
+  as a v0.3.x follow-up.
+
 ## Security
 
 - Tokens are never committed and never logged; `.gitignore` blocks token
