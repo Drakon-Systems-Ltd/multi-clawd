@@ -47,6 +47,10 @@ export function classifyAccountHealth(
 
   let worst: AccountHealth = { verdict: "ok" };
   for (const [window, w] of Object.entries(state.windows)) {
+    // Windows age individually: now that persisted windows survive across
+    // invocations, a fresh five_hour write must not lend credibility to a
+    // seven_day entry that is itself stale. Skipped = no positive evidence.
+    if (nowMs - w.seenAt > staleAfterMs) continue;
     const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
     if (w.status === "rejected" && resetMs !== undefined && resetMs > nowMs) {
       return {
@@ -58,7 +62,10 @@ export function classifyAccountHealth(
     if (
       worst.verdict === "ok" &&
       typeof w.utilization === "number" &&
-      w.utilization >= threshold
+      w.utilization >= threshold &&
+      // A passed reset voids the observation: that utilization belonged to
+      // the previous cycle, so it must not keep an account near_limit.
+      (resetMs === undefined || resetMs > nowMs)
     ) {
       worst = {
         verdict: "near_limit",

@@ -44,8 +44,8 @@ import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 import { homedir } from "node:os";
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   MODEL_ALIASES,
@@ -55,7 +55,18 @@ import {
 } from "./models.js";
 import { resolveBaseModelIds } from "./catalog-source.js";
 import { classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
+import { decideStickySelection, type StickyEntry } from "./sticky.js";
 import type { AccountHealthState } from "./shim-core.js";
+import {
+  createTokenRefResolver,
+  isSecretRefShape,
+  type TokenRefResolver,
+} from "./token-resolution.js";
+import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
+import { addAlert, clearAlert, pendingAlertText, type AlertState } from "./alerts.js";
+import { buildAccountChildEnv, validateAccountTokenSources } from "./account-env.js";
+import { checkAccountCredential, type CredentialIo } from "./login-health.js";
+import { execFileSync } from "node:child_process";
 
 interface AccountConfig {
   id: string;
@@ -128,26 +139,160 @@ function expandHome(p: string): string {
 }
 
 /**
- * Resolve this account's setup-token. Never logged; passed only via child env.
- * Returns undefined for config-dir-only accounts: those use the native login
- * already present in that CLAUDE_CONFIG_DIR (this is how the machine's main
- * account joins the pool without duplicating its credentials).
+ * Token plumbing (v0.3): tokens come from a plaintext file (`oauthTokenFile`,
+ * legacy), a secret reference resolved through the gateway's own configured
+ * secret providers (`oauthTokenRef`, preferred — same `{source, provider, id}`
+ * shape OpenClaw uses for every other secret in openclaw.json), or nowhere
+ * (native / config-dir logins). Values are never logged; they ride only in
+ * the child process env.
+ *
+ * The ref resolver is created per register() pass and bound to the live
+ * runtime config so provider changes are picked up on rebuilds. The launch
+ * path resolves asynchronously with a short cache; sync-only surfaces
+ * (resolveSyntheticAuth) peek the warm cache instead of blocking.
  */
-function resolveToken(account: AccountConfig): string | undefined {
+let activeTokenResolver: TokenRefResolver | undefined;
+
+/**
+ * Operator-alert state, surfaced via the heartbeat_prompt_contribution hook:
+ * the agent's next heartbeat carries pending alerts, so they reach the
+ * operator through the normal channel (e.g. Telegram) instead of dying as
+ * journal lines. Module-level on purpose — registry rebuilds re-run
+ * register(), and alerts must survive them.
+ */
+let alertState: AlertState = { alerts: [] };
+let loginProbeTimer: ReturnType<typeof setInterval> | undefined;
+
+function raiseAlert(alert: Parameters<typeof addAlert>[1]): void {
+  alertState = addAlert(alertState, alert, Date.now());
+}
+
+/**
+ * Out-of-process components (the eviction watchdog) can't reach alertState,
+ * so they append alerts to a spool file; each heartbeat ingests and clears it.
+ */
+function ingestAlertSpool(): void {
+  const spool = join(homedir(), ".openclaw", "state", "multi-clawd", "alerts-spool.jsonl");
+  let raw: string;
+  try {
+    raw = readFileSync(spool, "utf8");
+  } catch {
+    return;
+  }
+  try {
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const alert = JSON.parse(line) as {
+          key?: string;
+          severity?: string;
+          text?: string;
+          at?: number;
+        };
+        if (typeof alert.key === "string" && typeof alert.text === "string") {
+          alertState = addAlert(
+            alertState,
+            {
+              key: alert.key,
+              severity: alert.severity === "error" ? "error" : "info",
+              text: alert.text,
+            },
+            alert.at ?? Date.now(),
+          );
+        }
+      } catch {
+        // one bad line must not block the rest
+      }
+    }
+    rmSync(spool, { force: true });
+  } catch {
+    // spool ingest is best-effort
+  }
+}
+
+const LOGIN_PROBE_INTERVAL_MS = 15 * 60 * 1000;
+const LOGIN_PROBE_INITIAL_DELAY_MS = 45 * 1000;
+
+const realCredentialIo: CredentialIo = {
+  readFile: (p) => readFileSync(expandHome(p), "utf8"),
+  keychainHasClaudeCredentials: () => {
+    try {
+      execFileSync("security", ["find-generic-password", "-s", "Claude Code-credentials"], {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  platform: process.platform,
+};
+
+/**
+ * Periodic login-health probe: credential *sources* are checked (file shape,
+ * keychain presence, credentials.json token) so a dead login raises an
+ * operator alert instead of silently failing every turn behind a
+ * successfully-registered backend. Ref-backed accounts are validated through
+ * the async resolver. No quota is spent.
+ */
+function startLoginHealthProbe(
+  accounts: AccountConfig[],
+  logger: { error: (m: string) => void; info: (m: string) => void },
+): void {
+  if (loginProbeTimer) clearInterval(loginProbeTimer);
+  const lastStatus = new Map<string, string>();
+  const probe = async () => {
+    for (const account of accounts) {
+      let status: string;
+      let reason: string | undefined;
+      if (isSecretRefShape(account.oauthTokenRef) && !account.oauthTokenFile && !account.native) {
+        const token = await activeTokenResolver?.resolve(account.oauthTokenRef);
+        status = token ? "ok" : "broken";
+        reason = token ? undefined : "oauthTokenRef did not resolve to a token";
+      } else {
+        const check = checkAccountCredential(account, realCredentialIo);
+        status = check.status;
+        reason = check.reason;
+      }
+      const previous = lastStatus.get(account.id);
+      lastStatus.set(account.id, status);
+      if (status === "broken" && previous !== "broken") {
+        const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — turns on it will fail until fixed`;
+        logger.error(`[multi-clawd] ${text}`);
+        raiseAlert({ key: `login:${account.id}`, severity: "error", text });
+      } else if (status === "ok" && previous === "broken") {
+        logger.info(`[multi-clawd] account "${account.id}" login recovered`);
+        alertState = clearAlert(alertState, `login:${account.id}`);
+      }
+    }
+  };
+  const initial = setTimeout(() => void probe().catch(() => {}), LOGIN_PROBE_INITIAL_DELAY_MS);
+  initial.unref?.();
+  loginProbeTimer = setInterval(() => void probe().catch(() => {}), LOGIN_PROBE_INTERVAL_MS);
+  loginProbeTimer.unref?.();
+}
+
+/** Sync token access: file reads and warm ref-cache hits only. */
+function peekToken(account: AccountConfig): string | undefined {
   if (account.native) return undefined;
   if (account.oauthTokenFile) {
     return readFileSync(expandHome(account.oauthTokenFile), "utf8").trim();
   }
-  if (account.oauthTokenRef) {
-    // Roadmap v0.3: resolve via a secret-manager reference (e.g. 1Password).
-    throw new Error(
-      `[multi-clawd] oauthTokenRef not yet implemented for account "${account.id}" — use oauthTokenFile`,
-    );
+  if (isSecretRefShape(account.oauthTokenRef)) {
+    return activeTokenResolver?.peek(account.oauthTokenRef);
   }
   if (account.configDir) return undefined;
   throw new Error(
     `[multi-clawd] account "${account.id}" needs oauthTokenFile, oauthTokenRef, or configDir`,
   );
+}
+
+/** Launch-path token access: resolves refs via the gateway's secret providers. */
+async function resolveTokenAsync(account: AccountConfig): Promise<string | undefined> {
+  if (isSecretRefShape(account.oauthTokenRef) && !account.native && !account.oauthTokenFile) {
+    return activeTokenResolver?.resolve(account.oauthTokenRef);
+  }
+  return peekToken(account);
 }
 
 /**
@@ -260,32 +405,18 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
       serialize: true,
     },
     // The crux: point this backend's Claude Code process at its own login.
-    prepareExecution(
+    async prepareExecution(
       _ctx: CliBackendPrepareExecutionContext,
-    ): CliBackendPreparedExecution {
-      return { env: buildAccountEnv(account) };
+    ): Promise<CliBackendPreparedExecution> {
+      return { env: await buildAccountEnv(account) };
     },
   };
 }
 
-/**
- * Child-process env for one account. Token-file accounts authenticate via
- * env; config-dir accounts rely on the file-based login in that
- * CLAUDE_CONFIG_DIR; native accounts set NEITHER — the child falls back to
- * the default config dir, which is the only mode where the OS keychain login
- * is consulted (macOS).
- */
-function buildAccountEnv(account: AccountConfig): Record<string, string> {
-  const env: Record<string, string> = {
-    MULTI_CLAWD_ACCOUNT_ID: account.id,
-    MULTI_CLAWD_STATE_FILE: healthStateFile(account.id),
-  };
-  const token = resolveToken(account);
-  if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
-  if (!account.native && account.configDir) {
-    env.CLAUDE_CONFIG_DIR = expandHome(account.configDir);
-  }
-  return env;
+/** Child env for one account: tested contract lives in account-env.ts. */
+async function buildAccountEnv(account: AccountConfig): Promise<Record<string, string>> {
+  const token = await resolveTokenAsync(account);
+  return buildAccountChildEnv(account, token, healthStateFile(account.id));
 }
 
 /**
@@ -302,7 +433,8 @@ function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
     auth: [],
     resolveSyntheticAuth: () => {
       try {
-        const token = resolveToken(account);
+        // Sync surface: warm ref-cache or file read only — never blocks.
+        const token = peekToken(account);
         if (!token) return undefined;
         return {
           apiKey: token,
@@ -398,12 +530,34 @@ export default definePluginEntry({
         sourceNames[candidates.findIndex(hasAccounts)] ?? "unknown"
       }, accounts: ${accounts.length}`,
     );
+    // oauthTokenRef resolution rides the gateway's own secret providers.
+    // Bound to the live config accessor so provider changes apply on rebuild;
+    // logger captured now because `api` goes inert after register() returns.
+    {
+      const logger = api.logger;
+      const currentConfig = api.runtime?.config?.current;
+      activeTokenResolver = createTokenRefResolver({
+        resolveRefs: (refs) =>
+          resolveSecretRefValues(refs as Parameters<typeof resolveSecretRefValues>[0], {
+            config: (currentConfig ? currentConfig() : api.config) as Parameters<
+              typeof resolveSecretRefValues
+            >[1]["config"],
+          }),
+        // Redacted: fixed reason code + error class only. No token values, no
+        // ref metadata (provider/id can be sensitive), no provider text.
+        redact: true,
+        onError: (_ref, error) => logger.error(`[multi-clawd] ${String(error)}`),
+      });
+    }
     const seen = new Set<string>();
     for (const account of accounts) {
       const id = account?.id?.trim();
       if (!id) {
         api.logger.warn("[multi-clawd] skipping account without id");
         continue;
+      }
+      for (const warning of validateAccountTokenSources(account)) {
+        api.logger.warn(`[multi-clawd] ${warning}`);
       }
       if (id === "claude-cli" || seen.has(id)) {
         api.logger.warn(
@@ -417,6 +571,24 @@ export default definePluginEntry({
       api.registerProvider(buildCatalogProvider(normalized));
     }
     registerPoolBackend(api, cfg.pool, accounts, seen);
+
+    // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
+    {
+      const logger = api.logger;
+      try {
+        api.on("heartbeat_prompt_contribution", () => {
+          ingestAlertSpool();
+          const text = pendingAlertText(alertState, Date.now());
+          return text ? { appendContext: text } : undefined;
+        });
+      } catch (err) {
+        logger.warn(`[multi-clawd] heartbeat alert hook unavailable: ${String(err)}`);
+      }
+      startLoginHealthProbe(
+        accounts.filter((a) => seen.has(a.id.trim())),
+        logger,
+      );
+    }
 
     api.logger.info(
       `[multi-clawd] registered ${seen.size} backend(s)+provider(s): ${[...seen].join(", ")}`,
@@ -432,6 +604,8 @@ interface PoolConfig {
   accounts?: string[];
   utilizationThreshold?: number;
   staleAfterMs?: number;
+  /** Minimum ms to stay on a rotated-to account before returning home. Default 600000. */
+  minDwellMs?: number;
   models?: string[];
   defaultModel?: string;
 }
@@ -443,6 +617,37 @@ function readHealthState(accountId: string): AccountHealthState | undefined {
     ) as AccountHealthState;
   } catch {
     return undefined;
+  }
+}
+
+function readStickyEntry(file: string): StickyEntry | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as StickyEntry;
+    if (typeof parsed?.account === "string" && typeof parsed?.since === "number") {
+      return parsed;
+    }
+  } catch {
+    // absent or corrupt — treated as no sticky
+  }
+  return undefined;
+}
+
+function writeStickyEntry(
+  file: string,
+  entry: StickyEntry | undefined,
+  logger: { warn: (msg: string) => void },
+): void {
+  try {
+    if (!entry) {
+      rmSync(file, { force: true });
+      return;
+    }
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(entry), { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch (err) {
+    logger.warn(`[multi-clawd] sticky state write failed: ${String(err)}`);
   }
 }
 
@@ -504,24 +709,44 @@ function registerPoolBackend(
     models: pool.models,
     defaultModel: pool.defaultModel,
   };
+  const minDwellMs = pool.minDwellMs;
+  const stickyFile = join(
+    homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
+  );
   const backend = buildBackend(poolAccount);
-  backend.prepareExecution = () => {
+  backend.prepareExecution = async () => {
     const now = Date.now();
     const verdicts = members.map((a) => ({
       id: a.id,
       health: classifyAccountHealth(readHealthState(a.id), options, now),
     }));
-    const chosenId = pickPoolAccountForLaunch(
-      verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })),
-    );
-    const chosen = members.find((a) => a.id === chosenId) ?? members[0];
-    if (chosenId !== members[0].id) {
+    const previousSticky = readStickyEntry(stickyFile);
+    const decision = decideStickySelection({
+      verdicts: verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })),
+      sticky: previousSticky,
+      nowMs: now,
+      minDwellMs,
+    });
+    const chosen = members.find((a) => a.id === decision.account) ?? members[0];
+    const previousAccount = previousSticky?.account ?? members[0].id;
+    if (decision.account !== previousAccount) {
       const home = verdicts[0];
-      logger.info(
-        `[multi-clawd] pool ${poolId}: launching on ${chosenId} instead of ${home.id} (${home.health.reason ?? home.health.verdict})`,
-      );
+      const line =
+        decision.account === members[0].id
+          ? `pool ${poolId}: returning home to ${decision.account}`
+          : `pool ${poolId}: rotated to ${decision.account} from ${previousAccount} (${home.health.reason ?? home.health.verdict})`;
+      logger.info(`[multi-clawd] ${line}`);
+      raiseAlert({ key: `rotation:${poolId}`, severity: "info", text: line });
     }
-    return { env: buildAccountEnv(chosen) };
+    if (verdicts.every((v) => v.health.verdict === "exhausted")) {
+      raiseAlert({
+        key: `pool-exhausted:${poolId}`,
+        severity: "error",
+        text: `pool ${poolId}: every account is exhausted — turns are falling through to the next provider in the chain`,
+      });
+    }
+    writeStickyEntry(stickyFile, decision.sticky, logger);
+    return { env: await buildAccountEnv(chosen) };
   };
   api.registerCliBackend(backend);
   api.registerProvider(buildCatalogProvider(poolAccount));

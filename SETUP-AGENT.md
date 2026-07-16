@@ -110,8 +110,19 @@ limit error, return home when the window resets). If yes, merge:
 
 Schema note: if the currently-installed copy of the plugin predates these
 config keys, `openclaw plugins install --force` validates the live config
-against the OLD manifest and refuses. Order matters: strip the new keys
-from openclaw.json → force-install → re-add the keys → restart.
+against the OLD manifest and refuses. Run `node scripts/doctor.mjs
+--preflight` first — it prints the exact keys to strip. Order matters:
+strip the new keys from openclaw.json → force-install → re-add the keys →
+restart.
+
+Token hygiene (v0.3, preferred): instead of `oauthTokenFile`, use
+`"oauthTokenRef": { "source": "exec", "provider": "<your-secret-provider>",
+"id": "op://Vault/Item/field" }` — resolved through the gateway's configured
+secret providers, so no plaintext token sits on disk. Sources are mutually
+exclusive per account.
+
+After any install or upgrade, run `npm run doctor` (add `--probe` to spend
+one turn proving the pool answers). Fix every ❌ before reporting done.
 
 ## 7. Routing — **ASK YOUR HUMAN**
 

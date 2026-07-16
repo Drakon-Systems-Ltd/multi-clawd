@@ -7,15 +7,20 @@ const lines = [
 ];
 process.stdout.write(lines[0] + "\n");
 
+// Tests may override the emitted rate-limit payload to simulate turns that
+// carry a different window type (e.g. seven_day with utilization).
+const rateLimitInfo = process.env.FAKE_CLAUDE_RATE_LIMIT_INFO
+  ? JSON.parse(process.env.FAKE_CLAUDE_RATE_LIMIT_INFO)
+  : {
+      status: "allowed_warning",
+      resetsAt: 1784595600,
+      rateLimitType: "five_hour",
+      utilization: 0.87,
+      isUsingOverage: false,
+    };
 const rateLimitLine = JSON.stringify({
   type: "rate_limit_event",
-  rate_limit_info: {
-    status: "allowed_warning",
-    resetsAt: 1784595600,
-    rateLimitType: "five_hour",
-    utilization: 0.87,
-    isUsingOverage: false,
-  },
+  rate_limit_info: rateLimitInfo,
   uuid: "u1",
   session_id: "s1",
 });

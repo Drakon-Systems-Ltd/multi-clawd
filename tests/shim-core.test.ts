@@ -1,7 +1,9 @@
 import { describe, expect, test } from "vitest";
 import {
   createLineScanner,
+  mergeHealthStates,
   parseRateLimitEvent,
+  parseStoredState,
   updateHealthState,
   type AccountHealthState,
 } from "../src/shim-core";
@@ -107,5 +109,82 @@ describe("updateHealthState", () => {
       1000,
     );
     expect(state.windows.unknown).toMatchObject({ status: "allowed" });
+  });
+});
+
+describe("parseStoredState", () => {
+  test("round-trips a persisted state file", () => {
+    const s: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: 5000,
+      windows: {
+        seven_day: { status: "allowed_warning", utilization: 0.9, resetsAt: 99, seenAt: 4000 },
+      },
+    };
+    expect(parseStoredState(JSON.stringify(s))).toEqual(s);
+  });
+
+  test("returns undefined for garbage or shapeless JSON", () => {
+    expect(parseStoredState("{not json")).toBeUndefined();
+    expect(parseStoredState("null")).toBeUndefined();
+    expect(parseStoredState('{"accountId":"x"}')).toBeUndefined();
+  });
+
+  test("drops malformed windows but keeps good ones", () => {
+    const parsed = parseStoredState(
+      JSON.stringify({
+        accountId: "claw1",
+        windows: {
+          five_hour: { status: "allowed", seenAt: 1000 },
+          bad: { status: "allowed" }, // no seenAt
+          worse: "nope",
+        },
+      }),
+    );
+    expect(parsed?.windows).toEqual({ five_hour: { status: "allowed", seenAt: 1000, resetsAt: undefined, utilization: undefined, isUsingOverage: undefined } });
+  });
+});
+
+describe("mergeHealthStates", () => {
+  const disk: AccountHealthState = {
+    accountId: "claw1",
+    updatedAt: 4000,
+    windows: {
+      seven_day: { status: "allowed_warning", utilization: 0.9, seenAt: 4000 },
+      five_hour: { status: "allowed", utilization: 0.2, seenAt: 3000 },
+    },
+  };
+
+  test("preserves disk windows absent from the live state (the Friday bug)", () => {
+    const live: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: 6000,
+      windows: { five_hour: { status: "allowed", seenAt: 6000 } },
+    };
+    const merged = mergeHealthStates(disk, live);
+    expect(merged.windows.seven_day).toMatchObject({ utilization: 0.9, seenAt: 4000 });
+    expect(merged.windows.five_hour).toMatchObject({ seenAt: 6000 });
+    expect(merged.updatedAt).toBe(6000);
+  });
+
+  test("newer seenAt wins per window, regardless of side", () => {
+    const live: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: 3500,
+      windows: { seven_day: { status: "allowed", utilization: 0.5, seenAt: 3500 } },
+    };
+    const merged = mergeHealthStates(disk, live);
+    // disk's seven_day (seenAt 4000) beats live's older observation (3500)
+    expect(merged.windows.seven_day).toMatchObject({ utilization: 0.9, seenAt: 4000 });
+    expect(merged.updatedAt).toBe(4000);
+  });
+
+  test("live accountId wins; empty updatedAt stays undefined", () => {
+    const merged = mergeHealthStates(
+      { accountId: "old", windows: {} },
+      { accountId: "claw2", windows: {} },
+    );
+    expect(merged.accountId).toBe("claw2");
+    expect(merged.updatedAt).toBeUndefined();
   });
 });

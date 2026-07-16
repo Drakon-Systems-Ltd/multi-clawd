@@ -81,6 +81,64 @@ export function parseRateLimitEvent(line: string): RateLimitEvent | undefined {
   };
 }
 
+/**
+ * Tolerantly parse a persisted state file's contents. Undefined when the
+ * JSON is unusable; individually malformed windows are dropped, not fatal.
+ */
+export function parseStoredState(raw: string): AccountHealthState | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const p = parsed as { accountId?: unknown; updatedAt?: unknown; windows?: unknown };
+  if (typeof p.windows !== "object" || p.windows === null) return undefined;
+  const windows: Record<string, WindowHealth> = {};
+  for (const [key, value] of Object.entries(p.windows as Record<string, unknown>)) {
+    if (typeof value !== "object" || value === null) continue;
+    const w = value as Record<string, unknown>;
+    if (typeof w.status !== "string" || typeof w.seenAt !== "number") continue;
+    windows[key] = {
+      status: w.status,
+      resetsAt: typeof w.resetsAt === "number" ? w.resetsAt : undefined,
+      utilization: typeof w.utilization === "number" ? w.utilization : undefined,
+      isUsingOverage: typeof w.isUsingOverage === "boolean" ? w.isUsingOverage : undefined,
+      seenAt: w.seenAt,
+    };
+  }
+  return {
+    accountId: typeof p.accountId === "string" ? p.accountId : "unknown",
+    updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
+    windows,
+  };
+}
+
+/**
+ * Merge a previously persisted state (`disk`) with this invocation's state
+ * (`live`): per window, the newer `seenAt` wins, so a five_hour-only turn can
+ * no longer erase the last seven_day observation. `accountId` follows the
+ * live process; staleness/expiry is deliberately NOT applied here — the
+ * reader (health classification) ages each window by its own `seenAt`.
+ */
+export function mergeHealthStates(
+  disk: AccountHealthState,
+  live: AccountHealthState,
+): AccountHealthState {
+  const windows: Record<string, WindowHealth> = { ...disk.windows };
+  for (const [key, w] of Object.entries(live.windows)) {
+    const existing = windows[key];
+    if (!existing || w.seenAt >= existing.seenAt) windows[key] = w;
+  }
+  const updatedAt = Math.max(disk.updatedAt ?? 0, live.updatedAt ?? 0);
+  return {
+    accountId: live.accountId,
+    updatedAt: updatedAt > 0 ? updatedAt : undefined,
+    windows,
+  };
+}
+
 /** Fold one event into the account's health state (windows keyed by type). */
 export function updateHealthState(
   state: AccountHealthState,

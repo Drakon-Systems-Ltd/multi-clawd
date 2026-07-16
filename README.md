@@ -10,7 +10,7 @@ Pool every Claude Max account you own into a single failover chain —
 same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
-[![version](https://img.shields.io/badge/version-0.2.0-4c9aff)](package.json)
+[![version](https://img.shields.io/badge/version-0.3.0-4c9aff)](package.json)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -67,16 +67,35 @@ claude-cli/claude-fable-5        # main login
   Claude login (default config dir / OS keychain) without duplicating its
   credentials.
 - 🔐 **Token hygiene** — setup-tokens are read at launch and passed only via
-  the child process env. Never committed, never logged.
+  the child process env. Never committed, never logged. **v0.3:**
+  `oauthTokenRef` resolves tokens through the gateway's own secret providers
+  (1Password etc.) — same `{source, provider, id}` shape as the rest of
+  openclaw.json, no plaintext files, fixed-reason-code redaction on failure.
+- 🧲 **Sticky rotation (v0.3)** — after handing over, the pool dwells on the
+  spare account (default 10 min) before returning home, so turns never flap
+  across the threshold. Health always overrides stickiness.
+- 📟 **Operator alerts (v0.3)** — dead logins (probed every 15 min without
+  spending quota), pool rotations, whole-pool exhaustion, and watchdog
+  restarts surface through your agent's next heartbeat (e.g. straight into
+  Telegram) — not just journal lines.
+- 🩺 **`npm run doctor` (v0.3)** — one command that says whether a box is
+  actually ready: config/manifest agreement (with the exact `--force`
+  preflight strip plan), dist freshness, CLI presence, credential health
+  (values never printed), telemetry age, pool + sticky state, watchdog
+  presence, optional `--probe` end-to-end turn.
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime
   config if the loader hands it an empty block, so a flaky registration pass
   can't silently no-op the plugin.
 - 🔎 **Observable registration** — every `register()` pass logs which config
   source won and which backends it registered, so a silent no-op can't hide
   in a long-running gateway.
-- 🐶 **Eviction watchdog** — `scripts/eviction-watchdog.mjs` mitigates
-  upstream openclaw#107408 (idle plugin backends silently dropped) by
-  restarting the gateway when the `Unknown CLI backend` signature appears.
+- 🐶 **Turn-safe eviction watchdog** — `scripts/eviction-watchdog.mjs`
+  mitigates upstream openclaw#107408 (idle plugin backends silently dropped)
+  by restarting the gateway when the `Unknown CLI backend` signature
+  appears. **v0.3:** it defers while any turn is in flight (transcript
+  activity across all agents + opt-in worker pidfiles), with a 15-min defer
+  cap and 10-min restart cooldown — a restart can no longer eat a live
+  reply.
 
 ## Platform support
 
@@ -210,12 +229,16 @@ error.
   "accounts": [
     { "id": "claw1", "label": "Main Claude", "native": true },
     { "id": "claw2", "label": "Second Max", "configDir": "~/.claw2",
-      "oauthTokenFile": "~/.claw2/oauth-token" }
+      // v0.3 preferred: resolve via your gateway's secret providers —
+      // no plaintext token file on disk
+      "oauthTokenRef": { "source": "exec", "provider": "onepassword",
+                         "id": "op://YourVault/claw2-setup-token/password" } }
   ],
   "pool": {
     "id": "clawd",
     "accounts": ["claw1", "claw2"],   // preference order; first = home
-    "utilizationThreshold": 0.85      // hand over at 85% of any window
+    "utilizationThreshold": 0.85,     // hand over at 85% of any window
+    "minDwellMs": 600000              // v0.3: anti-flap dwell before returning home
   }
 } } } },
 "agents": { "defaults": {
@@ -321,9 +344,16 @@ Early but real — built for and dogfooded on our own fleet.
   `rate_limit_event` health; native (keychain) accounts; future-proof model
   resolution (mirrored catalog + permissive `claude-*` pass-through);
   eviction watchdog; vitest suite ✅
-- **v0.3** — `oauthTokenRef` secret-manager resolvers (1Password), guided
-  setup helper, per-session sticky pool selection, native-Windows
-  verification
+- **v0.3** — hardening from fleet feedback: `oauthTokenRef` via gateway
+  secret providers with strict redaction; sticky rotation with anti-flap
+  dwell; login-health probes + heartbeat operator alerts; turn-safe
+  watchdog (lane-guard); `doctor` + `--preflight`; build-on-install; shim
+  window persistence ✅
+- **v0.3.5** — tier-aware degradation (all accounts hot → step down a tier
+  on the same account) + per-task "never rotate/degrade" pinning
+- **v0.4** — standalone localhost proxy (OpenAI-compatible) so Hermes and
+  custom runtimes can share the pool; true per-session affinity; local
+  five-hour-window signal (turn counting)
 - **v1.0** — npm + ClawHub parity releases
 
 See [`DESIGN.md`](./DESIGN.md) for the architecture, the three obvious
