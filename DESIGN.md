@@ -225,6 +225,88 @@ active*, not a removal — recovery is a full-scope rebuild (gateway restart
 re-runs `register()`). Hence `scripts/eviction-watchdog.mjs` (log-signature →
 restart, once per event) until upstream PR openclaw#107596 lands.
 
+## v0.3: hardening (fleet-feedback release)
+
+Built from the 15-Jul fleet feedback round (Jarvis, Case, Edith, Athena,
+Vision). Everything below is unit-tested; base includes 7089c88 (shim
+window-persistence fix — a five_hour-only turn no longer erases the last
+seven_day utilization; windows merge and expire individually, 24h default).
+
+### oauthTokenRef — no plaintext tokens
+
+`accounts[].oauthTokenRef` takes the same `{source, provider, id}` shape as
+every other secret in openclaw.json and resolves through the gateway's own
+configured secret providers (`resolveSecretRefValues` from the plugin SDK).
+Launch path resolves async with an in-memory TTL cache (5 min — provider
+rotation is picked up on expiry); sync surfaces (resolveSyntheticAuth) peek
+the warm cache. Failures degrade only that account, are never thrown, never
+cached, and are logged with a fixed reason code
+(`credential_resolution_failed (ErrorClass)`) — no token values, no ref
+metadata, no provider text (Case's three leak classes, all tested). Token
+sources are mutually exclusive per account; violations warn loudly with
+deterministic precedence (native > file > ref).
+
+### Sticky pool selection
+
+Once the pool rotates away from home, it stays on the rotated-to account for
+`pool.minDwellMs` (default 10 min) before returning home — so turns don't
+flap across the utilization threshold and mid-conversation session loss
+happens at most once per rotation event. HEALTH BEATS STICKINESS: dwell only
+delays the benign direction (returning home); a sticky account that degrades
+is abandoned immediately. Sticky state persists at
+`state/multi-clawd/pool-<id>.sticky.json` and survives gateway restarts.
+
+### Operator alerts + login-health probes
+
+- Alerts ride the agent's own heartbeat (`heartbeat_prompt_contribution`
+  hook, prompt-injection class — not conversation-gated), so they reach the
+  operator via the normal channel (e.g. Telegram) instead of dying as
+  journal lines. Errors persist 6h, info 30min, deduped by key.
+- A 15-min login-health probe checks each account's credential *source*
+  (file shape / macOS keychain presence / credentials.json access token /
+  ref resolution) without spending quota, and raises an alert on the
+  ok→broken transition — registration success no longer masks dead logins
+  (the aiquant silent-login-death class).
+- Pool rotations, return-home events, and whole-pool exhaustion raise alerts
+  too; the out-of-process watchdog appends to
+  `state/multi-clawd/alerts-spool.jsonl`, ingested at each heartbeat.
+
+### Turn-safe eviction watchdog (Jarvis's lane-guard pattern)
+
+`scripts/eviction-watchdog.mjs` now defers restarts while work is in flight,
+detected two ways: any agent session transcript written within 180s (all
+agents, not just main), or a live pid in the opt-in
+`$MULTI_CLAWD_WORKER_PID_DIR` (catches long tool calls whose transcripts go
+quiet). Pending evictions persist in `watchdog.json` (survive log rotation);
+MAX_DEFER 15 min forces the restart anyway — the backends are already
+broken, endless deferral protects nothing; RESTART_COOLDOWN 10 min sits on
+top of once-per-eviction dedupe; missing evidence never restarts; every
+restart is operator-notified via the alert spool. Decision core is pure and
+tested (`src/watchdog-core.ts`).
+
+### Doctor + installer sanity
+
+- `npm run doctor` (`scripts/doctor.mjs`): one command that says whether a
+  box is actually ready — manifest/config key agreement (prints the exact
+  strip plan for the --force trap; `--preflight`), dist freshness, claude
+  CLI presence, per-account credential health (values never printed),
+  telemetry state ages, pool membership + sticky, watchdog presence, and an
+  optional `--probe` end-to-end turn.
+- `npm install` now triggers `prepare` → build, killing the
+  stale-gitignored-dist failure class after every pull.
+
+### Known v0.3 limitations (on the record)
+
+- Same-account **concurrent** shim writes are not synchronized: the
+  window-persistence fix is read-merge-atomic-rename, which closes the
+  sequential-overwrite defect but is not concurrency coverage (Case).
+- Five-hour windows never carry a utilization number (fleet-wide
+  observation), so proactive rotation can only fire on weekly windows; a
+  locally-derived 5h signal (per-account turn counting) is v0.4 design work.
+- Sticky selection is per-pool, not per-session — OpenClaw's
+  `prepareExecution` context has no session id. True session affinity is
+  part of the v0.4 standalone-proxy track (Hermes runtimes).
+
 ## Config (user-facing)
 
 ```jsonc

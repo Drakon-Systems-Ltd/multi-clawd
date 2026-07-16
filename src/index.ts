@@ -64,6 +64,7 @@ import {
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { addAlert, clearAlert, pendingAlertText, type AlertState } from "./alerts.js";
+import { buildAccountChildEnv, validateAccountTokenSources } from "./account-env.js";
 import { checkAccountCredential, type CredentialIo } from "./login-health.js";
 import { execFileSync } from "node:child_process";
 
@@ -164,6 +165,49 @@ let loginProbeTimer: ReturnType<typeof setInterval> | undefined;
 
 function raiseAlert(alert: Parameters<typeof addAlert>[1]): void {
   alertState = addAlert(alertState, alert, Date.now());
+}
+
+/**
+ * Out-of-process components (the eviction watchdog) can't reach alertState,
+ * so they append alerts to a spool file; each heartbeat ingests and clears it.
+ */
+function ingestAlertSpool(): void {
+  const spool = join(homedir(), ".openclaw", "state", "multi-clawd", "alerts-spool.jsonl");
+  let raw: string;
+  try {
+    raw = readFileSync(spool, "utf8");
+  } catch {
+    return;
+  }
+  try {
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const alert = JSON.parse(line) as {
+          key?: string;
+          severity?: string;
+          text?: string;
+          at?: number;
+        };
+        if (typeof alert.key === "string" && typeof alert.text === "string") {
+          alertState = addAlert(
+            alertState,
+            {
+              key: alert.key,
+              severity: alert.severity === "error" ? "error" : "info",
+              text: alert.text,
+            },
+            alert.at ?? Date.now(),
+          );
+        }
+      } catch {
+        // one bad line must not block the rest
+      }
+    }
+    rmSync(spool, { force: true });
+  } catch {
+    // spool ingest is best-effort
+  }
 }
 
 const LOGIN_PROBE_INTERVAL_MS = 15 * 60 * 1000;
@@ -369,24 +413,10 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
   };
 }
 
-/**
- * Child-process env for one account. Token-file/ref accounts authenticate via
- * env; config-dir accounts rely on the file-based login in that
- * CLAUDE_CONFIG_DIR; native accounts set NEITHER — the child falls back to
- * the default config dir, which is the only mode where the OS keychain login
- * is consulted (macOS).
- */
+/** Child env for one account: tested contract lives in account-env.ts. */
 async function buildAccountEnv(account: AccountConfig): Promise<Record<string, string>> {
-  const env: Record<string, string> = {
-    MULTI_CLAWD_ACCOUNT_ID: account.id,
-    MULTI_CLAWD_STATE_FILE: healthStateFile(account.id),
-  };
   const token = await resolveTokenAsync(account);
-  if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
-  if (!account.native && account.configDir) {
-    env.CLAUDE_CONFIG_DIR = expandHome(account.configDir);
-  }
-  return env;
+  return buildAccountChildEnv(account, token, healthStateFile(account.id));
 }
 
 /**
@@ -513,10 +543,10 @@ export default definePluginEntry({
               typeof resolveSecretRefValues
             >[1]["config"],
           }),
-        onError: (ref, error) =>
-          logger.error(
-            `[multi-clawd] oauthTokenRef resolution failed for ${ref.provider}:${ref.id.split("/").slice(0, 2).join("/")}…: ${String(error)}`,
-          ),
+        // Redacted: fixed reason code + error class only. No token values, no
+        // ref metadata (provider/id can be sensitive), no provider text.
+        redact: true,
+        onError: (_ref, error) => logger.error(`[multi-clawd] ${String(error)}`),
       });
     }
     const seen = new Set<string>();
@@ -525,6 +555,9 @@ export default definePluginEntry({
       if (!id) {
         api.logger.warn("[multi-clawd] skipping account without id");
         continue;
+      }
+      for (const warning of validateAccountTokenSources(account)) {
+        api.logger.warn(`[multi-clawd] ${warning}`);
       }
       if (id === "claude-cli" || seen.has(id)) {
         api.logger.warn(
@@ -544,6 +577,7 @@ export default definePluginEntry({
       const logger = api.logger;
       try {
         api.on("heartbeat_prompt_contribution", () => {
+          ingestAlertSpool();
           const text = pendingAlertText(alertState, Date.now());
           return text ? { appendContext: text } : undefined;
         });

@@ -121,12 +121,16 @@ if (args.has("--preflight")) {
 
 // ── 2. dist freshness ───────────────────────────────────────────────────────
 console.log("build artifacts");
+// Tolerance matters: `openclaw plugins install` copies dist/ before src/ with
+// fresh mtimes, so the installed copy's src is always seconds "newer". A
+// genuinely stale dist (pulled src, forgot to build) lags by minutes-to-days.
+const STALE_TOLERANCE_MS = 120_000;
 for (const [label, dir] of [["installed", EXT_DIR], ["checkout", REPO_DIR]]) {
   const src = newestMtime(join(dir, "src"), [".ts"]);
   const dist = newestMtime(join(dir, "dist"), [".js"]);
   if (src.newest === 0) continue;
   if (dist.newest === 0) bad(`${label}: no dist/ — run npm run build`);
-  else if (src.newest > dist.newest)
+  else if (src.newest > dist.newest + STALE_TOLERANCE_MS)
     bad(`${label}: dist is STALE (src ${src.newestFile} newer than dist) — run npm run build`);
   else ok(`${label}: dist fresh`);
 }

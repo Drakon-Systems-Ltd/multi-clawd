@@ -89,4 +89,13 @@ describe("createTokenRefResolver", () => {
     const { resolver } = makeResolver({ value: "  sk-ant-oat01-x \n" });
     expect(await resolver.resolve(REF, 0)).toBe("sk-ant-oat01-x");
   });
+
+  test("accepts OpenClaw's composite result key (source:provider:id)", async () => {
+    const resolver = createTokenRefResolver({
+      resolveRefs: async (refs) =>
+        new Map(refs.map((r) => [`${r.source}:${r.provider}:${r.id}`, "sk-ant-oat01-composite"])),
+      ttlMs: 1000,
+    });
+    expect(await resolver.resolve(REF, 0)).toBe("sk-ant-oat01-composite");
+  });
 });
