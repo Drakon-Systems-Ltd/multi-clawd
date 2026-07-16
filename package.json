@@ -45,7 +45,9 @@
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "npm run build",
+    "doctor": "node scripts/doctor.mjs"
   },
   "dependencies": {
     "openclaw": "2026.7.1"

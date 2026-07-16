@@ -40,6 +40,10 @@
             "type": "number",
             "description": "Ignore health data older than this. Default 21600000 (6h)."
           },
+          "minDwellMs": {
+            "type": "number",
+            "description": "After rotating away from home, stay on the rotated-to account at least this long before returning home (anti-flap hysteresis; health always overrides). Default 600000 (10min)."
+          },
           "models": {
             "type": "array",
             "items": { "type": "string" },
@@ -81,8 +85,13 @@
             },
             "oauthTokenRef": {
               "type": "object",
-              "description": "Secret reference (e.g. 1Password) resolving to this account's Claude Code setup-token. Preferred over oauthTokenFile.",
-              "additionalProperties": true
+              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers — same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
+              "additionalProperties": true,
+              "properties": {
+                "source": { "type": "string", "description": "Secret source kind: env | file | exec." },
+                "provider": { "type": "string", "description": "Configured secret provider name, e.g. \"onepassword\"." },
+                "id": { "type": "string", "description": "Provider-scoped secret id, e.g. an op:// reference." }
+              }
             },
             "models": {
               "type": "array",

@@ -63,6 +63,9 @@ import {
   type TokenRefResolver,
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
+import { addAlert, clearAlert, pendingAlertText, type AlertState } from "./alerts.js";
+import { checkAccountCredential, type CredentialIo } from "./login-health.js";
+import { execFileSync } from "node:child_process";
 
 interface AccountConfig {
   id: string;
@@ -148,6 +151,82 @@ function expandHome(p: string): string {
  * (resolveSyntheticAuth) peek the warm cache instead of blocking.
  */
 let activeTokenResolver: TokenRefResolver | undefined;
+
+/**
+ * Operator-alert state, surfaced via the heartbeat_prompt_contribution hook:
+ * the agent's next heartbeat carries pending alerts, so they reach the
+ * operator through the normal channel (e.g. Telegram) instead of dying as
+ * journal lines. Module-level on purpose — registry rebuilds re-run
+ * register(), and alerts must survive them.
+ */
+let alertState: AlertState = { alerts: [] };
+let loginProbeTimer: ReturnType<typeof setInterval> | undefined;
+
+function raiseAlert(alert: Parameters<typeof addAlert>[1]): void {
+  alertState = addAlert(alertState, alert, Date.now());
+}
+
+const LOGIN_PROBE_INTERVAL_MS = 15 * 60 * 1000;
+const LOGIN_PROBE_INITIAL_DELAY_MS = 45 * 1000;
+
+const realCredentialIo: CredentialIo = {
+  readFile: (p) => readFileSync(expandHome(p), "utf8"),
+  keychainHasClaudeCredentials: () => {
+    try {
+      execFileSync("security", ["find-generic-password", "-s", "Claude Code-credentials"], {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  platform: process.platform,
+};
+
+/**
+ * Periodic login-health probe: credential *sources* are checked (file shape,
+ * keychain presence, credentials.json token) so a dead login raises an
+ * operator alert instead of silently failing every turn behind a
+ * successfully-registered backend. Ref-backed accounts are validated through
+ * the async resolver. No quota is spent.
+ */
+function startLoginHealthProbe(
+  accounts: AccountConfig[],
+  logger: { error: (m: string) => void; info: (m: string) => void },
+): void {
+  if (loginProbeTimer) clearInterval(loginProbeTimer);
+  const lastStatus = new Map<string, string>();
+  const probe = async () => {
+    for (const account of accounts) {
+      let status: string;
+      let reason: string | undefined;
+      if (isSecretRefShape(account.oauthTokenRef) && !account.oauthTokenFile && !account.native) {
+        const token = await activeTokenResolver?.resolve(account.oauthTokenRef);
+        status = token ? "ok" : "broken";
+        reason = token ? undefined : "oauthTokenRef did not resolve to a token";
+      } else {
+        const check = checkAccountCredential(account, realCredentialIo);
+        status = check.status;
+        reason = check.reason;
+      }
+      const previous = lastStatus.get(account.id);
+      lastStatus.set(account.id, status);
+      if (status === "broken" && previous !== "broken") {
+        const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — turns on it will fail until fixed`;
+        logger.error(`[multi-clawd] ${text}`);
+        raiseAlert({ key: `login:${account.id}`, severity: "error", text });
+      } else if (status === "ok" && previous === "broken") {
+        logger.info(`[multi-clawd] account "${account.id}" login recovered`);
+        alertState = clearAlert(alertState, `login:${account.id}`);
+      }
+    }
+  };
+  const initial = setTimeout(() => void probe().catch(() => {}), LOGIN_PROBE_INITIAL_DELAY_MS);
+  initial.unref?.();
+  loginProbeTimer = setInterval(() => void probe().catch(() => {}), LOGIN_PROBE_INTERVAL_MS);
+  loginProbeTimer.unref?.();
+}
 
 /** Sync token access: file reads and warm ref-cache hits only. */
 function peekToken(account: AccountConfig): string | undefined {
@@ -460,6 +539,23 @@ export default definePluginEntry({
     }
     registerPoolBackend(api, cfg.pool, accounts, seen);
 
+    // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
+    {
+      const logger = api.logger;
+      try {
+        api.on("heartbeat_prompt_contribution", () => {
+          const text = pendingAlertText(alertState, Date.now());
+          return text ? { appendContext: text } : undefined;
+        });
+      } catch (err) {
+        logger.warn(`[multi-clawd] heartbeat alert hook unavailable: ${String(err)}`);
+      }
+      startLoginHealthProbe(
+        accounts.filter((a) => seen.has(a.id.trim())),
+        logger,
+      );
+    }
+
     api.logger.info(
       `[multi-clawd] registered ${seen.size} backend(s)+provider(s): ${[...seen].join(", ")}`,
     );
@@ -601,11 +697,19 @@ function registerPoolBackend(
     const previousAccount = previousSticky?.account ?? members[0].id;
     if (decision.account !== previousAccount) {
       const home = verdicts[0];
-      logger.info(
+      const line =
         decision.account === members[0].id
-          ? `[multi-clawd] pool ${poolId}: returning home to ${decision.account}`
-          : `[multi-clawd] pool ${poolId}: launching on ${decision.account} instead of ${previousAccount} (${home.health.reason ?? home.health.verdict})`,
-      );
+          ? `pool ${poolId}: returning home to ${decision.account}`
+          : `pool ${poolId}: rotated to ${decision.account} from ${previousAccount} (${home.health.reason ?? home.health.verdict})`;
+      logger.info(`[multi-clawd] ${line}`);
+      raiseAlert({ key: `rotation:${poolId}`, severity: "info", text: line });
+    }
+    if (verdicts.every((v) => v.health.verdict === "exhausted")) {
+      raiseAlert({
+        key: `pool-exhausted:${poolId}`,
+        severity: "error",
+        text: `pool ${poolId}: every account is exhausted — turns are falling through to the next provider in the chain`,
+      });
     }
     writeStickyEntry(stickyFile, decision.sticky, logger);
     return { env: await buildAccountEnv(chosen) };
