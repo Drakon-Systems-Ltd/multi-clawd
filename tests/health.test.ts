@@ -143,3 +143,39 @@ describe("pickPoolAccountForLaunch", () => {
     ).toBe("claw1");
   });
 });
+
+describe("per-window aging (post window-merge persistence)", () => {
+  test("a stale individual window is ignored while fresh ones count", () => {
+    // seven_day observed 7h ago (stale) with high utilization; five_hour fresh
+    // and low. Must NOT be near_limit — stale windows are not evidence.
+    const s = state({
+      seven_day: { status: "allowed_warning", utilization: 0.9, seenAt: NOW - 3_600_000 * 7 },
+      five_hour: { status: "allowed", utilization: 0.1, seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("a stale rejected window cannot mark the account exhausted", () => {
+    const s = state({
+      seven_day: { status: "rejected", resetsAt: NOW_S + 3600, seenAt: NOW - 3_600_000 * 7 },
+      five_hour: { status: "allowed", seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("high utilization whose reset has passed no longer binds", () => {
+    // The 0.9 belonged to the previous weekly cycle: reset passed 60s ago.
+    const s = state({
+      seven_day: { status: "allowed_warning", utilization: 0.9, resetsAt: NOW_S - 60, seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("fresh high utilization with a future reset still rotates", () => {
+    const s = state({
+      seven_day: { status: "allowed_warning", utilization: 0.9, resetsAt: NOW_S + 86400, seenAt: NOW - 1000 },
+      five_hour: { status: "allowed", seenAt: NOW - 500 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("near_limit");
+  });
+});

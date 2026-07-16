@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,17 +8,25 @@ const ROOT = join(__dirname, "..");
 const SHIM = join(ROOT, "dist", "shim.js");
 const FAKE = join(__dirname, "fixtures", "fake-claude.mjs");
 
-function runShim(opts: { exit?: string; stateFile: string }) {
+function runShim(opts: {
+  exit?: string;
+  stateFile: string;
+  rateLimitInfo?: Record<string, unknown>;
+}) {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
+    MULTI_CLAWD_STATE_FILE: opts.stateFile,
+    MULTI_CLAWD_ACCOUNT_ID: "claw2",
+    FAKE_CLAUDE_EXIT: opts.exit ?? "0",
+  };
+  if (opts.rateLimitInfo) {
+    env.FAKE_CLAUDE_RATE_LIMIT_INFO = JSON.stringify(opts.rateLimitInfo);
+  }
   return spawnSync(process.execPath, [SHIM, "-p", "--output-format", "stream-json"], {
     input: "the prompt\n",
     encoding: "utf8",
-    env: {
-      ...process.env,
-      MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
-      MULTI_CLAWD_STATE_FILE: opts.stateFile,
-      MULTI_CLAWD_ACCOUNT_ID: "claw2",
-      FAKE_CLAUDE_EXIT: opts.exit ?? "0",
-    },
+    env,
   });
 }
 
@@ -67,6 +75,57 @@ describe("shim health capture", () => {
       resetsAt: 1784595600,
     });
     expect(typeof state.updatedAt).toBe("number");
+  });
+
+  test("windows persist across invocations: a five_hour-only turn keeps seven_day", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw2.json");
+    // First invocation: only a seven_day event with high utilization.
+    runShim({
+      stateFile,
+      rateLimitInfo: {
+        status: "allowed_warning",
+        resetsAt: 1785000000,
+        rateLimitType: "seven_day",
+        utilization: 0.9,
+        isUsingOverage: false,
+      },
+    });
+    // Second invocation: only the default five_hour event.
+    runShim({ stateFile });
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    // Regression for the wholesale-replace bug: seven_day must survive.
+    expect(state.windows.seven_day).toMatchObject({ utilization: 0.9, resetsAt: 1785000000 });
+    expect(state.windows.five_hour).toMatchObject({ utilization: 0.87 });
+    expect(state.windows.five_hour.seenAt).toBeGreaterThanOrEqual(state.windows.seven_day.seenAt);
+  });
+
+  test("newer observation of the same window wins across invocations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw2.json");
+    runShim({
+      stateFile,
+      rateLimitInfo: { status: "allowed", rateLimitType: "seven_day", utilization: 0.5 },
+    });
+    runShim({
+      stateFile,
+      rateLimitInfo: { status: "allowed_warning", rateLimitType: "seven_day", utilization: 0.86 },
+    });
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows.seven_day).toMatchObject({
+      status: "allowed_warning",
+      utilization: 0.86,
+    });
+  });
+
+  test("a corrupt existing state file is replaced, not fatal", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw2.json");
+    writeFileSync(stateFile, "{not json");
+    const res = runShim({ stateFile });
+    expect(res.status).toBe(0);
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows.five_hour).toMatchObject({ utilization: 0.87 });
   });
 
   test("still exits cleanly when the state file is unwritable", () => {

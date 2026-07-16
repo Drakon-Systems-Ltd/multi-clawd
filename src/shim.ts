@@ -16,11 +16,13 @@
  *   never fatal.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   createLineScanner,
+  mergeHealthStates,
   parseRateLimitEvent,
+  parseStoredState,
   updateHealthState,
   type AccountHealthState,
 } from "./shim-core.js";
@@ -46,9 +48,26 @@ const accountId = process.env.MULTI_CLAWD_ACCOUNT_ID ?? "unknown";
 
 let state: AccountHealthState = { accountId, windows: {} };
 
+function readPersistedState(): AccountHealthState | undefined {
+  if (!stateFile) return undefined;
+  try {
+    return parseStoredState(readFileSync(stateFile, "utf8"));
+  } catch {
+    return undefined; // missing or unreadable file — start fresh
+  }
+}
+
 function persistState(): void {
   if (!stateFile) return;
   try {
+    // Read-merge-write on every persist: windows observed by earlier
+    // invocations (or a concurrent shim on the same account) must survive a
+    // turn that only emits a different window type — otherwise a
+    // five_hour-only response erases the last seven_day utilization and a
+    // near-limit crossing becomes invisible. Per-window `seenAt` decides
+    // which side wins; expiring old windows is the reader's job (health.ts).
+    const disk = readPersistedState();
+    if (disk) state = mergeHealthStates(disk, state);
     mkdirSync(dirname(stateFile), { recursive: true });
     const tmp = `${stateFile}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
