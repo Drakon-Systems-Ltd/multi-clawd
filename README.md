@@ -146,6 +146,16 @@ never print tokens, ask before touching routing).
 **Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
 second Claude subscription you own.
 
+**Upgrading an existing install (git pull):**
+
+```bash
+cd multi-clawd && git pull && npm install && npm run build && npm run doctor
+```
+
+Run `npm run build` explicitly — don't rely on the `prepare` hook to
+refresh `dist/` on the pull-upgrade path (observed stale on a live fleet
+rollout; `doctor` flags it as STALE if you forget).
+
 ## Set up a second account
 
 1. Give the account an isolated config dir and capture its Claude Code
@@ -338,9 +348,13 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
 - Tokens are never committed and never logged; `.gitignore` blocks token
   and account directories by default.
-- Prefer a secret reference (`oauthTokenRef`, roadmap v0.3) over a plaintext
+- Prefer a secret reference (`oauthTokenRef`, v0.3) over a plaintext
   file; when a file is used, keep it `0600` (POSIX) or locked to your user
   with `icacls` (Windows).
+- Migrating a token file into a vault? `op read` (and most secret CLIs)
+  append a trailing newline on output — resolution trims the resolved
+  value (guaranteed in `token-resolution.ts`), so a file-vs-vault diff
+  showing only a trailing-newline mismatch is a false alarm.
 - Use only accounts you own, within your provider's terms of service.
 
 ## Status & roadmap

@@ -371,4 +371,13 @@ Then reference `claw2/claude-fable-5` in the fallback chain.
 - v0.2 — N accounts, round-robin/priority ordering, per-account cooldown surfacing.
 - v0.3 — `oauthTokenRef` secret-manager resolvers (1Password), setup helper
   (`claude setup-token` capture into an isolated dir).
-- v1.0 — docs, tests, publish to npm + ClawHub.
+- v1.0 — npm + ClawHub parity release (publishes as a ClawHub PLUGIN, not
+  a skill). Trigger: after the aiquant rollout closes out. Release gates:
+  - `npm pack --dry-run` contents check: `scripts/doctor.mjs` and
+    `scripts/eviction-watchdog.mjs` must ship in the tarball (files list
+    fixed 16 Jul 2026; verify anyway before the tag).
+  - `clawhub package publish --dry-run` clean before the tag.
+  - npm ↔ ClawHub same-day parity: whoever triggers the manual npm publish,
+    the ClawHub publish lands the same day (Jarvis holds the ClawHub side).
+  - Rollout docs must state the upgrade sequence pull → npm install →
+    npm run build → doctor (prepare hook not trusted on the pull path).

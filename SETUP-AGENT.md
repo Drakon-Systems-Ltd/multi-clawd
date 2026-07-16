@@ -119,10 +119,15 @@ Token hygiene (v0.3, preferred): instead of `oauthTokenFile`, use
 `"oauthTokenRef": { "source": "exec", "provider": "<your-secret-provider>",
 "id": "op://Vault/Item/field" }` — resolved through the gateway's configured
 secret providers, so no plaintext token sits on disk. Sources are mutually
-exclusive per account.
+exclusive per account. When migrating an existing token file into a vault, don't panic if the
+vault copy diffs from the file by a trailing newline — `op read` appends
+one on output; resolution trims it (guaranteed).
 
 After any install or upgrade, run `npm run doctor` (add `--probe` to spend
 one turn proving the pool answers). Fix every ❌ before reporting done.
+On upgrades the full sequence is `git pull` → `npm install` →
+`npm run build` → `npm run doctor`; run the build explicitly — the
+`prepare` hook does not reliably refresh `dist/` on this path.
 
 ## 7. Routing — **ASK YOUR HUMAN**
 
