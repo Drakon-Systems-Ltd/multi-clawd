@@ -128,6 +128,9 @@ one turn proving the pool answers). Fix every ❌ before reporting done.
 On upgrades the full sequence is `git pull` → `npm install` →
 `npm run build` → `npm run doctor`; run the build explicitly — the
 `prepare` hook does not reliably refresh `dist/` on this path.
+Use plain `npm install`, NOT `npm install --omit=dev`: the build needs
+`tsc` from devDependencies, so omitting dev deps breaks the explicit
+build step.
 
 ## 7. Routing — **ASK YOUR HUMAN**
 
