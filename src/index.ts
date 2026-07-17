@@ -51,8 +51,10 @@ import {
   MODEL_ALIASES,
   buildCatalogEntries,
   canonicalModelId,
+  isModernClaudeModelId,
   resolveModelSpec,
 } from "./models.js";
+import { decideDegradation, matchesPin } from "./degrade.js";
 import { resolveBaseModelIds } from "./catalog-source.js";
 import { classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
@@ -633,6 +635,13 @@ interface PoolConfig {
   minDwellMs?: number;
   models?: string[];
   defaultModel?: string;
+  /** Tier-aware degradation (v0.3.5): step down a model tier when the whole pool is exhausted. */
+  degrade?: {
+    /** Same-provider models to fall back to, best first (e.g. ["claude-opus-4-8"]). */
+    ladder?: string[];
+    /** Never-degrade lanes: launches matching any pin keep their requested model. */
+    pins?: Array<{ agentDirIncludes?: string; workspaceDirIncludes?: string }>;
+  };
 }
 
 function readHealthState(accountId: string): AccountHealthState | undefined {
@@ -712,9 +721,17 @@ function registerPoolBackend(
   const members = memberIds
     .map((id) => accounts.find((a) => a.id.trim() === id))
     .filter((a): a is AccountConfig => a !== undefined);
-  if (members.length < 2) {
+  const ladder = (pool.degrade?.ladder ?? []).filter((m) => {
+    if (isModernClaudeModelId(m)) return true;
+    logger.warn(`[multi-clawd] pool "${poolId}": ignoring invalid degrade ladder entry "${m}"`);
+    return false;
+  });
+  const pins = pool.degrade?.pins ?? [];
+  // A single-account pool is meaningful with a degrade ladder: the pool then
+  // exists purely to step tiers on that one account (single-account hosts).
+  if (members.length < 2 && !(members.length === 1 && ladder.length > 0)) {
     logger.warn(
-      `[multi-clawd] pool "${poolId}" has ${members.length} registered account(s) — need at least 2; pool not registered`,
+      `[multi-clawd] pool "${poolId}" has ${members.length} registered account(s) — need at least 2 (or 1 with a degrade ladder); pool not registered`,
     );
     return;
   }
@@ -739,7 +756,7 @@ function registerPoolBackend(
     homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
   );
   const backend = buildBackend(poolAccount);
-  backend.prepareExecution = async () => {
+  backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
     const now = Date.now();
     const verdicts = members.map((a) => ({
       id: a.id,
@@ -771,7 +788,33 @@ function registerPoolBackend(
       });
     }
     writeStickyEntry(stickyFile, decision.sticky, logger);
-    return { env: await buildAccountEnv(chosen) };
+    const env = await buildAccountEnv(chosen);
+    // Tier degradation: only when the whole pool is exhausted and the launch
+    // is not a pinned (contractual) lane. The shim enforces the swap.
+    if (ladder.length > 0) {
+      const pinned = matchesPin(pins, {
+        agentDir: ctx.agentDir ?? "",
+        workspaceDir: ctx.workspaceDir,
+      });
+      const degradation = pinned
+        ? undefined
+        : decideDegradation({
+            verdicts: verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })),
+            requestedModel: ctx.modelId,
+            ladder,
+          });
+      if (degradation) {
+        env.MULTI_CLAWD_MODEL_OVERRIDE = degradation.model;
+        const line = `pool ${poolId}: degrading ${ctx.modelId} → ${degradation.model} on ${chosen.id} (${degradation.reason})`;
+        logger.info(`[multi-clawd] ${line}`);
+        raiseAlert({ key: `degrade:${poolId}`, severity: "info", text: line });
+      } else if (pinned && verdicts.every((v) => v.health.verdict === "exhausted")) {
+        logger.info(
+          `[multi-clawd] pool ${poolId}: pinned lane keeps ${ctx.modelId} despite exhausted pool (will fail over via the chain)`,
+        );
+      }
+    }
+    return { env };
   };
   api.registerCliBackend(backend);
   api.registerProvider(buildCatalogProvider(poolAccount));

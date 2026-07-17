@@ -12,6 +12,8 @@ function runShim(opts: {
   exit?: string;
   stateFile: string;
   rateLimitInfo?: Record<string, unknown>;
+  modelOverride?: string;
+  args?: string[];
 }) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -23,7 +25,10 @@ function runShim(opts: {
   if (opts.rateLimitInfo) {
     env.FAKE_CLAUDE_RATE_LIMIT_INFO = JSON.stringify(opts.rateLimitInfo);
   }
-  return spawnSync(process.execPath, [SHIM, "-p", "--output-format", "stream-json"], {
+  if (opts.modelOverride) {
+    env.MULTI_CLAWD_MODEL_OVERRIDE = opts.modelOverride;
+  }
+  return spawnSync(process.execPath, [SHIM, ...(opts.args ?? ["-p", "--output-format", "stream-json"])], {
     input: "the prompt\n",
     encoding: "utf8",
     env,
@@ -59,6 +64,38 @@ describe("shim passthrough", () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
     const res = runShim({ exit: "3", stateFile: join(dir, "claw2.json") });
     expect(res.status).toBe(3);
+  });
+});
+
+describe("shim model override (tier degradation)", () => {
+  test("MULTI_CLAWD_MODEL_OVERRIDE rewrites the --model value the CLI receives", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const res = runShim({
+      stateFile: join(dir, "claw2.json"),
+      args: ["-p", "--model", "claude-fable-5", "--output-format", "stream-json"],
+      modelOverride: "claude-opus-4-8",
+    });
+    const result = res.stdout
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l))
+      .find((r) => r.type === "result");
+    expect(result.received_model).toBe("claude-opus-4-8");
+    expect(res.stderr).toContain("degrading model");
+  });
+
+  test("without the override the requested model passes through untouched", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const res = runShim({
+      stateFile: join(dir, "claw2.json"),
+      args: ["-p", "--model", "claude-fable-5", "--output-format", "stream-json"],
+    });
+    const result = res.stdout
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l))
+      .find((r) => r.type === "result");
+    expect(result.received_model).toBe("claude-fable-5");
   });
 });
 

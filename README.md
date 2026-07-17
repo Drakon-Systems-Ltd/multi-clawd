@@ -10,7 +10,7 @@ Pool every Claude Max account you own into a single failover chain —
 same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
-[![version](https://img.shields.io/badge/version-0.3.0-4c9aff)](package.json)
+[![version](https://img.shields.io/badge/version-0.3.5-4c9aff)](package.json)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -248,7 +248,13 @@ error.
     "id": "clawd",
     "accounts": ["claw1", "claw2"],   // preference order; first = home
     "utilizationThreshold": 0.85,     // hand over at 85% of any window
-    "minDwellMs": 600000              // v0.3: anti-flap dwell before returning home
+    "minDwellMs": 600000,             // v0.3: anti-flap dwell before returning home
+    "degrade": {                      // v0.3.5: last step before provider drop
+      "ladder": ["claude-opus-4-8"],  // whole pool exhausted → same account, lower tier
+      "pins": [                       // contractual lanes never degrade
+        { "agentDirIncludes": "vitabooks" }
+      ]
+    }
   }
 } } } },
 "agents": { "defaults": {
@@ -375,8 +381,10 @@ Early but real — built for and dogfooded on our own fleet.
   dwell; login-health probes + heartbeat operator alerts; turn-safe
   watchdog (lane-guard); `doctor` + `--preflight`; build-on-install; shim
   window persistence ✅
-- **v0.3.5** — tier-aware degradation (all accounts hot → step down a tier
-  on the same account) + per-task "never rotate/degrade" pinning
+- **v0.3.5** — tier-aware degradation (whole pool exhausted → step down the
+  configured ladder on the same account, e.g. Fable → Opus, instead of
+  dropping provider) + never-degrade pins for contractual model lanes +
+  single-account pools ✅
 - **v0.4** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; true per-session affinity; local
   five-hour-window signal (turn counting)

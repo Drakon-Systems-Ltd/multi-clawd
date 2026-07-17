@@ -44,6 +44,30 @@
             "type": "number",
             "description": "After rotating away from home, stay on the rotated-to account at least this long before returning home (anti-flap hysteresis; health always overrides). Default 600000 (10min)."
           },
+          "degrade": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Tier-aware degradation (v0.3.5): when EVERY pooled account is exhausted, launch on the requested model's same-provider fallback tier instead of hard-failing to the next provider. While any account can still serve the requested tier, rotation always wins. Also enables single-account pools (a pool of one account + a ladder replaces a bespoke tier-switch watcher).",
+            "properties": {
+              "ladder": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Same-provider models to step down to, best first (e.g. [\"claude-opus-4-8\"]). Requests already at/below the ladder never degrade further."
+              },
+              "pins": {
+                "type": "array",
+                "description": "Never-degrade lanes: launches matching any pin keep their requested model and fail over via the chain instead (contractual model lanes).",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "agentDirIncludes": { "type": "string", "description": "Pin when the launching agent's dir contains this substring." },
+                    "workspaceDirIncludes": { "type": "string", "description": "Pin when the workspace dir contains this substring." }
+                  }
+                }
+              }
+            }
+          },
           "models": {
             "type": "array",
             "items": { "type": "string" },

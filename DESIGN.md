@@ -351,6 +351,36 @@ tested (`src/watchdog-core.ts`).
   `prepareExecution` context has no session id. True session affinity is
   part of the v0.4 standalone-proxy track (Hermes runtimes).
 
+## v0.3.5: tier-aware degradation + pinned lanes
+
+Edith's fleet-feedback features. When the WHOLE pool is exhausted, a launch
+steps down the configured same-provider ladder (e.g. Fable 5 → Opus 4.8) on
+the least-bad account instead of hard-failing to the next provider. Rules:
+
+- While ANY pooled account can still serve the requested tier, rotation wins
+  — degradation is strictly the last step before provider drop.
+- Requests already at/below the ladder never degrade further.
+- Pinned lanes (agent-dir / workspace-dir substring matchers) never degrade:
+  contractual "always this model" lanes fail over via the chain instead.
+- Single-account pools are allowed when a ladder is configured — the pool
+  then exists purely for tier policy on that one account, which replaces
+  bespoke "switch to Opus at 95%" watchers on single-account hosts.
+
+Mechanics: the decision lives in the pool's `prepareExecution` (it has the
+requested `modelId` + pool health); the swap is enforced by the shim
+rewriting `--model` in its own argv (`MULTI_CLAWD_MODEL_OVERRIDE`).
+`resolveExecutionArgs` was investigated and rejected: the runner appends
+`--model <requested>` AFTER hook-provided argv, and last-wins parsing would
+override any injected model. The shim is the process we own, so the rewrite
+is race-free there and works on resume launches too. Degraded launches log
+and raise an operator alert (`degrade:<poolId>`), and turns keep full session
+continuity — same account, same config dir, different tier.
+
+Note the chain-level dual: successive fallbacks `clawd/claude-fable-5 →
+clawd/claude-opus-4-8` (as aiquant runs) achieve tier degradation for
+multi-account pools reactively. Pool-internal degradation adds the
+single-account case, pin exemptions, and one fewer failed launch.
+
 ## Config (user-facing)
 
 ```jsonc

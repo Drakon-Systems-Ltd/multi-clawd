@@ -33,8 +33,14 @@ process.stdin.on("data", (d) => (stdin += d));
 process.stdin.on("end", () => {
   process.stdout.write(rateLimitLine.slice(25) + "\n");
   process.stdout.write(lines[1] + "\n");
+  const modelIdx = process.argv.indexOf("--model");
   process.stdout.write(
-    JSON.stringify({ type: "result", result: stdin.trim(), session_id: "s1" }) + "\n",
+    JSON.stringify({
+      type: "result",
+      result: stdin.trim(),
+      received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
+      session_id: "s1",
+    }) + "\n",
   );
   process.stderr.write("fake-claude stderr noise\n");
   process.exit(Number(process.env.FAKE_CLAUDE_EXIT ?? "0"));

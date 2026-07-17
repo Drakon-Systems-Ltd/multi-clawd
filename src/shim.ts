@@ -27,6 +27,7 @@ import {
   updateHealthState,
   type AccountHealthState,
 } from "./shim-core.js";
+import { rewriteModelArg } from "./degrade.js";
 
 function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
   const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
@@ -124,7 +125,21 @@ function persistState(): void {
 }
 
 const { command, prependArgs } = resolveClaudeCommand();
-const child = spawn(command, [...prependArgs, ...process.argv.slice(2)], {
+// Tier degradation (v0.3.5): the pool's prepareExecution decides, we enforce.
+// The OpenClaw runner appends `--model <requested>` after any hook-provided
+// argv (last-wins), so the swap must happen here, in the process we own.
+let childArgs = [...prependArgs, ...process.argv.slice(2)];
+const modelOverride = process.env.MULTI_CLAWD_MODEL_OVERRIDE;
+if (modelOverride) {
+  const before = childArgs.join(" ");
+  childArgs = rewriteModelArg(childArgs, modelOverride);
+  if (childArgs.join(" ") !== before) {
+    process.stderr.write(
+      `[multi-clawd shim] degrading model for this launch → ${modelOverride}\n`,
+    );
+  }
+}
+const child = spawn(command, childArgs, {
   stdio: ["pipe", "pipe", "inherit"],
   env: process.env,
 });
