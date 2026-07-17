@@ -65,7 +65,12 @@ import {
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { addAlert, clearAlert, pendingAlertText, type AlertState } from "./alerts.js";
 import { buildAccountChildEnv, validateAccountTokenSources } from "./account-env.js";
-import { checkAccountCredential, type CredentialIo } from "./login-health.js";
+import {
+  checkAccountCredential,
+  createRefProbeTracker,
+  type CredentialIo,
+  type RefProbeTracker,
+} from "./login-health.js";
 import { execFileSync } from "node:child_process";
 
 interface AccountConfig {
@@ -241,14 +246,31 @@ function startLoginHealthProbe(
 ): void {
   if (loginProbeTimer) clearInterval(loginProbeTimer);
   const lastStatus = new Map<string, string>();
+  // Per-account backoff for ref-backed accounts: a transient provider blip
+  // (op timeout, ENETUNREACH) must not be mistaken for a dead login. Only a
+  // resolver that ran and returned nothing, or a sustained provider-error
+  // streak, raises the operator alert. See createRefProbeTracker.
+  const refTrackers = new Map<string, RefProbeTracker>();
   const probe = async () => {
+    const now = Date.now();
     for (const account of accounts) {
       let status: string;
       let reason: string | undefined;
       if (isSecretRefShape(account.oauthTokenRef) && !account.oauthTokenFile && !account.native) {
-        const token = await activeTokenResolver?.resolve(account.oauthTokenRef);
-        status = token ? "ok" : "broken";
-        reason = token ? undefined : "oauthTokenRef did not resolve to a token";
+        let tracker = refTrackers.get(account.id);
+        if (!tracker) {
+          tracker = createRefProbeTracker();
+          refTrackers.set(account.id, tracker);
+        }
+        // A missing resolver counts as transient (degrade+retry), never a
+        // credential problem — resolveDetailed classifies the real outcomes.
+        const result =
+          (await activeTokenResolver?.resolveDetailed(account.oauthTokenRef)) ?? {
+            failure: "provider_error" as const,
+          };
+        const outcome = tracker.observe(result, now);
+        status = outcome.status;
+        reason = outcome.reason;
       } else {
         const check = checkAccountCredential(account, realCredentialIo);
         status = check.status;
@@ -260,7 +282,10 @@ function startLoginHealthProbe(
         const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — turns on it will fail until fixed`;
         logger.error(`[multi-clawd] ${text}`);
         raiseAlert({ key: `login:${account.id}`, severity: "error", text });
-      } else if (status === "ok" && previous === "broken") {
+      } else if (status === "degraded" && previous !== "degraded") {
+        // Transient — one operator-visible info line per transition, no alert.
+        logger.info(`[multi-clawd] account "${account.id}" login degraded: ${reason ?? "resolver error"}`);
+      } else if (status === "ok" && (previous === "broken" || previous === "degraded")) {
         logger.info(`[multi-clawd] account "${account.id}" login recovered`);
         alertState = clearAlert(alertState, `login:${account.id}`);
       }
