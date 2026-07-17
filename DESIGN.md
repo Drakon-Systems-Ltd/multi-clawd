@@ -325,6 +325,25 @@ tested (`src/watchdog-core.ts`).
   `<state>.corrupt-<ts>` sidecar (mode 0600) for autopsy, swallowing any error
   in the preserve step itself, then starts fresh. The invariant stands — a
   broken state file must never break a live turn.
+- **Unknown / unrecognized window kinds (v0.3.x).** The CLI has been observed
+  emitting a `rate_limit_event` with no usable `rateLimitType` (missing or
+  non-string); it lands under the fallback window key `"unknown"`. This is
+  handled **conservatively by construction**, not by special-casing the key:
+  - A `rejected` status with no *future* `resetsAt` never rotates the pool —
+    so an unknown-kind rejection with no reset cannot trigger a spurious
+    rotation.
+  - `utilization >= threshold` DOES count as `near_limit` even for unknown
+    kinds — positive evidence of pressure is honoured regardless of the window
+    key. A real limit we can't name still steers us away.
+  This asymmetry (ignore ambiguous negatives, honour concrete positives) is
+  deliberate. Two v0.3.x diagnostics support autopsy without changing this
+  behaviour: `parseRateLimitEvent` captures the raw `rate_limit_info` as
+  compact JSON (`rawInfo`, capped 512 chars) whenever the kind is unusable, and
+  it rides through to the persisted window entry; and `mergeHealthStates`
+  prunes any window whose newest observation predates `PRUNE_AFTER_MS`
+  (default 14 days), run *after* the merge so a window is aged by its freshest
+  `seenAt` — this stops junk `"unknown"` buckets from accreting in the file
+  forever.
 - Five-hour windows never carry a utilization number (fleet-wide
   observation), so proactive rotation can only fire on weekly windows; a
   locally-derived 5h signal (per-account turn counting) is v0.4 design work.

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  PRUNE_AFTER_MS,
   classifyStateReadFailure,
   createLineScanner,
   mergeHealthStates,
@@ -93,6 +94,45 @@ describe("parseRateLimitEvent", () => {
       isUsingOverage: undefined,
     });
   });
+
+  test("captures rawInfo when rateLimitType is missing (the unknown-window autopsy trail)", () => {
+    const ev = parseRateLimitEvent(
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", perModelLimit: "opus", overageState: "weird" },
+      }),
+    );
+    expect(ev?.rateLimitType).toBeUndefined();
+    expect(ev?.rawInfo).toBe(
+      JSON.stringify({ status: "rejected", perModelLimit: "opus", overageState: "weird" }),
+    );
+  });
+
+  test("captures rawInfo when rateLimitType is present but not a string", () => {
+    const ev = parseRateLimitEvent(
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", rateLimitType: 7 },
+      }),
+    );
+    expect(ev?.rateLimitType).toBeUndefined();
+    expect(ev?.rawInfo).toBe(JSON.stringify({ status: "rejected", rateLimitType: 7 }));
+  });
+
+  test("does NOT capture rawInfo when rateLimitType is a usable string", () => {
+    const ev = parseRateLimitEvent(SAMPLE_EVENT_LINE);
+    expect(ev?.rawInfo).toBeUndefined();
+  });
+
+  test("truncates rawInfo to 512 chars", () => {
+    const ev = parseRateLimitEvent(
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", blob: "x".repeat(2000) },
+      }),
+    );
+    expect(ev?.rawInfo?.length).toBe(512);
+  });
 });
 
 describe("updateHealthState", () => {
@@ -128,6 +168,24 @@ describe("updateHealthState", () => {
     );
     expect(state.windows.unknown).toMatchObject({ status: "allowed" });
   });
+
+  test("carries rawInfo onto the window entry when present", () => {
+    const state = updateHealthState(
+      { accountId: "claw2", windows: {} },
+      { status: "rejected", rawInfo: '{"status":"rejected"}' },
+      1000,
+    );
+    expect(state.windows.unknown).toMatchObject({ status: "rejected", rawInfo: '{"status":"rejected"}' });
+  });
+
+  test("leaves rawInfo absent on the window entry when the event has none", () => {
+    const state = updateHealthState(
+      { accountId: "claw2", windows: {} },
+      { status: "allowed", rateLimitType: "five_hour" },
+      1000,
+    );
+    expect(state.windows.five_hour.rawInfo).toBeUndefined();
+  });
 });
 
 describe("parseStoredState", () => {
@@ -146,6 +204,31 @@ describe("parseStoredState", () => {
     expect(parseStoredState("{not json")).toBeUndefined();
     expect(parseStoredState("null")).toBeUndefined();
     expect(parseStoredState('{"accountId":"x"}')).toBeUndefined();
+  });
+
+  test("round-trips rawInfo when it is a string", () => {
+    const s: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: 5000,
+      windows: {
+        unknown: { status: "rejected", seenAt: 4000, rawInfo: '{"status":"rejected"}' },
+      },
+    };
+    const parsed = parseStoredState(JSON.stringify(s));
+    expect(parsed?.windows.unknown.rawInfo).toBe('{"status":"rejected"}');
+  });
+
+  test("drops a non-string rawInfo without failing the window", () => {
+    const parsed = parseStoredState(
+      JSON.stringify({
+        accountId: "claw1",
+        windows: {
+          unknown: { status: "rejected", seenAt: 4000, rawInfo: { not: "a string" } },
+        },
+      }),
+    );
+    expect(parsed?.windows.unknown).toMatchObject({ status: "rejected", seenAt: 4000 });
+    expect(parsed?.windows.unknown.rawInfo).toBeUndefined();
   });
 
   test("drops malformed windows but keeps good ones", () => {
@@ -204,5 +287,70 @@ describe("mergeHealthStates", () => {
     );
     expect(merged.accountId).toBe("claw2");
     expect(merged.updatedAt).toBeUndefined();
+  });
+
+  test("no pruning happens without a now reference (existing 2-arg callers unchanged)", () => {
+    const day = 24 * 60 * 60 * 1000;
+    const ancient: AccountHealthState = {
+      accountId: "claw1",
+      windows: { five_hour: { status: "allowed", seenAt: 1000 } },
+    };
+    const merged = mergeHealthStates(ancient, { accountId: "claw1", windows: {} });
+    expect(merged.windows.five_hour).toBeDefined();
+    // sanity: PRUNE_AFTER_MS is the documented 14-day default
+    expect(PRUNE_AFTER_MS).toBe(14 * day);
+  });
+
+  test("prunes windows older than the horizon, keeps ones inside it (post-merge)", () => {
+    const day = 24 * 60 * 60 * 1000;
+    const now = 100 * day;
+    const stale: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: now - 15 * day,
+      windows: {
+        old_junk: { status: "rejected", seenAt: now - 15 * day },
+        recent: { status: "allowed", seenAt: now - 13 * day },
+      },
+    };
+    const merged = mergeHealthStates(stale, { accountId: "claw1", windows: {} }, now);
+    expect(merged.windows.old_junk).toBeUndefined();
+    expect(merged.windows.recent).toBeDefined();
+  });
+
+  test("prunes against the newest observation, so a fresh live obs rescues a stale disk window", () => {
+    const day = 24 * 60 * 60 * 1000;
+    const now = 100 * day;
+    const disk: AccountHealthState = {
+      accountId: "claw1",
+      windows: { five_hour: { status: "allowed", seenAt: now - 20 * day } },
+    };
+    const live: AccountHealthState = {
+      accountId: "claw1",
+      windows: { five_hour: { status: "allowed", seenAt: now - 1 * day } },
+    };
+    const merged = mergeHealthStates(disk, live, now);
+    expect(merged.windows.five_hour).toMatchObject({ seenAt: now - 1 * day });
+  });
+
+  test("existing merge behaviour is unchanged for windows inside the horizon", () => {
+    const day = 24 * 60 * 60 * 1000;
+    const now = 100 * day;
+    const freshDisk: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: now - day,
+      windows: {
+        seven_day: { status: "allowed_warning", utilization: 0.9, seenAt: now - day },
+        five_hour: { status: "allowed", utilization: 0.2, seenAt: now - 2 * day },
+      },
+    };
+    const live: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: now,
+      windows: { five_hour: { status: "allowed", seenAt: now } },
+    };
+    const merged = mergeHealthStates(freshDisk, live, now);
+    expect(merged.windows.seven_day).toMatchObject({ utilization: 0.9, seenAt: now - day });
+    expect(merged.windows.five_hour).toMatchObject({ seenAt: now });
+    expect(merged.updatedAt).toBe(now);
   });
 });

@@ -110,7 +110,10 @@ function persistState(): void {
     // the SAME account can still race read→write, and last-rename-wins
     // drops whichever event lost the race.
     const disk = readPersistedState();
-    if (disk) state = mergeHealthStates(disk, state);
+    // Pass `now` so merge also prunes windows past the retention horizon —
+    // the "unknown"/junk buckets the reader already ignores are dropped here
+    // instead of accreting in the file forever.
+    if (disk) state = mergeHealthStates(disk, state, Date.now());
     mkdirSync(dirname(stateFile), { recursive: true });
     const tmp = `${stateFile}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
