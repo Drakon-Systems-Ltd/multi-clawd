@@ -14,6 +14,13 @@ export interface RateLimitEvent {
   resetsAt?: number;
   utilization?: number;
   isUsingOverage?: boolean;
+  /**
+   * Compact JSON of the raw `rate_limit_info`, captured ONLY when the window
+   * kind was unusable (missing or non-string `rateLimitType`), so the "unknown"
+   * bucket carries an autopsy trail of what the CLI actually emitted. Quota
+   * metadata, not secrets — no redaction, but capped at 512 chars.
+   */
+  rawInfo?: string;
 }
 
 export interface WindowHealth {
@@ -22,7 +29,20 @@ export interface WindowHealth {
   utilization?: number;
   isUsingOverage?: boolean;
   seenAt: number;
+  /** Raw `rate_limit_info` JSON for windows whose kind could not be read. */
+  rawInfo?: string;
 }
+
+/**
+ * How long a window survives in the persisted state after its most recent
+ * observation before pruning removes it. The reader (health.ts) already ages
+ * each window by its own `seenAt`, so anything past this horizon is dead
+ * weight — kept only long enough to grow the file and clutter autopsies.
+ */
+export const PRUNE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Longest compact-JSON snapshot of an unknown window we retain. */
+const RAW_INFO_MAX_CHARS = 512;
 
 export interface AccountHealthState {
   accountId: string;
@@ -72,13 +92,20 @@ export function parseRateLimitEvent(line: string): RateLimitEvent | undefined {
   if (typeof info !== "object" || info === null) return undefined;
   const i = info as Record<string, unknown>;
   if (typeof i.status !== "string" || i.status.length === 0) return undefined;
-  return {
+  const rateLimitType = typeof i.rateLimitType === "string" ? i.rateLimitType : undefined;
+  const event: RateLimitEvent = {
     status: i.status,
-    rateLimitType: typeof i.rateLimitType === "string" ? i.rateLimitType : undefined,
+    rateLimitType,
     resetsAt: typeof i.resetsAt === "number" ? i.resetsAt : undefined,
     utilization: typeof i.utilization === "number" ? i.utilization : undefined,
     isUsingOverage: typeof i.isUsingOverage === "boolean" ? i.isUsingOverage : undefined,
   };
+  // We could not name this window. Snapshot the raw info so the "unknown"
+  // bucket is diagnosable later instead of an opaque blank.
+  if (rateLimitType === undefined) {
+    event.rawInfo = JSON.stringify(info).slice(0, RAW_INFO_MAX_CHARS);
+  }
+  return event;
 }
 
 /**
@@ -126,6 +153,8 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
       utilization: typeof w.utilization === "number" ? w.utilization : undefined,
       isUsingOverage: typeof w.isUsingOverage === "boolean" ? w.isUsingOverage : undefined,
       seenAt: w.seenAt,
+      // Tolerant round-trip: keep a string rawInfo, drop anything else.
+      rawInfo: typeof w.rawInfo === "string" ? w.rawInfo : undefined,
     };
   }
   return {
@@ -139,17 +168,30 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
  * Merge a previously persisted state (`disk`) with this invocation's state
  * (`live`): per window, the newer `seenAt` wins, so a five_hour-only turn can
  * no longer erase the last seven_day observation. `accountId` follows the
- * live process; staleness/expiry is deliberately NOT applied here — the
- * reader (health classification) ages each window by its own `seenAt`.
+ * live process; the reader (health classification) still ages each window by
+ * its own `seenAt` for near-limit decisions.
+ *
+ * Pruning is a separate, opt-in concern: pass `now` and windows whose newest
+ * observation is older than `pruneAfterMs` are dropped so the file cannot grow
+ * without bound. Pruning runs AFTER the merge, so a window is tested against
+ * the horizon by its freshest `seenAt` (a new live obs rescues a stale disk
+ * one). With no `now`, nothing is pruned — 2-arg callers behave as before.
  */
 export function mergeHealthStates(
   disk: AccountHealthState,
   live: AccountHealthState,
+  now?: number,
+  pruneAfterMs: number = PRUNE_AFTER_MS,
 ): AccountHealthState {
   const windows: Record<string, WindowHealth> = { ...disk.windows };
   for (const [key, w] of Object.entries(live.windows)) {
     const existing = windows[key];
     if (!existing || w.seenAt >= existing.seenAt) windows[key] = w;
+  }
+  if (now !== undefined) {
+    for (const [key, w] of Object.entries(windows)) {
+      if (now - w.seenAt > pruneAfterMs) delete windows[key];
+    }
   }
   const updatedAt = Math.max(disk.updatedAt ?? 0, live.updatedAt ?? 0);
   return {
@@ -177,6 +219,7 @@ export function updateHealthState(
         utilization: event.utilization,
         isUsingOverage: event.isUsingOverage,
         seenAt: now,
+        rawInfo: event.rawInfo,
       },
     },
   };
