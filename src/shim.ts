@@ -59,15 +59,20 @@ let state: AccountHealthState = { accountId, windows: {} };
 function preserveCorruptState(raw: string | undefined): void {
   if (!stateFile) return;
   const preservedPath = `${stateFile}.corrupt-${Date.now()}`;
+  let preserved = false;
   if (raw !== undefined) {
     try {
       writeFileSync(preservedPath, raw, { mode: 0o600 });
+      preserved = true;
     } catch {
       // preservation is best-effort — never let it break the turn
     }
   }
+  const note = preserved
+    ? `preserved copy: ${preservedPath}`
+    : "original bytes could not be preserved";
   process.stderr.write(
-    `[multi-clawd shim] state file unreadable/corrupt — starting fresh (preserved copy: ${preservedPath})\n`,
+    `[multi-clawd shim] state file unreadable/corrupt — starting fresh (${note})\n`,
   );
 }
 
