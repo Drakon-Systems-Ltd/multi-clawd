@@ -82,6 +82,26 @@ export function parseRateLimitEvent(line: string): RateLimitEvent | undefined {
 }
 
 /**
+ * Classify a state-file read error so the shim can tell a benign missing file
+ * (ENOENT — silent fresh start) from a file that exists but could not be read
+ * (permissions/IO). The latter deserves an operator-visible note and a
+ * best-effort preserved copy for autopsy; a silently-erased state file is what
+ * masked the seven_day disappearance. Anything non-ENOENT is "unreadable" — we
+ * never assume "absent" from an ambiguous error, since that would resume the
+ * silent-erase behaviour.
+ */
+export function classifyStateReadFailure(err: unknown): "absent" | "unreadable" {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: unknown }).code === "ENOENT"
+  ) {
+    return "absent";
+  }
+  return "unreadable";
+}
+
+/**
  * Tolerantly parse a persisted state file's contents. Undefined when the
  * JSON is unusable; individually malformed windows are dropped, not fatal.
  */

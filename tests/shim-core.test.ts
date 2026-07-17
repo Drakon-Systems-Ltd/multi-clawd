@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  classifyStateReadFailure,
   createLineScanner,
   mergeHealthStates,
   parseRateLimitEvent,
@@ -7,6 +8,23 @@ import {
   updateHealthState,
   type AccountHealthState,
 } from "../src/shim-core";
+
+describe("classifyStateReadFailure", () => {
+  test("ENOENT is a benign absent file (silent fresh start)", () => {
+    const err = Object.assign(new Error("no such file"), { code: "ENOENT" });
+    expect(classifyStateReadFailure(err)).toBe("absent");
+  });
+
+  test("a permission / IO error is exists-but-unreadable", () => {
+    const err = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    expect(classifyStateReadFailure(err)).toBe("unreadable");
+  });
+
+  test("a non-errno throw is treated as unreadable, never absent", () => {
+    expect(classifyStateReadFailure(new Error("boom"))).toBe("unreadable");
+    expect(classifyStateReadFailure("weird")).toBe("unreadable");
+  });
+});
 
 const SAMPLE_EVENT_LINE = JSON.stringify({
   type: "rate_limit_event",
