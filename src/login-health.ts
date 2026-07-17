@@ -29,6 +29,79 @@ export interface CredentialCheck {
   reason?: string;
 }
 
+/**
+ * Ref-resolution outcome as classified by token-resolution's resolveDetailed.
+ * (Mirrored here rather than imported to keep this module dependency-free.)
+ */
+export interface RefProbeResult {
+  value?: string;
+  failure?: "provider_error" | "empty_result";
+}
+
+export interface RefProbeStatus {
+  status: "ok" | "degraded" | "broken";
+  reason?: string;
+}
+
+export interface RefProbeTracker {
+  observe(result: RefProbeResult, nowMs: number): RefProbeStatus;
+}
+
+/**
+ * Pure per-account state machine for the async oauthTokenRef probe: it
+ * separates a transient provider outage (timeout/network → degrade, retry)
+ * from a real credential problem (resolver ran, got nothing → broken now).
+ *
+ * - empty_result → broken immediately (a credential problem, not a blip).
+ * - provider_error → DEGRADED and retried; only declared broken after
+ *   `deadAfterConsecutive` consecutive provider errors AND at least
+ *   `deadAfterMs` elapsed since the first failure of the streak (both, so a
+ *   burst of fast failures cannot trip a false "login dead" alert).
+ * - a resolved value resets the streak and clears the degraded flag.
+ */
+export function createRefProbeTracker(
+  options: { deadAfterConsecutive?: number; deadAfterMs?: number } = {},
+): RefProbeTracker {
+  const deadAfterConsecutive = options.deadAfterConsecutive ?? 3;
+  const deadAfterMs = options.deadAfterMs ?? 10 * 60 * 1000;
+  let consecutive = 0;
+  let firstFailureAt: number | undefined;
+
+  return {
+    observe(result, nowMs) {
+      if (result.value !== undefined) {
+        consecutive = 0;
+        firstFailureAt = undefined;
+        return { status: "ok" };
+      }
+      if (result.failure === "empty_result") {
+        consecutive = 0;
+        firstFailureAt = undefined;
+        return {
+          status: "broken",
+          reason: "oauthTokenRef resolved to nothing (credential problem)",
+        };
+      }
+      // provider_error (or an unknown/absent failure treated as transient)
+      if (consecutive === 0) firstFailureAt = nowMs;
+      consecutive += 1;
+      const elapsed = nowMs - (firstFailureAt ?? nowMs);
+      if (consecutive >= deadAfterConsecutive && elapsed >= deadAfterMs) {
+        return {
+          status: "broken",
+          reason: `resolver failing ${deadAfterConsecutive}+ consecutive probes over ${Math.round(
+            deadAfterMs / 60000,
+          )}m`,
+        };
+      }
+      return {
+        status: "degraded",
+        reason: `resolver error (network?) — streak ${consecutive}/${deadAfterConsecutive}`,
+      };
+    },
+  };
+}
+
 function looksLikeSetupToken(value: string): boolean {
   return /^sk-ant-[a-z0-9]+-/.test(value.trim());
 }

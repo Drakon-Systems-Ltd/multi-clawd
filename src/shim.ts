@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
+  classifyStateReadFailure,
   createLineScanner,
   mergeHealthStates,
   parseRateLimitEvent,
@@ -48,13 +49,48 @@ const accountId = process.env.MULTI_CLAWD_ACCOUNT_ID ?? "unknown";
 
 let state: AccountHealthState = { accountId, windows: {} };
 
+/**
+ * A state file that exists but can't be read or parsed must not silently erase
+ * the last observation (that masked the seven_day disappearance). Best-effort
+ * preserve the original bytes to a `.corrupt-<ts>` sidecar for autopsy and note
+ * it on stderr, then start fresh. Every step here swallows its own errors — the
+ * invariant "a broken state file must never break a live turn" stands.
+ */
+function preserveCorruptState(raw: string | undefined): void {
+  if (!stateFile) return;
+  const preservedPath = `${stateFile}.corrupt-${Date.now()}`;
+  if (raw !== undefined) {
+    try {
+      writeFileSync(preservedPath, raw, { mode: 0o600 });
+    } catch {
+      // preservation is best-effort — never let it break the turn
+    }
+  }
+  process.stderr.write(
+    `[multi-clawd shim] state file unreadable/corrupt — starting fresh (preserved copy: ${preservedPath})\n`,
+  );
+}
+
 function readPersistedState(): AccountHealthState | undefined {
   if (!stateFile) return undefined;
+  let raw: string;
   try {
-    return parseStoredState(readFileSync(stateFile, "utf8"));
-  } catch {
-    return undefined; // missing or unreadable file — start fresh
+    raw = readFileSync(stateFile, "utf8");
+  } catch (err) {
+    // ENOENT is the normal first-run path — silent fresh start, no sidecar.
+    if (classifyStateReadFailure(err) === "absent") return undefined;
+    // Exists but unreadable (permissions/IO): we have no bytes to preserve,
+    // but the disappearance still deserves a trace.
+    preserveCorruptState(undefined);
+    return undefined;
   }
+  const parsed = parseStoredState(raw);
+  if (parsed === undefined) {
+    // Read fine, but the contents are unusable — preserve the bad bytes.
+    preserveCorruptState(raw);
+    return undefined;
+  }
+  return parsed;
 }
 
 function persistState(): void {

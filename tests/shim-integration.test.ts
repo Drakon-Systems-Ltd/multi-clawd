@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -132,5 +132,42 @@ describe("shim health capture", () => {
     const res = runShim({ stateFile: "/nonexistent-dir/deep/claw2.json" });
     expect(res.status).toBe(0);
     expect(res.stdout).toContain('"type":"result"');
+  });
+});
+
+describe("shim corrupt-state preservation (seven_day disappearance autopsy)", () => {
+  test("a corrupt state file is preserved to a .corrupt-* sidecar and noted on stderr", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw2.json");
+    const badBytes = '{"windows": {"seven_day": {"utilization": 0.95, WRECKED';
+    writeFileSync(stateFile, badBytes);
+
+    const res = runShim({ stateFile });
+    expect(res.status).toBe(0);
+
+    // Fresh state took over (the live turn was never broken by the bad file).
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows.five_hour).toMatchObject({ utilization: 0.87 });
+
+    // The original bytes survive in a sidecar for autopsy.
+    const sidecars = readdirSync(dir).filter(
+      (f) => f.startsWith("claw2.json.corrupt-"),
+    );
+    expect(sidecars).toHaveLength(1);
+    expect(readFileSync(join(dir, sidecars[0]), "utf8")).toBe(badBytes);
+
+    // Operator gets a trace instead of a silent erase.
+    expect(res.stderr).toContain("state file unreadable/corrupt — starting fresh (preserved copy:");
+  });
+
+  test("a missing state file starts fresh silently — no sidecar, no stderr noise", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw2.json");
+    // File genuinely absent (ENOENT), not corrupt.
+    const res = runShim({ stateFile });
+    expect(res.status).toBe(0);
+
+    expect(readdirSync(dir).filter((f) => f.includes(".corrupt-"))).toHaveLength(0);
+    expect(res.stderr).not.toContain("unreadable/corrupt");
   });
 });

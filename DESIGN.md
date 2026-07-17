@@ -267,6 +267,18 @@ is abandoned immediately. Sticky state persists at
   ref resolution) without spending quota, and raises an alert on the
   ok→broken transition — registration success no longer masks dead logins
   (the aiquant silent-login-death class).
+- **Ref-backed probe failure classification (v0.3.x).** A `oauthTokenRef`
+  probe no longer declares a login dead on the first empty resolve: a
+  transient provider outage (op timeout, ENETUNREACH — `resolveDetailed`
+  returns `provider_error`) marks the account **degraded** (one info line,
+  no alert) and retries, and is only declared broken after **3 consecutive
+  provider-error probes AND ≥10 min** since the streak's first failure (both,
+  so a fast burst can't trip a false alert). A resolver that *ran* and
+  returned nothing/non-string (`empty_result`) is a credential problem and
+  breaks immediately. Success resets the streak and clears degraded; recovery
+  clears the alert from either degraded or broken. The tracker
+  (`createRefProbeTracker`) is pure and tested; gate-2 redaction is preserved
+  end-to-end (only error *class* names ever reach a log line).
 - Pool rotations, return-home events, and whole-pool exhaustion raise alerts
   too; the out-of-process watchdog appends to
   `state/multi-clawd/alerts-spool.jsonl`, ingested at each heartbeat.
@@ -299,7 +311,20 @@ tested (`src/watchdog-core.ts`).
 
 - Same-account **concurrent** shim writes are not synchronized: the
   window-persistence fix is read-merge-atomic-rename, which closes the
-  sequential-overwrite defect but is not concurrency coverage (Case).
+  sequential-overwrite defect but is not concurrency coverage (Case). The
+  corrupt-state preservation below does not change this: two truly concurrent
+  shims for the same account still race read→write, **last-rename-wins** drops
+  whichever event lost the race. Full concurrency coverage is v0.4 work.
+- **Corrupt state-file preservation (v0.3.x).** `readPersistedState` used to
+  swallow *all* read/parse failures and start fresh, so a corrupt or
+  unreadable state file silently erased the last seven_day observation with
+  zero trace (the disappearance-autopsy gap). It now distinguishes ENOENT
+  (benign — silent fresh start) from exists-but-unreadable/unparseable via the
+  pure `classifyStateReadFailure`: on the bad path it writes an operator note
+  to stderr and best-effort preserves the original bytes to a
+  `<state>.corrupt-<ts>` sidecar (mode 0600) for autopsy, swallowing any error
+  in the preserve step itself, then starts fresh. The invariant stands — a
+  broken state file must never break a live turn.
 - Five-hour windows never carry a utilization number (fleet-wide
   observation), so proactive rotation can only fire on weekly windows; a
   locally-derived 5h signal (per-account turn counting) is v0.4 design work.

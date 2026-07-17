@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
-import { checkAccountCredential, type CredentialIo } from "../src/login-health";
+import { checkAccountCredential, createRefProbeTracker, type CredentialIo } from "../src/login-health";
+
+const MIN = 60 * 1000;
 
 function io(overrides: Partial<CredentialIo>): CredentialIo {
   return {
@@ -78,5 +80,75 @@ describe("checkAccountCredential", () => {
         io({}),
       ).status,
     ).toBe("unknown");
+  });
+});
+
+describe("createRefProbeTracker", () => {
+  test("empty_result is a credential problem — broken immediately", () => {
+    const tracker = createRefProbeTracker();
+    const out = tracker.observe({ failure: "empty_result" }, 0);
+    expect(out.status).toBe("broken");
+    expect(out.reason).toBe("oauthTokenRef resolved to nothing (credential problem)");
+  });
+
+  test("a single provider error degrades, does not break", () => {
+    const tracker = createRefProbeTracker();
+    const out = tracker.observe({ failure: "provider_error" }, 0);
+    expect(out.status).toBe("degraded");
+    expect(out.reason).toContain("streak 1/3");
+  });
+
+  test("three FAST provider errors (under 10min) stay degraded, never broken", () => {
+    const tracker = createRefProbeTracker();
+    expect(tracker.observe({ failure: "provider_error" }, 0).status).toBe("degraded");
+    expect(tracker.observe({ failure: "provider_error" }, 30 * 1000).status).toBe("degraded");
+    // third failure, but only ~1 minute since the first — thresholds are AND
+    const third = tracker.observe({ failure: "provider_error" }, 60 * 1000);
+    expect(third.status).toBe("degraded");
+    expect(third.reason).toContain("streak 3/3");
+  });
+
+  test("declares broken only at the 3rd consecutive error once >=10min elapsed", () => {
+    const tracker = createRefProbeTracker();
+    expect(tracker.observe({ failure: "provider_error" }, 0).status).toBe("degraded");
+    expect(tracker.observe({ failure: "provider_error" }, 5 * MIN).status).toBe("degraded");
+    const out = tracker.observe({ failure: "provider_error" }, 11 * MIN);
+    expect(out.status).toBe("broken");
+    expect(out.reason).toContain("3+ consecutive");
+  });
+
+  test("two errors over 10min are not enough — needs the 3rd consecutive too", () => {
+    const tracker = createRefProbeTracker();
+    expect(tracker.observe({ failure: "provider_error" }, 0).status).toBe("degraded");
+    // 20 minutes elapsed but only the 2nd error — consecutive threshold unmet
+    expect(tracker.observe({ failure: "provider_error" }, 20 * MIN).status).toBe("degraded");
+  });
+
+  test("a success resets the streak and clears degraded", () => {
+    const tracker = createRefProbeTracker();
+    tracker.observe({ failure: "provider_error" }, 0);
+    tracker.observe({ failure: "provider_error" }, 5 * MIN);
+    expect(tracker.observe({ value: "sk-ant-oat01-x" }, 6 * MIN).status).toBe("ok");
+    // streak is reset: two fresh fast errors are just degraded again
+    expect(tracker.observe({ failure: "provider_error" }, 7 * MIN).status).toBe("degraded");
+    const out = tracker.observe({ failure: "provider_error" }, 8 * MIN);
+    expect(out.status).toBe("degraded");
+    expect(out.reason).toContain("streak 2/3");
+  });
+
+  test("recovery from broken returns ok", () => {
+    const tracker = createRefProbeTracker();
+    tracker.observe({ failure: "provider_error" }, 0);
+    tracker.observe({ failure: "provider_error" }, 5 * MIN);
+    expect(tracker.observe({ failure: "provider_error" }, 11 * MIN).status).toBe("broken");
+    expect(tracker.observe({ value: "sk-ant-oat01-x" }, 12 * MIN).status).toBe("ok");
+  });
+
+  test("an empty_result after provider errors still breaks immediately (credential problem)", () => {
+    const tracker = createRefProbeTracker();
+    tracker.observe({ failure: "provider_error" }, 0);
+    const out = tracker.observe({ failure: "empty_result" }, 30 * 1000);
+    expect(out.status).toBe("broken");
+    expect(out.reason).toContain("credential problem");
   });
 });

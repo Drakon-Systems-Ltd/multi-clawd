@@ -99,3 +99,54 @@ describe("createTokenRefResolver", () => {
     expect(await resolver.resolve(REF, 0)).toBe("sk-ant-oat01-composite");
   });
 });
+
+describe("resolveDetailed", () => {
+  test("success returns the value with no failure and caches it", async () => {
+    const { resolver, callCount } = makeResolver();
+    expect(await resolver.resolveDetailed(REF, 0)).toEqual({ value: "sk-ant-oat01-resolved" });
+    // Cache hit within TTL: value returned, provider not called again.
+    expect(await resolver.resolveDetailed(REF, 500)).toEqual({ value: "sk-ant-oat01-resolved" });
+    expect(callCount()).toBe(1);
+  });
+
+  test("provider error (resolveRefs threw) is classified provider_error, no value", async () => {
+    const { resolver } = makeResolver({ fail: true });
+    const result = await resolver.resolveDetailed(REF, 0);
+    expect(result.failure).toBe("provider_error");
+    expect(result.value).toBeUndefined();
+  });
+
+  test("resolver ran but returned nothing is classified empty_result", async () => {
+    const { resolver } = makeResolver({ value: undefined });
+    expect(await resolver.resolveDetailed(REF, 0)).toEqual({ failure: "empty_result" });
+  });
+
+  test("resolver ran but returned a non-string is classified empty_result", async () => {
+    const { resolver } = makeResolver({ value: 12345 });
+    expect(await resolver.resolveDetailed(REF, 0)).toEqual({ failure: "empty_result" });
+  });
+
+  test("redaction is preserved: onError never sees token, ref metadata, or provider text", async () => {
+    const SECRET = "sk-ant-oat01-SUPERSECRET";
+    const seen: string[] = [];
+    const resolver = createTokenRefResolver({
+      resolveRefs: async () => {
+        throw new Error(`vault at op://Vault/Item said ${SECRET}`);
+      },
+      onError: (_r, err) => seen.push(String(err)),
+      redact: true,
+    });
+    const result = await resolver.resolveDetailed(REF, 0);
+    expect(result.failure).toBe("provider_error");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).not.toContain(SECRET);
+    expect(seen[0]).not.toContain("Vault");
+    expect(seen[0]).not.toContain("vault at");
+    expect(seen[0]).toContain("credential_resolution_failed");
+  });
+
+  test("resolve() delegates to resolveDetailed and yields the same value", async () => {
+    const { resolver } = makeResolver();
+    expect(await resolver.resolve(REF, 0)).toBe((await resolver.resolveDetailed(REF, 1)).value);
+  });
+});
