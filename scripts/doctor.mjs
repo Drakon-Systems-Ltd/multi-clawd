@@ -237,10 +237,24 @@ if (!pool) {
   const warns = findings.filter((f) => f.severity === "warn");
   const notes = findings.filter((f) => f.severity === "note");
   for (const f of warns) warn(`${f.surface}: ${f.ref} ${f.reason}`);
-  for (const f of notes) {
-    note(`${f.surface}: ${f.ref} (allowlist entry, not a live tier) ${f.reason}`);
+  // Allowlist entries are registered-but-not-live rungs: informational only,
+  // and there are typically many (every non-pool Claude id someone MAY ref).
+  // Collapse to one line so the section stays scannable; DOCTOR_VERBOSE lists
+  // them. A dead-noisy section trains people to skip it — the opposite of the
+  // point. (Live-tier bypasses above are always listed in full.)
+  const verbose = process.env.DOCTOR_VERBOSE === "1" || process.argv.includes("--verbose");
+  if (notes.length > 0) {
+    if (verbose) {
+      for (const f of notes) {
+        note(`${f.surface}: ${f.ref} (allowlist entry, not a live tier) ${f.reason}`);
+      }
+    } else {
+      note(
+        `${notes.length} allowlist rung(s) name a non-pool Claude ref (registered, not a live tier) — run with --verbose to list`,
+      );
+    }
   }
-  if (warns.length === 0) ok(`effective chain: all Claude tiers route through the ${poolId} pool`);
+  if (warns.length === 0) ok(`effective chain: all live Claude tiers route through the ${poolId} pool`);
 }
 
 // ── 8. watchdog ─────────────────────────────────────────────────────────────
