@@ -3,6 +3,7 @@ import {
   auditEffectiveChain,
   auditSessionOverrides,
   isClaudeModelId,
+  maskSessionKey,
   type ChainFinding,
   type SessionOverrideEntry,
 } from "../src/chain-audit";
@@ -168,6 +169,30 @@ describe("auditEffectiveChain", () => {
     const warns = warnsOnly(auditEffectiveChain(config, POOL));
     expect(warns).toHaveLength(1);
     expect(warns[0].surface).toBe("crons[0].model");
+  });
+});
+
+describe("maskSessionKey", () => {
+  test("masks a numeric channel-id tail to …last4 (Telegram chat id)", () => {
+    expect(maskSessionKey("agent:main:telegram:direct:6963520763")).toBe("agent:main:telegram:direct:…0763");
+  });
+  test("masks a uuid/hex tail", () => {
+    expect(maskSessionKey("agent:main:subagent:b29898de-b4e5-4446")).toBe("agent:main:subagent:…4446");
+  });
+  test("leaves a non-id tail intact (structural key)", () => {
+    expect(maskSessionKey("agent:main:main")).toBe("agent:main:main");
+  });
+  test("leaves a long human session NAME intact (has non-hex letters → not an id)", () => {
+    // Would be over-masked by a blunt length cap; must survive for actionability.
+    expect(maskSessionKey("agent:main:mc-status-check")).toBe("agent:main:mc-status-check");
+    expect(maskSessionKey("agent:main:explicit:case-smoke-20260713t222001")).toBe(
+      "agent:main:explicit:case-smoke-20260713t222001",
+    );
+  });
+  test("keeps the structural prefix so the warn stays actionable", () => {
+    const masked = maskSessionKey("agent:main:telegram:direct:6963520763");
+    expect(masked.startsWith("agent:main:telegram:direct:")).toBe(true);
+    expect(masked).not.toContain("6963520763");
   });
 });
 
