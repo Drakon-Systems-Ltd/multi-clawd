@@ -280,6 +280,36 @@ describe("mergeHealthStates", () => {
     expect(merged.updatedAt).toBe(4000);
   });
 
+  test("migrates legacy prefixed model window key to canonical (upgrade regression guard)", () => {
+    // Stock v0.3.6 persisted this key uncanonicalised. Post-fix reads only
+    // match `model:claude-fable-5`, so without migration this window silently
+    // stops gating on upgrade — the exact class the fix closes.
+    const legacyDisk: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: 5000,
+      windows: {
+        "model:clawd/claude-fable-5": { status: "rejected", resetsAt: 9_999_999, seenAt: 5000 },
+      },
+    };
+    const merged = mergeHealthStates(legacyDisk, { accountId: "claw1", windows: {} });
+    expect(merged.windows["model:claude-fable-5"]).toMatchObject({ status: "rejected", seenAt: 5000 });
+    expect(merged.windows["model:clawd/claude-fable-5"]).toBeUndefined();
+  });
+
+  test("legacy + canonical model keys collide to the newer seenAt", () => {
+    const collideDisk: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: 5000,
+      windows: {
+        "model:clawd/claude-fable-5": { status: "rejected", seenAt: 5000 },
+        "model:claude-fable-5": { status: "rejected", seenAt: 7000 },
+      },
+    };
+    const merged = mergeHealthStates(collideDisk, { accountId: "claw1", windows: {} });
+    expect(merged.windows["model:claude-fable-5"]).toMatchObject({ seenAt: 7000 });
+    expect(Object.keys(merged.windows).filter((k) => k.startsWith("model:"))).toHaveLength(1);
+  });
+
   test("live accountId wins; empty updatedAt stays undefined", () => {
     const merged = mergeHealthStates(
       { accountId: "old", windows: {} },

@@ -35,9 +35,12 @@ export interface WindowHealth {
 
 /**
  * How long a window survives in the persisted state after its most recent
- * observation before pruning removes it. The reader (health.ts) already ages
- * each window by its own `seenAt`, so anything past this horizon is dead
- * weight — kept only long enough to grow the file and clutter autopsies.
+ * observation before pruning removes it. The reader (health.ts) now trusts a
+ * reset-bearing window until its `resetsAt`, bounded by an 8-day horizon cap;
+ * this 14-day prune sits DELIBERATELY beyond that cap so the merge-time prune
+ * never removes a still-binding reset-bearing window before the reader has had
+ * the chance to honour (or cap) it. Keep 14d > the reader's 8d cap if either
+ * moves. Reset-less windows the reader ages out at ~6h are dead weight here.
  */
 export const PRUNE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -183,11 +186,15 @@ export function mergeHealthStates(
   now?: number,
   pruneAfterMs: number = PRUNE_AFTER_MS,
 ): AccountHealthState {
-  const windows: Record<string, WindowHealth> = { ...disk.windows };
+  const merged: Record<string, WindowHealth> = { ...disk.windows };
   for (const [key, w] of Object.entries(live.windows)) {
-    const existing = windows[key];
-    if (!existing || w.seenAt >= existing.seenAt) windows[key] = w;
+    const existing = merged[key];
+    if (!existing || w.seenAt >= existing.seenAt) merged[key] = w;
   }
+  // Migrate legacy pre-canonicalisation model window keys (see
+  // canonicalizeModelWindowKeys): stock v0.3.6 persisted `model:` windows under
+  // the raw argv spelling, which would silently stop gating post-upgrade.
+  const windows = canonicalizeModelWindowKeys(merged);
   if (now !== undefined) {
     for (const [key, w] of Object.entries(windows)) {
       if (now - w.seenAt > pruneAfterMs) delete windows[key];
@@ -202,9 +209,60 @@ export function mergeHealthStates(
 }
 
 
-/** Window key for a model-scoped limit observation (v0.3.6). */
+/**
+ * Provider/account prefixes a model id may arrive with (`clawd/claude-fable-5`
+ * from one lane, `anthropic/claude-fable-5` from another, bare `claude-fable-5`
+ * from a third). All name the SAME cap, so they must key the same window.
+ */
+const MODEL_ID_PROVIDER_PREFIXES = [
+  "clawd/",
+  "claw2/",
+  "claw3/",
+  "claude-cli/",
+  "anthropic/",
+];
+
+/**
+ * Normalise a model id to its canonical bare form by stripping a known
+ * provider/account prefix before the first `/`. Conservative: only known
+ * prefixes are stripped; an unknown prefix (or a bare id) is left untouched.
+ * Applied at BOTH write (`modelWindowKey`) and read (health.ts) so a spelling
+ * mismatch cannot open a days-long silent gate hole now that model windows are
+ * long-lived (survive to their `resetsAt`, not aged out at 6h).
+ */
+export function canonicalizeModelIdForWindow(modelId: string): string {
+  for (const prefix of MODEL_ID_PROVIDER_PREFIXES) {
+    if (modelId.startsWith(prefix)) return modelId.slice(prefix.length);
+  }
+  return modelId;
+}
+
+/** Window key for a model-scoped limit observation (v0.3.6, canonicalised). */
 export function modelWindowKey(modelId: string): string {
-  return `model:${modelId}`;
+  return `model:${canonicalizeModelIdForWindow(modelId)}`;
+}
+
+/**
+ * Rewrite any `model:` window key to its canonical form, so state files written
+ * by stock v0.3.6 (which keyed by the raw argv model, e.g.
+ * `model:clawd/claude-fable-5`) keep gating after the canonicalisation fix
+ * deploys. Without this, a legacy prefixed window carrying a days-away
+ * `resetsAt` silently stops matching canonical reads on upgrade — a
+ * migration-window regression of the exact class the fix closes. Collisions
+ * (legacy + canonical both present) keep the newer `seenAt`.
+ */
+export function canonicalizeModelWindowKeys(
+  windows: Record<string, WindowHealth>,
+): Record<string, WindowHealth> {
+  const out: Record<string, WindowHealth> = {};
+  for (const [key, w] of Object.entries(windows)) {
+    const canonicalKey = key.startsWith("model:")
+      ? modelWindowKey(key.slice("model:".length))
+      : key;
+    const existing = out[canonicalKey];
+    if (!existing || w.seenAt >= existing.seenAt) out[canonicalKey] = w;
+  }
+  return out;
 }
 
 const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;

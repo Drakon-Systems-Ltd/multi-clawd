@@ -3,6 +3,7 @@ import {
   parseModelLimitError,
   recordModelLimit,
   modelWindowKey,
+  canonicalizeModelIdForWindow,
   type AccountHealthState,
 } from "../src/shim-core";
 import { classifyAccountHealth } from "../src/health";
@@ -42,6 +43,30 @@ describe("parseModelLimitError", () => {
         JSON.stringify({ type: "result", is_error: false, result: "You've reached your Fable 5 limit." }),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("canonicalizeModelIdForWindow", () => {
+  test("strips known provider/account prefixes to the bare model id", () => {
+    for (const id of [
+      "clawd/claude-fable-5",
+      "claw2/claude-fable-5",
+      "claw3/claude-fable-5",
+      "claude-cli/claude-fable-5",
+      "anthropic/claude-fable-5",
+      "claude-fable-5",
+    ]) {
+      expect(canonicalizeModelIdForWindow(id)).toBe("claude-fable-5");
+    }
+  });
+
+  test("leaves an unknown prefix untouched (conservative)", () => {
+    expect(canonicalizeModelIdForWindow("other/claude-fable-5")).toBe("other/claude-fable-5");
+  });
+
+  test("modelWindowKey keys the same window regardless of spelling", () => {
+    expect(modelWindowKey("anthropic/claude-fable-5")).toBe(modelWindowKey("claude-fable-5"));
+    expect(modelWindowKey("clawd/claude-fable-5")).toBe("model:claude-fable-5");
   });
 });
 
