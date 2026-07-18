@@ -103,7 +103,13 @@ export function classifyAccountHealth(
     // gate only requests for that model — exhausted-for-fable must not stop
     // this account serving opus. Without a reset time they bind for a TTL.
     if (window.startsWith(MODEL_WINDOW_PREFIX)) {
-      if (!requestedWindowKey || window !== requestedWindowKey) continue;
+      // Canonicalise the STORED key too, not just the requested one: the
+      // account-selection path (index.ts readHealthState → classify) reads raw
+      // disk state without going through mergeHealthStates, so a legacy
+      // stock-v0.3.6 prefixed key (`model:clawd/claude-fable-5`) must still
+      // match here or it silently stops gating on that path post-upgrade.
+      const canonicalWindow = modelWindowKey(window.slice(MODEL_WINDOW_PREFIX.length));
+      if (!requestedWindowKey || canonicalWindow !== requestedWindowKey) continue;
       if (w.status !== "rejected") continue;
       if (resetMs !== undefined) {
         if (resetMs > nowMs) {

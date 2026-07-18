@@ -278,4 +278,17 @@ describe("model-id canonicalisation gates across spellings (fix A)", () => {
     // different window, so it is NOT gated as exhausted.
     expect(classifyAccountHealth(s, {}, NOW_LOCAL, "other/claude-fable-5").verdict).toBe("ok");
   });
+
+  test("a LITERAL legacy prefixed disk key still gates (readHealthState bypass path)", () => {
+    // The account-selection path (index.ts readHealthState → classify) reads
+    // raw disk state WITHOUT mergeHealthStates, so classify must tolerate a
+    // stock-v0.3.6 uncanonicalised key written straight to the file. Build it
+    // as a literal string, NOT via modelWindowKey (which would canonicalise).
+    const legacy = state(
+      { "model:clawd/claude-fable-5": { status: "rejected", resetsAt: NOW_S + 2 * 86400, seenAt: NOW - 1000 } },
+      NOW - 1000,
+    );
+    expect(classifyAccountHealth(legacy, {}, NOW_LOCAL, "claude-fable-5").verdict).toBe("exhausted");
+    expect(classifyAccountHealth(legacy, {}, NOW_LOCAL, "clawd/claude-fable-5").verdict).toBe("exhausted");
+  });
 });
