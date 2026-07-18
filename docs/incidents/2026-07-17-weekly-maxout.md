@@ -9,7 +9,7 @@ metadata:
 
 # Incident: 17–18 Jul 2026 — Fable weekly max-out, same-account tier-drop instead of pool flip
 
-**Status:** Open — aiquant evidence pending (Case). Friday-Mac + clawdbot1 sections verified from raw sources.
+**Status:** Evidence complete — all three hosts verified. Friday-Mac + clawdbot1 + aiquant sections verified from raw sources.
 **Compiled by:** FRIDAY (Friday-Mac), 18 Jul 2026 ~08:00 UTC.
 **Intended home:** multi-clawd repo `docs/incidents/` (Friday-Mac write-blocked everywhere except this memory tree this session — Jarvis to commit, or FRIDAY on a write-capable wake).
 **Impact:** Michael's boxes tier-dropped Fable→Opus on the *same* account (clawdbot1) or fell out of Claude entirely to Grok (Friday-Mac) while a second pool account was configured. v1.0 input; supports shipping v0.3.6 as specced.
@@ -47,8 +47,24 @@ Both accounts' weekly windows reset **21 Jul 01:00 UTC** (`resetsAt 1784595600`)
 - `doctor --preflight` reported READY 🦞 while (b) was live — **false READY**.
 - Account mapping: home = claw1 = native Claude sub; claw2 = iCloud Max (`~/.claude-icloud`, OAuth via 1Password) — the **same iCloud sub Case's aiquant claw2 uses**.
 
-### aiquant (Case) — PENDING
-- Prior field note: pool claw2+claw3 wired but never rotated (claw3 state untouched since 15 Jul). Full incident-window evidence outstanding; this section to be amended.
+### aiquant (Case) — clean negative
+
+**Outcome:** incident did NOT reproduce. No Fable max-out, no 429, no same-account tier-drop, no organic pool rotation in the 17 Jul 18:00 → 18 Jul 07:40 window.
+
+**Why:** aiquant runs `openai/gpt-5.6-sol` as PRIMARY; the clawd pool is fallback-only and carried no overnight Claude load, so there was nothing to max out.
+
+**State files (raw):**
+- `claw2.json` — five_hour "allowed" only; last real write 07:30 18 Jul. Home account.
+- `claw3.json` — untouched Jul 15 22:09 → 18 Jul (only later write is Case's 07:44 forced-failover test, since cleaned).
+- **No seven_day/weekly window has ever been written** — confirmed against live state AND reconcile backups. Same structural gap as clawdbot1's claw1: weekly telemetry absent, not below-threshold.
+
+**Logs:** zero model_fallback_decision / rate-limit / isError on any Claude backend overnight. Only `pool clawd: rotated` line (07:44:31 18 Jul) is the Case forced-failover test, not incident traffic.
+
+**Fault mapping:**
+- Fault (a) — CONFIRMED structurally (no weekly telemetry ever persisted → pool blind on a weekly 429).
+- Fault (b) — N/A: chain is `clawd/`-prefixed end-to-end; subagents on sol; allowlist carries both referenced Claude rungs. No anthropic/→claude-cli bypass.
+
+**Topology risk (fleet-wide):** aiquant's HOME account is the shared iCloud Max sub — the same account sitting ~0.98 on Friday-Mac and clawdbot1. Single point of exhaustion for three boxes until the 21 Jul reset; aiquant is most exposed because it's home here with no weekly telemetry to flip on.
 
 ## Root causes
 1. **Model-scoped limit windows are invisible to the pool.** Fable-limit 429s carry no known window id → bucketed `"unknown"` → ignored/dropped. → **v0.3.6 shim (as specced).**
@@ -61,7 +77,7 @@ Both accounts' weekly windows reset **21 Jul 01:00 UTC** (`resetsAt 1784595600`)
 ## Recommendations
 - **Ship v0.3.6 as specced** — model-scoped rejected-window shim. Evidence: Friday-Mac `unknown` rejection 17 Jul 18:20 UTC + repeated claw2-sticky Fable 429s.
 - **v0.3.6 doctor addition (proposed):** verify each agent's *live* primary/fallback chain actually routes through the pool provider; warn on `anthropic/`/`clawN/` pins and on Claude-tier-skipping chains. Would have caught clawdbot1 fault (b) instead of READY.
-- **Fleet config sweep:** all hosts to `clawd/`-prefixed full tier chains (Friday-Mac done 18 Jul; clawdbot1 pending; aiquant unknown).
+- **Fleet config sweep:** all hosts to `clawd/`-prefixed full tier chains (Friday-Mac done 18 Jul; clawdbot1 done; aiquant N/A — sol-primary by design, chain already `clawd/`-prefixed and clean).
 - **Fleet auth sweep:** verify non-Claude fallback providers actually authenticate (Friday-Mac OpenAI is dead; needs `openclaw models auth login --provider openai` or an API-key profile).
 - **Consider `pool.degrade.ladder` opt-in** on at least one host before the 21 Jul reset if exhaustion persists — its designed scenario is live right now.
 - **Capacity:** flag shared-iCloud-sub contention to Michael (third sub, or host↔account affinity).
