@@ -206,33 +206,32 @@ else {
   else ok("no sticky — pool is on its home account");
 }
 
-// ── 7. effective chain (config-level pool-bypass audit — CASE 1) ────────────
+// ── 7. effective chain (pool-bypass sweep — CASE 1 config + CASE 2 session) ──
 //
-// CASE 1 (implemented here): a STATIC, at-rest scan of openclaw.json. Every
-// Claude model reference under `agents` must route through the clawd pool;
-// a Claude tier pinned to `anthropic/…`, `claude-cli/…`, or a single
-// `claw<N>/…` account silently defeats cross-account failover — yet doctor
-// used to still say READY (the 17–18 Jul incident: clawdbot1 pinned
-// `anthropic/claude-fable-5`, bypassing the pool). This emits warn(), not
-// bad(): a box may *intentionally* pin one account, so it must not flip the
-// exit code.
+// CASE 1: a STATIC, at-rest scan of openclaw.json. Every Claude model reference
+// under `agents` must route through the clawd pool; a Claude tier pinned to
+// `anthropic/…`, `claude-cli/…`, or a single `claw<N>/…` account silently
+// defeats cross-account failover — yet doctor used to still say READY (the
+// 17–18 Jul incident: clawdbot1 pinned `anthropic/claude-fable-5`).
 //
-// ┌─ TODO(CASE 2 — NOT implemented here; a separate change adds it) ──────────┐
-// │ A LIVE, per-session assertion that `ctx.activeModel` (the model actually  │
-// │ resolved for a running turn) also routes through the pool. Case 1 cannot  │
-// │ see runtime overrides (env, per-launch `--model`, dynamic selection);     │
-// │ case 2 closes that gap by checking the effective model at request time.   │
-// │ Seam: expose the resolved model on ctx and assert its provider prefix ===  │
-// │ the pool id, warning on the same bypass classes as auditEffectiveChain(). │
-// └───────────────────────────────────────────────────────────────────────────┘
+// CASE 2: a STATIC scan of session state. A persisted per-session `/model`
+// override (`~/.openclaw/agents/<agent>/sessions/sessions.json`) bypasses the
+// pool exactly like a config pin but lives outside openclaw.json — invisible to
+// case 1. Same off-pool predicate, same warn classes.
+//
+// Both emit warn(), never bad(): a box may *intentionally* pin one account or
+// one session, so neither may flip the exit code / READY.
 console.log("effective chain");
 if (!pool) {
   // No clawd pool ⇒ nothing to bypass; skip the whole section (mirrors §6).
 } else {
-  const { auditEffectiveChain } = await import(join(EXT_DIR, "dist", "chain-audit.js")).catch(
-    () => import(join(REPO_DIR, "dist", "chain-audit.js")),
-  );
+  const { auditEffectiveChain, auditSessionOverrides } = await import(
+    join(EXT_DIR, "dist", "chain-audit.js")
+  ).catch(() => import(join(REPO_DIR, "dist", "chain-audit.js")));
   const poolId = pool.id ?? "clawd";
+  const verbose = process.env.DOCTOR_VERBOSE === "1" || process.argv.includes("--verbose");
+
+  // ── case 1: config-level refs ──────────────────────────────────────────────
   const findings = auditEffectiveChain(config, poolId);
   const warns = findings.filter((f) => f.severity === "warn");
   const notes = findings.filter((f) => f.severity === "note");
@@ -242,7 +241,6 @@ if (!pool) {
   // Collapse to one line so the section stays scannable; DOCTOR_VERBOSE lists
   // them. A dead-noisy section trains people to skip it — the opposite of the
   // point. (Live-tier bypasses above are always listed in full.)
-  const verbose = process.env.DOCTOR_VERBOSE === "1" || process.argv.includes("--verbose");
   if (notes.length > 0) {
     if (verbose) {
       for (const f of notes) {
@@ -255,6 +253,42 @@ if (!pool) {
     }
   }
   if (warns.length === 0) ok(`effective chain: all live Claude tiers route through the ${poolId} pool`);
+
+  // ── case 2: session-level /model overrides ─────────────────────────────────
+  // Enumerate agents/*/sessions/sessions.json. A store that is expected (its
+  // agent has a sessions/ dir) but absent/unparseable gets a LOUD skip — never
+  // a silent pass; a missed off-pool pin is worse than an extra line.
+  const AGENTS_DIR = join(HOME, ".openclaw", "agents");
+  const stores = [];
+  try {
+    for (const agent of readdirSync(AGENTS_DIR)) {
+      const sessionsDir = join(AGENTS_DIR, agent, "sessions");
+      if (!existsSync(sessionsDir)) continue; // not an agent-with-sessions
+      stores.push(join(sessionsDir, "sessions.json"));
+    }
+  } catch {
+    /* no agents dir at all */
+  }
+  if (stores.length === 0) {
+    note("session overrides: no agent session stores found (clean environment)");
+  } else {
+    let sessionWarns = 0;
+    let readable = 0;
+    for (const storePath of stores) {
+      const parsed = readJson(storePath);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        warn(`session-override check SKIPPED for ${storePath} (store unreadable)`);
+        continue;
+      }
+      readable++;
+      const sessionFindings = auditSessionOverrides(parsed, true);
+      for (const f of sessionFindings) {
+        warn(`${f.surface}: ${f.ref} ${f.reason}`);
+        sessionWarns++;
+      }
+    }
+    if (readable > 0 && sessionWarns === 0) ok("session overrides: no off-pool /model pins");
+  }
 }
 
 // ── 8. watchdog ─────────────────────────────────────────────────────────────

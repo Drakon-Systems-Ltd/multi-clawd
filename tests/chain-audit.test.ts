@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { auditEffectiveChain, isClaudeModelId, type ChainFinding } from "../src/chain-audit";
+import {
+  auditEffectiveChain,
+  auditSessionOverrides,
+  isClaudeModelId,
+  type ChainFinding,
+  type SessionOverrideEntry,
+} from "../src/chain-audit";
 
 const POOL = "clawd";
 
@@ -162,5 +168,122 @@ describe("auditEffectiveChain", () => {
     const warns = warnsOnly(auditEffectiveChain(config, POOL));
     expect(warns).toHaveLength(1);
     expect(warns[0].surface).toBe("crons[0].model");
+  });
+});
+
+describe("auditSessionOverrides", () => {
+  // All fixtures below are LIVE entry shapes lifted verbatim from real
+  // sessions.json stores (aiquant Linux + Friday-Mac), not reconstructed.
+  const store = (entries: Record<string, SessionOverrideEntry>) => entries;
+
+  test("POSITIVE strong (live aiquant main): anthropic/ user pin → one strong warn", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:x": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("warn");
+    expect(findings[0].surface).toBe("session agent:main:x");
+    expect(findings[0].ref).toBe("anthropic/claude-opus-4-8");
+    expect(findings[0].reason).toContain("bypassing the clawd pool");
+    expect(findings[0].reason).toContain("no cross-account failover");
+  });
+
+  test("POSITIVE warn (live aiquant telegram): claw2/ user pin → one account-pin warn", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:telegram": { providerOverride: "claw2", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("warn");
+    expect(findings[0].ref).toBe("claw2/claude-opus-4-8");
+    expect(findings[0].reason).toContain("single pool account");
+  });
+
+  test("NEGATIVE auto-fallback (live Friday-Mac): clawd/ source=auto → ZERO (source gate excludes)", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:mac": { providerOverride: "clawd", modelOverride: "claude-opus-4-8", modelOverrideSource: "auto" } }),
+      true,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test("NEGATIVE clawd manual pin: clawd/ source=user → ZERO (clawd is in-pool)", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:y": { providerOverride: "clawd", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test("SCHEMA DRIFT: source present but no provider field → one schema-drift warn", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:drift": { modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("warn");
+    expect(findings[0].surface).toBe("session agent:main:drift");
+    expect(findings[0].reason).toContain("schema drift");
+  });
+
+  test("NO POOL: any override with poolConfigured=false → ZERO (skip)", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:x": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
+      false,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test("config-level entry (no modelOverrideSource) → ZERO (source gate excludes)", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:cfg": { model: "claude-fable-5", modelProvider: "clawd" } as SessionOverrideEntry }),
+      true,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test("future deliberate source (source=operator, off-pool) is still caught — gate is !== 'auto', not === 'user'", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:op": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "operator" } }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].ref).toBe("anthropic/claude-opus-4-8"); // classified strong despite novel source
+    expect(findings[0].reason).toContain("bypassing the clawd pool");
+  });
+
+  test("modelProvider is used when providerOverride is absent (auto-fallback that drifted to user)", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:mp": { modelProvider: "anthropic", modelOverride: "claude-opus-4-7", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].ref).toBe("anthropic/claude-opus-4-7");
+  });
+
+  test("non-Claude session pin (openai/) → ZERO (only Claude tiers need pool failover)", () => {
+    const findings = auditSessionOverrides(
+      store({ "agent:main:oai": { providerOverride: "openai", modelOverride: "gpt-5.6-sol", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test("mixed real store: strong + account-pin warn, auto/clawd/openai entries clean", () => {
+    const findings = auditSessionOverrides(
+      store({
+        "agent:main:strong": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" },
+        "agent:main:pin": { providerOverride: "claw2", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" },
+        "agent:main:auto": { providerOverride: "clawd", modelOverride: "claude-opus-4-8", modelOverrideSource: "auto" },
+        "agent:main:pool": { providerOverride: "clawd", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" },
+        "agent:main:oai": { modelProvider: "xai", model: "grok-4.5" } as SessionOverrideEntry,
+        "agent:main:empty": {} as SessionOverrideEntry,
+      }),
+      true,
+    );
+    expect(findings).toHaveLength(2);
+    expect(findings.map((f) => f.ref).sort()).toEqual(["anthropic/claude-opus-4-8", "claw2/claude-opus-4-8"]);
+    expect(findings.every((f) => f.severity === "warn")).toBe(true);
   });
 });

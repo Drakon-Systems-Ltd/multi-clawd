@@ -12,10 +12,13 @@
  * side-effect free and deterministic so it can be unit-tested against fixtures;
  * `scripts/doctor.mjs` imports it and renders the findings.
  *
- * SCOPE: this is the CONFIG-LEVEL check only. It cannot see runtime overrides
- * (env, per-launch `--model`, dynamic selection). Closing that gap is CASE 2 —
- * a live per-session `ctx.activeModel` assertion — which a separate change adds;
- * see the seam in doctor.mjs.
+ * SCOPE (case 1): the CONFIG-LEVEL check only — every Claude ref written into
+ * openclaw.json. CASE 2 (`auditSessionOverrides`, below) closes the adjacent
+ * gap: a persisted per-session `/model` override lives in session state, not
+ * openclaw.json, yet bypasses the pool exactly like a config pin. Both share
+ * ONE off-pool predicate (`offPoolClaudeRef`) so the two cases can never drift.
+ * (A truly live per-turn `ctx.activeModel` assertion — env / per-launch
+ * `--model` on a running request — remains out of scope for both.)
  */
 import { isModernClaudeModelId } from "./models.js";
 
@@ -59,29 +62,49 @@ function parseRef(ref: string): { provider?: string; modelId: string } {
 }
 
 /**
- * Classify one reference against the pool id. Returns a reason string when the
- * ref is a Claude model that BYPASSES the pool, or null when it is fine
- * (pool-routed, non-Claude, a bare/ambiguous id, or an unrelated provider).
+ * THE off-pool predicate — the single source of truth shared by case 1
+ * (`auditEffectiveChain`, config refs) and case 2 (`auditSessionOverrides`,
+ * session `/model` pins). Classifies one `provider/model` reference against the
+ * pool provider id:
+ *   - `<poolId>/…`            → null  (correct pool routing)
+ *   - `anthropic/…`, `claude-cli/…` → "strong" (off-pool Claude, no failover)
+ *   - `claw<N>/…`             → "warn" (single pool account, no cross-account failover)
+ *   - non-Claude / bare id / unrelated provider → null
+ * Returns null whenever the ref is fine or routing is ambiguous. Reason strings
+ * are built by the callers from this severity + the parsed provider, so the two
+ * cases can never disagree on WHAT bypasses the pool.
  */
-function classifyBypass(ref: string, poolId: string): string | null {
+export function offPoolClaudeRef(ref: string, poolId: string): "strong" | "warn" | null {
   if (typeof ref !== "string" || ref.length === 0) return null;
   const { provider, modelId } = parseRef(ref);
   if (!isClaudeModelId(modelId)) return null; // not a Claude tier → nothing to fail over
   if (provider === undefined) return null; // bare id: routing is ambiguous, don't cry wolf
   if (provider === poolId) return null; // correct pool routing
+  if (provider === "anthropic" || provider === "claude-cli") return "strong";
+  if (ACCOUNT_PIN_RE.test(provider)) return "warn";
+  // Some other provider prefix on a Claude id (e.g. a custom gateway): out of
+  // scope for this check — do not warn.
+  return null;
+}
 
+/**
+ * Classify one config reference against the pool id. Returns a reason string
+ * when the ref is a Claude model that BYPASSES the pool, or null when it is fine
+ * (pool-routed, non-Claude, a bare/ambiguous id, or an unrelated provider).
+ * Delegates the WHAT to `offPoolClaudeRef`; owns only the reason wording.
+ */
+function classifyBypass(ref: string, poolId: string): string | null {
+  const severity = offPoolClaudeRef(ref, poolId);
+  if (!severity) return null;
+  const { provider } = parseRef(ref);
   if (provider === "anthropic") {
     return `routes direct to the Anthropic API/native, bypassing the ${poolId} pool — no cross-account failover`;
   }
   if (provider === "claude-cli") {
     return `routes direct to the claude CLI, bypassing the ${poolId} pool — no cross-account failover`;
   }
-  if (ACCOUNT_PIN_RE.test(provider)) {
-    return `pins a single pool account; cross-account failover won't fire — use ${poolId}/ for the pool`;
-  }
-  // Some other provider prefix on a Claude id (e.g. a custom gateway): out of
-  // scope for this check — do not warn.
-  return null;
+  // severity === "warn": a single pool-account pin (claw<N>).
+  return `pins a single pool account; cross-account failover won't fire — use ${poolId}/ for the pool`;
 }
 
 interface CollectedRef {
@@ -213,6 +236,90 @@ export function auditEffectiveChain(config: unknown, poolId: string | undefined 
     const reason = classifyBypass(ref, poolId);
     if (!reason) continue;
     findings.push({ surface, ref, severity: allowlist ? "note" : "warn", reason });
+  }
+  return findings;
+}
+
+// ── CASE 2 — session-override audit ──────────────────────────────────────────
+
+/**
+ * The provider prefix that routes through the clawd pool. Case 2 only receives
+ * a `poolConfigured` boolean (a session store carries no pool id), so the pool
+ * provider name is fixed here — it is `clawd` by construction across every
+ * multi-clawd deployment. `offPoolClaudeRef` still does the comparison, so this
+ * stays the ONE predicate shared with case 1.
+ */
+const POOL_PROVIDER = "clawd";
+
+/**
+ * One entry in `~/.openclaw/agents/<agent>/sessions/sessions.json`, keyed by
+ * session_key. Only the fields that determine pool routing are typed; real
+ * entries carry more (auth-profile overrides, compaction counts, …).
+ */
+export interface SessionOverrideEntry {
+  /** Bare provider of a manual `/model` pin, e.g. "anthropic" / "claw2" / "clawd". */
+  providerOverride?: string;
+  /** Provider of the resolved model — present on auto-fallback entries lacking `providerOverride`. */
+  modelProvider?: string;
+  /** Bare model id, no provider prefix, e.g. "claude-opus-4-8". */
+  modelOverride?: string;
+  /** "auto" = auto-fallback; "user" = the known manual /model pin; absent = config-level/cron/probe. */
+  modelOverrideSource?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Audit persisted per-session `/model` overrides for pool bypass. A manual pin
+ * to a non-pool provider lives in session state, not openclaw.json, yet defeats
+ * cross-account failover exactly like a config pin — invisible to case 1.
+ *
+ * @param sessions the parsed `sessions.json` object (keyed by session_key)
+ * @param poolConfigured whether a clawd pool exists (no pool ⇒ nothing to bypass ⇒ [])
+ * @returns all-`warn` findings (informational; never flips doctor's exit code).
+ */
+export function auditSessionOverrides(
+  sessions: Record<string, SessionOverrideEntry> | null | undefined,
+  poolConfigured: boolean,
+): ChainFinding[] {
+  if (!poolConfigured) return []; // no pool ⇒ nothing to bypass ⇒ skip
+  const findings: ChainFinding[] = [];
+  for (const [sessionKey, entry] of Object.entries(sessions ?? {})) {
+    if (!entry || typeof entry !== "object") continue;
+
+    // 1. SOURCE GATE (first, mandatory). Consider ONLY deliberate overrides.
+    //    "user" is the known manual /model literal, but we test `!== "auto"`
+    //    (not `=== "user"`) so any future deliberate source — "api"/"operator"/…
+    //    — is still caught; auto-fallback is the ONLY thing to exclude. Absent
+    //    source = a config-level/cron/probe entry, never a session pin.
+    const source = entry.modelOverrideSource;
+    if (typeof source !== "string" || source === "auto") continue;
+
+    // 2. PROVIDER. `providerOverride` is the manual pin; fall back to the
+    //    resolved `modelProvider`. Passing the source gate with no provider at
+    //    all is SCHEMA DRIFT — surface it rather than silently skip (a
+    //    false-negative in a safety doctor is worse than a false-positive).
+    const provider = entry.providerOverride ?? entry.modelProvider;
+    if (!provider) {
+      findings.push({
+        surface: `session ${sessionKey}`,
+        ref: entry.modelOverride ?? "(no model)",
+        severity: "warn",
+        reason: `session override present (source=${source}) but provider field missing — schema drift, cannot verify pool routing`,
+      });
+      continue;
+    }
+
+    // 3. OFF-POOL CLASSIFY via the shared case-1 predicate.
+    const ref = `${provider}/${entry.modelOverride ?? ""}`;
+    const severity = offPoolClaudeRef(ref, POOL_PROVIDER);
+    if (!severity) continue; // clawd/ (in-pool) or non-Claude → fine
+
+    // 4. Emit — all `warn` for doctor (informational; never flips READY).
+    const reason =
+      severity === "strong"
+        ? `off-pool /model pin — routes direct to ${provider}, bypassing the ${POOL_PROVIDER} pool; no cross-account failover`
+        : `/model pin to a single pool account (${provider}); cross-account failover won't fire — use ${POOL_PROVIDER}/ for the pool`;
+    findings.push({ surface: `session ${sessionKey}`, ref, severity: "warn", reason });
   }
   return findings;
 }
