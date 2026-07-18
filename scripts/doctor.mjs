@@ -9,7 +9,8 @@
  *   4. per-account credential-source health
  *   5. per-account rate-limit telemetry (state files, age, windows)
  *   6. pool configuration + sticky state
- *   7. eviction watchdog presence (launchd/systemd)
+ *   7. effective chain — Claude tiers must route through the clawd pool
+ *   8. eviction watchdog presence (launchd/systemd)
  *
  * Flags:
  *   --preflight   print the exact config keys to strip before a --force
@@ -34,6 +35,7 @@ const args = new Set(process.argv.slice(2));
 let failures = 0;
 const ok = (msg) => console.log(`  ✅ ${msg}`);
 const warn = (msg) => console.log(`  ⚠️  ${msg}`);
+const note = (msg) => console.log(`  ℹ️  ${msg}`);
 const bad = (msg) => {
   failures++;
   console.log(`  ❌ ${msg}`);
@@ -204,7 +206,44 @@ else {
   else ok("no sticky — pool is on its home account");
 }
 
-// ── 7. watchdog ─────────────────────────────────────────────────────────────
+// ── 7. effective chain (config-level pool-bypass audit — CASE 1) ────────────
+//
+// CASE 1 (implemented here): a STATIC, at-rest scan of openclaw.json. Every
+// Claude model reference under `agents` must route through the clawd pool;
+// a Claude tier pinned to `anthropic/…`, `claude-cli/…`, or a single
+// `claw<N>/…` account silently defeats cross-account failover — yet doctor
+// used to still say READY (the 17–18 Jul incident: clawdbot1 pinned
+// `anthropic/claude-fable-5`, bypassing the pool). This emits warn(), not
+// bad(): a box may *intentionally* pin one account, so it must not flip the
+// exit code.
+//
+// ┌─ TODO(CASE 2 — NOT implemented here; a separate change adds it) ──────────┐
+// │ A LIVE, per-session assertion that `ctx.activeModel` (the model actually  │
+// │ resolved for a running turn) also routes through the pool. Case 1 cannot  │
+// │ see runtime overrides (env, per-launch `--model`, dynamic selection);     │
+// │ case 2 closes that gap by checking the effective model at request time.   │
+// │ Seam: expose the resolved model on ctx and assert its provider prefix ===  │
+// │ the pool id, warning on the same bypass classes as auditEffectiveChain(). │
+// └───────────────────────────────────────────────────────────────────────────┘
+console.log("effective chain");
+if (!pool) {
+  // No clawd pool ⇒ nothing to bypass; skip the whole section (mirrors §6).
+} else {
+  const { auditEffectiveChain } = await import(join(EXT_DIR, "dist", "chain-audit.js")).catch(
+    () => import(join(REPO_DIR, "dist", "chain-audit.js")),
+  );
+  const poolId = pool.id ?? "clawd";
+  const findings = auditEffectiveChain(config, poolId);
+  const warns = findings.filter((f) => f.severity === "warn");
+  const notes = findings.filter((f) => f.severity === "note");
+  for (const f of warns) warn(`${f.surface}: ${f.ref} ${f.reason}`);
+  for (const f of notes) {
+    note(`${f.surface}: ${f.ref} (allowlist entry, not a live tier) ${f.reason}`);
+  }
+  if (warns.length === 0) ok(`effective chain: all Claude tiers route through the ${poolId} pool`);
+}
+
+// ── 8. watchdog ─────────────────────────────────────────────────────────────
 console.log("eviction watchdog");
 let watchdogFound = false;
 try {
@@ -222,7 +261,7 @@ try {
 if (watchdogFound) ok("watchdog scheduled");
 else warn("no watchdog found (needed until openclaw#107596 ships — see README)");
 
-// ── 8. optional live probe ──────────────────────────────────────────────────
+// ── 9. optional live probe ──────────────────────────────────────────────────
 if (args.has("--probe")) {
   console.log("live probe (spends one turn)");
   const ref = pool ? `${pool.id ?? "clawd"}/${pool.defaultModel ?? "claude-fable-5"}` : accounts[0] ? `${accounts[0].id}/claude-fable-5` : undefined;
