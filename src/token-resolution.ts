@@ -50,7 +50,7 @@ export interface TokenRefResolver {
 }
 
 /**
- * Fixed-reason-code redaction (Case's gate-2): the rendered message must leak
+ * Fixed-reason-code redaction: the rendered message must leak
  * none of the three classes — resolved token values, SecretRef metadata
  * (provider/id can themselves be sensitive), or provider-supplied exception
  * text. Only the error CLASS name survives, for debuggability.

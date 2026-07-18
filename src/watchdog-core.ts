@@ -1,7 +1,6 @@
 /**
- * Turn-safe eviction-watchdog decision core (v0.3) — Jarvis's lane-guard
- * spec, adopted verbatim from the clawdbot1 implementation that stopped
- * blind restarts eating live chat turns:
+ * Turn-safe eviction-watchdog decision core (v0.3) — a lane-guard that
+ * stops blind restarts eating live chat turns:
  *
  * - An eviction with a turn in flight DEFERS the restart; the pending
  *   eviction is persisted so later ticks re-evaluate (and survive log

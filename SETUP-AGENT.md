@@ -26,6 +26,15 @@ If `claude` is missing: `npm install -g @anthropic-ai/claude-code`.
 
 ## 2. Install the plugin
 
+**Registry install (recommended, v1.0+)** — the gateway pulls the prebuilt
+package; no clone, no build, nothing to keep in sync:
+
+```bash
+openclaw plugins install @drakon-systems/multi-clawd --pin
+```
+
+**From source** (contributors, or ahead of a published release):
+
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git /tmp/multi-clawd
 cd /tmp/multi-clawd && npm install && npm run build
@@ -125,12 +134,14 @@ one on output; resolution trims it (guaranteed).
 
 After any install or upgrade, run `npm run doctor` (add `--probe` to spend
 one turn proving the pool answers). Fix every ❌ before reporting done.
-On upgrades the full sequence is `git pull` → `npm install` →
+Registry upgrade (npm / ClawHub): `openclaw plugins install
+@drakon-systems/multi-clawd@latest --force` → `openclaw gateway restart` →
+doctor. From source the full sequence is `git pull` → `npm install` →
 `npm run build` → `npm run doctor`; run the build explicitly — the
 `prepare` hook does not reliably refresh `dist/` on this path.
 Use plain `npm install`, NOT `npm install --omit=dev`: the build needs
-`tsc` from devDependencies, so omitting dev deps breaks the explicit
-build step.
+`tsc` from devDependencies, so omitting dev deps breaks the explicit build
+step (source path only — registry installs ship prebuilt `dist/`).
 
 ## 7. Routing — **ASK YOUR HUMAN**
 

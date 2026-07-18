@@ -121,7 +121,7 @@ SDK (`dist/registry-*.js`, `dist/model-catalog-*.js`,
 
 ## The pool (v0.2): proactive near-limit rotation
 
-Michael's requirement: roll to the second account when the first is **nearly**
+The design requirement: roll to the second account when the first is **nearly**
 maxed out (not after it hard-fails), and when both accounts / Anthropic are
 down, let the chain drop to OpenAI then xAI. Reactive failover alone can't do
 "nearly" — it needs a usage signal and a pre-error decision point.
@@ -130,7 +130,7 @@ down, let the chain drop to OpenAI then xAI. Reactive failover alone can't do
 
 The Claude CLI's stream-json output emits an undocumented top-level
 `rate_limit_event` record after each turn (verified live 2026-07-15,
-cross-checked with Jarvis's 13-Jul captures):
+cross-checked with independent 13-Jul captures):
 
 ```json
 {"type":"rate_limit_event","rate_limit_info":{
@@ -141,7 +141,7 @@ cross-checked with Jarvis's 13-Jul captures):
   "isUsingOverage":false}}
 ```
 
-Fields vary by account/window (Jarvis's sample had `overageStatus`; ours had
+Fields vary by account/window (some samples carry `overageStatus`, others
 `utilization`) — hence the tolerant parser in `shim-core.ts`: unknown
 statuses/windows pass through, missing fields are fine, junk is ignored.
 
@@ -227,8 +227,8 @@ restart, once per event) until upstream PR openclaw#107596 lands.
 
 ## v0.3: hardening (fleet-feedback release)
 
-Built from the 15-Jul fleet feedback round (Jarvis, Case, Edith, Athena,
-Vision). Everything below is unit-tested; base includes 7089c88 (shim
+Built from the 15-Jul field feedback round. Everything below is unit-tested;
+base includes 7089c88 (shim
 window-persistence fix — a five_hour-only turn no longer erases the last
 seven_day utilization; windows merge and expire individually, 24h default).
 
@@ -242,7 +242,7 @@ rotation is picked up on expiry); sync surfaces (resolveSyntheticAuth) peek
 the warm cache. Failures degrade only that account, are never thrown, never
 cached, and are logged with a fixed reason code
 (`credential_resolution_failed (ErrorClass)`) — no token values, no ref
-metadata, no provider text (Case's three leak classes, all tested). Token
+metadata, no provider text (three leak classes, all tested). Token
 sources are mutually exclusive per account; violations warn loudly with
 deterministic precedence (native > file > ref).
 
@@ -266,7 +266,7 @@ is abandoned immediately. Sticky state persists at
   (file shape / macOS keychain presence / credentials.json access token /
   ref resolution) without spending quota, and raises an alert on the
   ok→broken transition — registration success no longer masks dead logins
-  (the aiquant silent-login-death class).
+  (a native silent-login-death class).
 - **Ref-backed probe failure classification (v0.3.x).** A `oauthTokenRef`
   probe no longer declares a login dead on the first empty resolve: a
   transient provider outage (op timeout, ENETUNREACH — `resolveDetailed`
@@ -283,7 +283,7 @@ is abandoned immediately. Sticky state persists at
   too; the out-of-process watchdog appends to
   `state/multi-clawd/alerts-spool.jsonl`, ingested at each heartbeat.
 
-### Turn-safe eviction watchdog (Jarvis's lane-guard pattern)
+### Turn-safe eviction watchdog (lane-guard pattern)
 
 `scripts/eviction-watchdog.mjs` now defers restarts while work is in flight,
 detected two ways: any agent session transcript written within 180s (all
@@ -311,7 +311,7 @@ tested (`src/watchdog-core.ts`).
 
 - Same-account **concurrent** shim writes are not synchronized: the
   window-persistence fix is read-merge-atomic-rename, which closes the
-  sequential-overwrite defect but is not concurrency coverage (Case). The
+  sequential-overwrite defect but is not concurrency coverage. The
   corrupt-state preservation below does not change this: two truly concurrent
   shims for the same account still race read→write, **last-rename-wins** drops
   whichever event lost the race. Full concurrency coverage is v0.4 work.
@@ -351,16 +351,16 @@ tested (`src/watchdog-core.ts`).
   `prepareExecution` context has no session id. True session affinity is
   part of the v0.4 standalone-proxy track (Hermes runtimes).
 - **CLI-served turns are extension-tool-mute ("Ekho-mute", observed live
-  17 Jul 2026 on Friday-Mac).** When a turn is served through a CLI backend
+  17 Jul 2026 in production).** When a turn is served through a CLI backend
   (reseeded CLI harness rather than the native runtime), extension/MCP tools
   — `ekho_send`, cron, sessions — are absent for the duration. The mute is
   **one-directional**: inbound tool calls die, but exec and file writes
   survive, which is why an ekho-sdk wire call works as a stopgap and why the
   file-based status JSON keeps reporting. Consequences on the record:
-  - Any host whose Claude fallback is this class (aiquant's claw2→claw3
-    `oauthTokenFile`/CLI-reseed included) is Ekho-mute through the tool
+  - Any host whose Claude fallback is this class (a claw2→claw3
+    `oauthTokenFile`/CLI-reseed chain included) is Ekho-mute through the tool
     exactly when it may most need to send a security alert or refusal
-    (Case's Iron Dome point). Operators should know this before leaning on
+    (a known security-fallback caveat). Operators should know this before leaning on
     Claude fallback in anger.
   - Accepted v0.3.x fix (publisher's call): a **gateway-side queued-outbox
     flush** — plugin-local and testable, it restores the capability that
@@ -401,7 +401,7 @@ and raise an operator alert (`degrade:<poolId>`), and turns keep full session
 continuity — same account, same config dir, different tier.
 
 Note the chain-level dual: successive fallbacks `clawd/claude-fable-5 →
-clawd/claude-opus-4-8` (as aiquant runs) achieve tier degradation for
+clawd/claude-opus-4-8` (as a fallback-primary host runs) achieve tier degradation for
 multi-account pools reactively. Pool-internal degradation adds the
 single-account case, pin exemptions, and one fewer failed launch.
 
@@ -498,12 +498,12 @@ Then reference `claw2/claude-fable-5` in the fallback chain.
 - v0.3 — `oauthTokenRef` secret-manager resolvers (1Password), setup helper
   (`claude setup-token` capture into an isolated dir).
 - v1.0 — npm + ClawHub parity release (publishes as a ClawHub PLUGIN, not
-  a skill). Trigger: after the aiquant rollout closes out. Release gates:
+  a skill). Trigger: after the initial internal rollout closes out. Release gates:
   - `npm pack --dry-run` contents check: `scripts/doctor.mjs` and
     `scripts/eviction-watchdog.mjs` must ship in the tarball (files list
     fixed 16 Jul 2026; verify anyway before the tag).
   - `clawhub package publish --dry-run` clean before the tag.
   - npm ↔ ClawHub same-day parity: whoever triggers the manual npm publish,
-    the ClawHub publish lands the same day (Jarvis holds the ClawHub side).
+    the ClawHub publish lands the same day.
   - Rollout docs must state the upgrade sequence pull → npm install →
     npm run build → doctor (prepare hook not trusted on the pull path).

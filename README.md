@@ -112,7 +112,27 @@ Code backend runs.
 
 ## Install
 
-**From source (today):**
+**From npm (recommended, v1.0+):**
+
+```bash
+openclaw plugins install @drakon-systems/multi-clawd --pin
+openclaw gateway restart
+```
+
+The gateway pulls the prebuilt package — no clone, no build step, nothing to
+keep in sync. `--pin` records the exact resolved version, so an upgrade is a
+deliberate `@latest`, never a surprise. `openclaw` itself is a *peer*
+dependency (the host provides it), so the install stays lean. Confirm with
+`openclaw plugins list` (expect `multi-clawd` enabled), then run the doctor:
+`node ~/.openclaw/extensions/multi-clawd/scripts/doctor.mjs`.
+
+**From ClawHub (alternative registry):**
+
+```bash
+openclaw plugins install clawhub:drakon-systems/multi-clawd
+```
+
+**From source (contributors, or ahead of a release):**
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
@@ -125,12 +145,6 @@ openclaw plugins install "$(pwd)"
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
 cd multi-clawd; npm install; npm run build
 openclaw plugins install (Get-Location).Path
-```
-
-**From ClawHub (landing shortly):**
-
-```bash
-openclaw plugins install clawhub:drakon-systems/multi-clawd
 ```
 
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
@@ -146,15 +160,23 @@ never print tokens, ask before touching routing).
 **Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
 second Claude subscription you own.
 
-**Upgrading an existing install (git pull):**
+**Upgrading:**
 
 ```bash
+# Registry install (npm / ClawHub):
+openclaw plugins install @drakon-systems/multi-clawd@latest --force
+openclaw gateway restart
+
+# From source:
 cd multi-clawd && git pull && npm install && npm run build && npm run doctor
 ```
 
-Run `npm run build` explicitly — don't rely on the `prepare` hook to
-refresh `dist/` on the pull-upgrade path (observed stale on a live fleet
-rollout; `doctor` flags it as STALE if you forget).
+On the source path run `npm run build` explicitly — don't rely on the
+`prepare` hook to refresh `dist/` on a pull-upgrade (observed stale on a live
+fleet rollout; `doctor` flags it STALE if you forget). If a release adds new
+config keys, `openclaw plugins install --force` validates against the *old*
+manifest — run `node scripts/doctor.mjs --preflight` first for the strip →
+install → re-add plan.
 
 ## Set up a second account
 

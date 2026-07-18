@@ -1,7 +1,6 @@
 /**
  * Pure account-env construction + token-source validation (v0.3), kept free
- * of SDK imports so the child-env injection contract is unit-testable
- * (Case's gate-2 requirement).
+ * of SDK imports so the child-env injection contract is unit-testable.
  */
 import { homedir } from "node:os";
 import { resolve } from "node:path";

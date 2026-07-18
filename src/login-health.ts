@@ -3,7 +3,7 @@
  * dead logins. This checks that each account's credential *source* actually
  * holds something plausible — it does not spend quota on live probes.
  *
- * Observed failure this guards against (aiquant, 2026-07-15): native
+ * Observed failure this guards against: native
  * credentials went blank while the backend still registered fine, so every
  * turn failed "Not logged in" with no operator-visible warning.
  */
