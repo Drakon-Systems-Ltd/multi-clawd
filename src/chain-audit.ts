@@ -39,7 +39,12 @@ export type ChainSeverity = "warn" | "note";
 export function maskSessionKey(key: string): string {
   const segs = key.split(":");
   const last = segs[segs.length - 1];
-  const looksLikeId = /^\d{5,}$/.test(last) || /^[0-9a-f]{6,}(-[0-9a-f]+)*$/i.test(last) || last.length > 12;
+  // Mask ONLY a digit/hex-dominant id tail — a numeric channel id (Telegram
+  // chat id) or a hex/uuid. A blunt length cap would over-mask legitimate long
+  // human session NAMES (e.g. `mc-status-check`, `case-smoke-20260713t2201`),
+  // costing the "operator can still tell WHICH session" actionability: those
+  // carry non-hex letters so they survive here and render in full.
+  const looksLikeId = /^\d{5,}$/.test(last) || /^[0-9a-f]{6,}(-[0-9a-f]+)*$/i.test(last);
   if (!looksLikeId) return key;
   const tail = last.length >= 4 ? last.slice(-4) : last;
   segs[segs.length - 1] = `…${tail}`;

@@ -182,6 +182,13 @@ describe("maskSessionKey", () => {
   test("leaves a non-id tail intact (structural key)", () => {
     expect(maskSessionKey("agent:main:main")).toBe("agent:main:main");
   });
+  test("leaves a long human session NAME intact (has non-hex letters → not an id)", () => {
+    // Would be over-masked by a blunt length cap; must survive for actionability.
+    expect(maskSessionKey("agent:main:mc-status-check")).toBe("agent:main:mc-status-check");
+    expect(maskSessionKey("agent:main:explicit:case-smoke-20260713t222001")).toBe(
+      "agent:main:explicit:case-smoke-20260713t222001",
+    );
+  });
   test("keeps the structural prefix so the warn stays actionable", () => {
     const masked = maskSessionKey("agent:main:telegram:direct:6963520763");
     expect(masked.startsWith("agent:main:telegram:direct:")).toBe(true);
