@@ -216,11 +216,16 @@ export function mergeHealthStates(
  */
 const MODEL_ID_PROVIDER_PREFIXES = [
   "clawd/",
-  "claw2/",
-  "claw3/",
   "claude-cli/",
   "anthropic/",
 ];
+
+// Numbered pool-account prefixes (claw1/, claw2/, … clawN/). A regex so adding
+// a new account to the pool is covered automatically — a hardcoded list that
+// missed e.g. `claw4/` would silently stop canonicalising its model windows,
+// reopening the cross-spelling gating hole for that account. `clawd/` (letter
+// d, the pool alias) is deliberately NOT matched here — it stays explicit.
+const CLAW_ACCOUNT_PREFIX_RE = /^claw\d+\//;
 
 /**
  * Normalise a model id to its canonical bare form by stripping a known
@@ -231,6 +236,8 @@ const MODEL_ID_PROVIDER_PREFIXES = [
  * long-lived (survive to their `resetsAt`, not aged out at 6h).
  */
 export function canonicalizeModelIdForWindow(modelId: string): string {
+  const clawMatch = CLAW_ACCOUNT_PREFIX_RE.exec(modelId);
+  if (clawMatch) return modelId.slice(clawMatch[0].length);
   for (const prefix of MODEL_ID_PROVIDER_PREFIXES) {
     if (modelId.startsWith(prefix)) return modelId.slice(prefix.length);
   }

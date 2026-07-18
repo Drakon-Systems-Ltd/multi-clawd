@@ -60,6 +60,22 @@ describe("canonicalizeModelIdForWindow", () => {
     }
   });
 
+  test("strips ANY numbered pool-account prefix, incl. ones not in the list", () => {
+    // Regex-covered: a new pool account (claw1/, claw4/, claw10/…) is stripped
+    // without editing a hardcoded list, so its model windows keep gating.
+    for (const id of ["claw1/claude-fable-5", "claw4/claude-fable-5", "claw10/claude-fable-5"]) {
+      expect(canonicalizeModelIdForWindow(id)).toBe("claude-fable-5");
+    }
+  });
+
+  test("does NOT strip the `clawd/` pool alias as if it were an account", () => {
+    // clawd/ is the pool alias (letter d), still handled by the explicit list —
+    // but must not be caught by the numbered-account regex.
+    expect(canonicalizeModelIdForWindow("clawd/claude-fable-5")).toBe("claude-fable-5");
+    // A lookalike that is neither a numbered account nor a known prefix stays put.
+    expect(canonicalizeModelIdForWindow("clawx/claude-fable-5")).toBe("clawx/claude-fable-5");
+  });
+
   test("leaves an unknown prefix untouched (conservative)", () => {
     expect(canonicalizeModelIdForWindow("other/claude-fable-5")).toBe("other/claude-fable-5");
   });
