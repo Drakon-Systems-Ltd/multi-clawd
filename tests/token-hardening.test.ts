@@ -6,7 +6,7 @@ import { validateAccountTokenSources } from "../src/account-env";
 const REF = { source: "exec", provider: "onepassword", id: "op://SecretVault/SecretItem/field" };
 const SECRET = "sk-ant-oat01-SUPERSECRETVALUE";
 
-describe("redaction (Case's three leak classes)", () => {
+describe("redaction (three leak classes)", () => {
   test("redacted error carries a fixed reason code — no token, no ref metadata, no provider text", () => {
     const message = redactRefError(REF, new Error(`vault said: ${SECRET} at op://SecretVault/SecretItem`));
     expect(message).toContain("credential_resolution_failed");

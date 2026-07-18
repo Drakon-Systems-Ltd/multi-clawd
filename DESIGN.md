@@ -225,7 +225,7 @@ active*, not a removal — recovery is a full-scope rebuild (gateway restart
 re-runs `register()`). Hence `scripts/eviction-watchdog.mjs` (log-signature →
 restart, once per event) until upstream PR openclaw#107596 lands.
 
-## v0.3: hardening (fleet-feedback release)
+## v0.3: hardening (field-feedback release)
 
 Built from the 15-Jul field feedback round. Everything below is unit-tested;
 base includes 7089c88 (shim
@@ -344,8 +344,8 @@ tested (`src/watchdog-core.ts`).
   (default 14 days), run *after* the merge so a window is aged by its freshest
   `seenAt` — this stops junk `"unknown"` buckets from accreting in the file
   forever.
-- Five-hour windows never carry a utilization number (fleet-wide
-  observation), so proactive rotation can only fire on weekly windows; a
+- Five-hour windows never carry a utilization number (observed
+  across deployments), so proactive rotation can only fire on weekly windows; a
   locally-derived 5h signal (per-account turn counting) is v0.4 design work.
 - Sticky selection is per-pool, not per-session — OpenClaw's
   `prepareExecution` context has no session id. True session affinity is
@@ -370,14 +370,14 @@ tested (`src/watchdog-core.ts`).
     retry-with-grace item; the plugin does not grow into a shim of the whole
     tool system.
   - Design principle, standing: **the telemetry plane stays file-based
-    (git/fleet-context), never Ekho/tool-dependent** — the degraded
+    (git/session-context), never Ekho/tool-dependent** — the degraded
     CLI-served state is precisely when it must keep reporting. The v1
     status-JSON writer already honours this; Bridge-v2-style
     delivery-receipts/pending-auth queues must not be built on Ekho alone.
 
 ## v0.3.5: tier-aware degradation + pinned lanes
 
-Edith's fleet-feedback features. When the WHOLE pool is exhausted, a launch
+The tier-degradation features. When the WHOLE pool is exhausted, a launch
 steps down the configured same-provider ladder (e.g. Fable 5 → Opus 4.8) on
 the least-bad account instead of hard-failing to the next provider. Rules:
 

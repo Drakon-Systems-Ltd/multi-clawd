@@ -240,7 +240,7 @@ describe("reset-aware staleness (fix A)", () => {
 
   test("a model-rejected window with a days-away reset survives an idle >6h account", () => {
     // Account last observed 8h ago; the model cap resets in 2 days. Rotation
-    // for that model must still fire — this is the incident class fix A targets.
+    // for that model must still fire — this is the failure class fix A targets.
     const s = state(
       { [modelWindowKey("claude-fable-5")]: { status: "rejected", resetsAt: NOW_S + 2 * 86400, seenAt: NOW - 3_600_000 * 8 } },
       NOW - 3_600_000 * 8,

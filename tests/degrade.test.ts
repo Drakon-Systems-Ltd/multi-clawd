@@ -73,8 +73,8 @@ describe("matchesPin (never-degrade lanes)", () => {
   test("agentDir substring pin matches", () => {
     expect(
       matchesPin(
-        [{ agentDirIncludes: "vitabooks" }],
-        { agentDir: "/home/edith/.openclaw/agents/vitabooks", workspaceDir: "/w" },
+        [{ agentDirIncludes: "billing-app" }],
+        { agentDir: "/home/user/.openclaw/agents/billing-app", workspaceDir: "/w" },
       ),
     ).toBe(true);
   });
@@ -82,8 +82,8 @@ describe("matchesPin (never-degrade lanes)", () => {
   test("workspaceDir substring pin matches", () => {
     expect(
       matchesPin(
-        [{ workspaceDirIncludes: "vep-bursar" }],
-        { agentDir: "/a", workspaceDir: "/srv/vep-bursar/books" },
+        [{ workspaceDirIncludes: "client-portal" }],
+        { agentDir: "/a", workspaceDir: "/srv/client-portal/books" },
       ),
     ).toBe(true);
   });
@@ -91,7 +91,7 @@ describe("matchesPin (never-degrade lanes)", () => {
   test("non-matching launches are not pinned", () => {
     expect(
       matchesPin(
-        [{ agentDirIncludes: "vitabooks" }, { workspaceDirIncludes: "contracts" }],
+        [{ agentDirIncludes: "billing-app" }, { workspaceDirIncludes: "contracts" }],
         { agentDir: "/agents/main", workspaceDir: "/dev/scratch" },
       ),
     ).toBe(false);

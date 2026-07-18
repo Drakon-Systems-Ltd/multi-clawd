@@ -1,5 +1,5 @@
 /**
- * Tier-aware degradation (v0.3.5, Edith's feature): when the WHOLE pool is
+ * Tier-aware degradation (v0.3.5): when the WHOLE pool is
  * exhausted for the requested model, step down to a configured same-provider
  * model on the least-bad account instead of hard-failing to the next
  * provider. Makes the pool useful even on single-account hosts (a pool of

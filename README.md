@@ -173,7 +173,7 @@ cd multi-clawd && git pull && npm install && npm run build && npm run doctor
 
 On the source path run `npm run build` explicitly — don't rely on the
 `prepare` hook to refresh `dist/` on a pull-upgrade (observed stale on a live
-fleet rollout; `doctor` flags it STALE if you forget). If a release adds new
+production rollout; `doctor` flags it STALE if you forget). If a release adds new
 config keys, `openclaw plugins install --force` validates against the *old*
 manifest — run `node scripts/doctor.mjs --preflight` first for the strip →
 install → re-add plan.
@@ -274,7 +274,7 @@ error.
     "degrade": {                      // v0.3.5: last step before provider drop
       "ladder": ["claude-opus-4-8"],  // whole pool exhausted → same account, lower tier
       "pins": [                       // contractual lanes never degrade
-        { "agentDirIncludes": "vitabooks" }
+        { "agentDirIncludes": "billing-app" }
       ]
     }
   }
@@ -387,7 +387,7 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
 ## Status & roadmap
 
-Early but real — built for and dogfooded on our own fleet.
+Early but real — built for and dogfooded in production.
 
 - **v0.1** — single extra account, verified end-to-end ✅
 - **v0.1.1** — `jsonlDialect` declared on registered backends, fixing raw
@@ -398,7 +398,7 @@ Early but real — built for and dogfooded on our own fleet.
   `rate_limit_event` health; native (keychain) accounts; future-proof model
   resolution (mirrored catalog + permissive `claude-*` pass-through);
   eviction watchdog; vitest suite ✅
-- **v0.3** — hardening from fleet feedback: `oauthTokenRef` via gateway
+- **v0.3** — hardening from field feedback: `oauthTokenRef` via gateway
   secret providers with strict redaction; sticky rotation with anti-flap
   dwell; login-health probes + heartbeat operator alerts; turn-safe
   watchdog (lane-guard); `doctor` + `--preflight`; build-on-install; shim
@@ -415,7 +415,7 @@ Early but real — built for and dogfooded on our own fleet.
   (weekly, model:*) bind until their reset regardless of observation age
   (capped at 8d with a clock-skew alarm), reset-less windows keep TTL/decay,
   and model windows age by their own TTL independent of pool `staleAfterMs`
-  — closes the quiet-pool blindness half of the no-flip incident class ✅
+  — closes the quiet-pool blindness half of the no-flip failure class ✅
 - **v0.4** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; true per-session affinity; local
   five-hour-window signal (turn counting)

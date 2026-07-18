@@ -504,8 +504,8 @@ export default definePluginEntry({
     // empty in the real registration pass and expose the live config behind
     // `api.runtime.config.current()` instead (mirrors the bundled active-memory
     // / thread-ownership plugins). Reading only `api.config` therefore silently
-    // no-ops the plugin on 2026.7.x — claw2 never registers (incident 2026-07-14
-    // after the 2026.6.11 → 2026.7.1 upgrade).
+    // no-ops the plugin on 2026.7.x — claw2 never registers (observed after
+    // the 2026.6.11 → 2026.7.1 upgrade).
     //
     // Preference order, robust on both 2026.6.x and 2026.7.x:
     //   1. live runtime config via api.runtime.config.current()  (2026.7.x)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * multi-clawd doctor — one command that says whether this box is actually
- * ready (Case's v0.3 spec). Checks, without ever printing secret values:
+ * ready (per the v0.3 spec). Checks, without ever printing secret values:
  *
  *   1. plugin install + manifest/config key agreement (the --force trap)
  *   2. compiled-artifact freshness (stale dist detection)
