@@ -1,10 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   classifyAccountHealth,
   choosePoolAccount,
   pickPoolAccountForLaunch,
 } from "../src/health";
-import type { AccountHealthState } from "../src/shim-core";
+import { modelWindowKey, type AccountHealthState } from "../src/shim-core";
 
 const NOW = 1_784_100_000_000; // ms
 const NOW_S = NOW / 1000;
@@ -18,9 +18,11 @@ describe("classifyAccountHealth", () => {
     expect(classifyAccountHealth(undefined, {}, NOW).verdict).toBe("no_data");
   });
 
-  test("stale state means no_data", () => {
+  test("stale reset-less state means no_data", () => {
+    // A window carrying NO reset stamp ages out by staleAfterMs. With nothing
+    // else live, the account has no evidence to act on → no_data.
     const s = state(
-      { five_hour: { status: "rejected", seenAt: NOW - 3_600_000 * 7, resetsAt: NOW_S + 60 } },
+      { five_hour: { status: "allowed", utilization: 0.2, seenAt: NOW - 3_600_000 * 7 } },
       NOW - 3_600_000 * 7,
     );
     expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("no_data");
@@ -155,9 +157,12 @@ describe("per-window aging (post window-merge persistence)", () => {
     expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
   });
 
-  test("a stale rejected window cannot mark the account exhausted", () => {
+  test("a stale RESET-LESS rejected window cannot mark the account exhausted", () => {
+    // No reset stamp → aged out by staleAfterMs like any other reset-less
+    // window. (A reset-BEARING weekly window instead survives — see the
+    // reset-aware suite below.)
     const s = state({
-      seven_day: { status: "rejected", resetsAt: NOW_S + 3600, seenAt: NOW - 3_600_000 * 7 },
+      seven_day: { status: "rejected", seenAt: NOW - 3_600_000 * 7 },
       five_hour: { status: "allowed", seenAt: NOW - 1000 },
     });
     expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
@@ -177,5 +182,86 @@ describe("per-window aging (post window-merge persistence)", () => {
       five_hour: { status: "allowed", seenAt: NOW - 500 },
     });
     expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("near_limit");
+  });
+});
+
+describe("reset-aware staleness (fix A)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const DAY = 24 * 60 * 60 * 1000;
+
+  test("a seven_day window at 0.98 with a future reset, seen 10h ago, still rotates", () => {
+    // 10h > the 6h blanket TTL, but the window carries a live weekly reset —
+    // it must NOT be discarded before its reset actually passes.
+    const s = state(
+      { seven_day: { status: "allowed_warning", utilization: 0.98, resetsAt: NOW_S + 3 * 86400, seenAt: NOW - 3_600_000 * 10 } },
+      NOW - 3_600_000 * 10,
+    );
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("near_limit");
+  });
+
+  test("a reset-bearing window seen >8 days ago is dropped AND fires the cap alarm", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // resetsAt still 'future' but the observation is 9 days old — the 8-day
+    // horizon cap drops it and logs the clock-skew / parse-bug alarm.
+    const s = state(
+      { seven_day: { status: "rejected", utilization: 0.99, resetsAt: NOW_S + 3600, seenAt: NOW - 9 * DAY } },
+      NOW - 9 * DAY,
+    );
+    const h = classifyAccountHealth(s, {}, NOW);
+    expect(h.verdict).not.toBe("exhausted");
+    expect(h.verdict).toBe("no_data");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/exceeded 8d reset-horizon cap/);
+    expect(warn.mock.calls[0][0]).toContain("seven_day");
+  });
+
+  test("a five_hour window with NO reset, seen >6h ago, ages out (unchanged)", () => {
+    const s = state(
+      { five_hour: { status: "allowed", utilization: 0.99, seenAt: NOW - 3_600_000 * 7 } },
+      NOW - 3_600_000 * 7,
+    );
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("no_data");
+  });
+
+  test("a model-rejected window with a days-away reset survives an idle >6h account", () => {
+    // Account last observed 8h ago; the model cap resets in 2 days. Rotation
+    // for that model must still fire — this is the incident class fix A targets.
+    const s = state(
+      { [modelWindowKey("claude-fable-5")]: { status: "rejected", resetsAt: NOW_S + 2 * 86400, seenAt: NOW - 3_600_000 * 8 } },
+      NOW - 3_600_000 * 8,
+    );
+    expect(classifyAccountHealth(s, {}, NOW, "claude-fable-5").verdict).toBe("exhausted");
+    // ...but only for that model — a different model still sees the account as
+    // usable (the live model window is evidence, just not binding for opus).
+    expect(classifyAccountHealth(s, {}, NOW, "claude-opus-4-8").verdict).toBe("ok");
+  });
+});
+
+describe("model-id canonicalisation gates across spellings (fix A)", () => {
+  const NOW_LOCAL = NOW;
+  // Written under one spelling; read requests arrive under others. All name the
+  // same cap, so all must be gated.
+  const s = state(
+    { [modelWindowKey("clawd/claude-fable-5")]: { status: "rejected", resetsAt: NOW_S + 2 * 86400, seenAt: NOW - 1000 } },
+    NOW - 1000,
+  );
+
+  for (const spelling of [
+    "clawd/claude-fable-5",
+    "claw2/claude-fable-5",
+    "claw3/claude-fable-5",
+    "anthropic/claude-fable-5",
+    "claude-fable-5",
+  ]) {
+    test(`request "${spelling}" is gated by the clawd/-written window`, () => {
+      expect(classifyAccountHealth(s, {}, NOW_LOCAL, spelling).verdict).toBe("exhausted");
+    });
+  }
+
+  test("an unknown-prefix spelling is NOT silently canonicalised (conservative)", () => {
+    // The window is live evidence (→ ok), but an unknown-prefix request keys a
+    // different window, so it is NOT gated as exhausted.
+    expect(classifyAccountHealth(s, {}, NOW_LOCAL, "other/claude-fable-5").verdict).toBe("ok");
   });
 });

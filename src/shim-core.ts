@@ -35,9 +35,12 @@ export interface WindowHealth {
 
 /**
  * How long a window survives in the persisted state after its most recent
- * observation before pruning removes it. The reader (health.ts) already ages
- * each window by its own `seenAt`, so anything past this horizon is dead
- * weight — kept only long enough to grow the file and clutter autopsies.
+ * observation before pruning removes it. The reader (health.ts) now trusts a
+ * reset-bearing window until its `resetsAt`, bounded by an 8-day horizon cap;
+ * this 14-day prune sits DELIBERATELY beyond that cap so the merge-time prune
+ * never removes a still-binding reset-bearing window before the reader has had
+ * the chance to honour (or cap) it. Keep 14d > the reader's 8d cap if either
+ * moves. Reset-less windows the reader ages out at ~6h are dead weight here.
  */
 export const PRUNE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -202,9 +205,37 @@ export function mergeHealthStates(
 }
 
 
-/** Window key for a model-scoped limit observation (v0.3.6). */
+/**
+ * Provider/account prefixes a model id may arrive with (`clawd/claude-fable-5`
+ * from one lane, `anthropic/claude-fable-5` from another, bare `claude-fable-5`
+ * from a third). All name the SAME cap, so they must key the same window.
+ */
+const MODEL_ID_PROVIDER_PREFIXES = [
+  "clawd/",
+  "claw2/",
+  "claw3/",
+  "claude-cli/",
+  "anthropic/",
+];
+
+/**
+ * Normalise a model id to its canonical bare form by stripping a known
+ * provider/account prefix before the first `/`. Conservative: only known
+ * prefixes are stripped; an unknown prefix (or a bare id) is left untouched.
+ * Applied at BOTH write (`modelWindowKey`) and read (health.ts) so a spelling
+ * mismatch cannot open a days-long silent gate hole now that model windows are
+ * long-lived (survive to their `resetsAt`, not aged out at 6h).
+ */
+export function canonicalizeModelIdForWindow(modelId: string): string {
+  for (const prefix of MODEL_ID_PROVIDER_PREFIXES) {
+    if (modelId.startsWith(prefix)) return modelId.slice(prefix.length);
+  }
+  return modelId;
+}
+
+/** Window key for a model-scoped limit observation (v0.3.6, canonicalised). */
 export function modelWindowKey(modelId: string): string {
-  return `model:${modelId}`;
+  return `model:${canonicalizeModelIdForWindow(modelId)}`;
 }
 
 const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;

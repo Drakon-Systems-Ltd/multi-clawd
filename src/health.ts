@@ -12,7 +12,7 @@
  * - A fully exhausted pool returns no choice: the hook then stays silent and
  *   OpenClaw's reactive chain drops to the next provider (OpenAI → xAI).
  */
-import type { AccountHealthState } from "./shim-core.js";
+import { modelWindowKey, type AccountHealthState } from "./shim-core.js";
 
 export type HealthVerdict = "ok" | "near_limit" | "exhausted" | "no_data";
 
@@ -42,6 +42,16 @@ export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
 
 const MODEL_WINDOW_PREFIX = "model:";
 
+/**
+ * Trust ceiling for a reset-bearing window (one carrying a future `resetsAt`).
+ * We honour such a window until its own reset regardless of how old its
+ * observation is — but no further than this. 8 days = the weekly cap plus a
+ * day of slack. A window dropped BY this cap (rather than by its own reset
+ * passing) is the alarm case: its `resetsAt` is implausibly far out, which
+ * means clock skew or a `resetsAt` parse bug, and we log it distinctly.
+ */
+export const MAX_RESET_HORIZON_MS = 8 * 24 * 60 * 60 * 1000;
+
 export function classifyAccountHealth(
   state: AccountHealthState | undefined,
   options: HealthOptions,
@@ -51,18 +61,49 @@ export function classifyAccountHealth(
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
   const threshold = options.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
 
-  if (!state?.updatedAt || nowMs - state.updatedAt > staleAfterMs) {
-    return { verdict: "no_data" };
-  }
+  if (!state) return { verdict: "no_data" };
+
+  // Canonicalised so a window written under `clawd/claude-fable-5` still gates
+  // a read requested as `anthropic/claude-fable-5` or bare `claude-fable-5`.
+  const requestedWindowKey =
+    requestedModel !== undefined ? modelWindowKey(requestedModel) : undefined;
 
   let worst: AccountHealth = { verdict: "ok" };
+  // Whether ANY window still carries live evidence. The whole-account `no_data`
+  // gate now derives from this, NOT from a blanket updatedAt staleness: an
+  // account idle >6h must stay binding while it holds a live reset-bearing
+  // window (weekly / model cap that has not yet reset).
+  let hasLiveEvidence = false;
   for (const [window, w] of Object.entries(state.windows)) {
+    const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
+    // Reset-bearing = carries a still-future reset. Trusted until that reset
+    // regardless of how old the observation is (resets are day-scale, so a 6h
+    // idle must not discard a weekly window that has days left to run).
+    const resetBearing = resetMs !== undefined && resetMs > nowMs;
+
+    // Bound that trust: a reset-bearing window older than the 8-day horizon is
+    // dropped anyway. Reaching the cap (rather than the reset passing) means an
+    // implausibly distant resetsAt — clock skew or a parse bug — so alarm on it.
+    if (resetBearing && nowMs - w.seenAt > MAX_RESET_HORIZON_MS) {
+      console.warn(
+        `[multi-clawd] health: window ${window} on ${state.accountId} exceeded 8d ` +
+          `reset-horizon cap (resetsAt=${new Date(resetMs).toISOString()}) — ` +
+          `possible clock skew / resetsAt parse bug`,
+      );
+      continue;
+    }
+
+    // Reset-less windows keep the existing TTL/decay: aged out by staleAfterMs
+    // to no positive evidence. Reset-bearing windows never age out here.
+    const fresh = resetBearing || nowMs - w.seenAt <= staleAfterMs;
+    if (!fresh) continue;
+    hasLiveEvidence = true;
+
     // Model-scoped windows (v0.3.6, written from reactive 429 limit errors)
     // gate only requests for that model — exhausted-for-fable must not stop
     // this account serving opus. Without a reset time they bind for a TTL.
     if (window.startsWith(MODEL_WINDOW_PREFIX)) {
-      if (!requestedModel || window !== MODEL_WINDOW_PREFIX + requestedModel) continue;
-      const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
+      if (!requestedWindowKey || window !== requestedWindowKey) continue;
       if (w.status !== "rejected") continue;
       if (resetMs !== undefined) {
         if (resetMs > nowMs) {
@@ -83,25 +124,23 @@ export function classifyAccountHealth(
       }
       continue;
     }
-    // Windows age individually: now that persisted windows survive across
-    // invocations, a fresh five_hour write must not lend credibility to a
-    // seven_day entry that is itself stale. Skipped = no positive evidence.
-    if (nowMs - w.seenAt > staleAfterMs) continue;
-    const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
-    if (w.status === "rejected" && resetMs !== undefined && resetMs > nowMs) {
+
+    // Account-level windows gate every model.
+    if (w.status === "rejected" && resetBearing) {
       return {
         verdict: "exhausted",
         resumeAt: resetMs,
-        reason: `${window} rejected until ${new Date(resetMs).toISOString()}`,
+        reason: `${window} rejected until ${new Date(resetMs!).toISOString()}`,
       };
     }
     if (
       worst.verdict === "ok" &&
       typeof w.utilization === "number" &&
       w.utilization >= threshold &&
-      // A passed reset voids the observation: that utilization belonged to
-      // the previous cycle, so it must not keep an account near_limit.
-      (resetMs === undefined || resetMs > nowMs)
+      // A passed reset voids the observation: that utilization belonged to the
+      // previous cycle. Reset-bearing windows are always current; reset-less
+      // (resetMs === undefined) windows count on freshness alone.
+      (resetBearing || resetMs === undefined)
     ) {
       worst = {
         verdict: "near_limit",
@@ -109,6 +148,9 @@ export function classifyAccountHealth(
       };
     }
   }
+  // No live reset-bearing window and every reset-less window is stale: nothing
+  // to act on. Treated as healthy — we only ever rotate on positive evidence.
+  if (worst.verdict === "ok" && !hasLiveEvidence) return { verdict: "no_data" };
   return worst;
 }
 
