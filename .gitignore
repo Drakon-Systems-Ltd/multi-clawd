@@ -17,6 +17,13 @@ secrets/
 accounts/
 .claude-*/
 
+# Internal / operational — NEVER distribute (this repo is public-npm-distributed).
+# Incident reports, topology notes, and operator-internal docs live outside the repo.
+# See CLAUDE.md "Never commit — internal / operational detail".
+docs/incidents/
+*.internal.md
+INTERNAL_*
+
 # Logs / OS
 *.log
 .DS_Store
