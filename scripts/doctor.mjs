@@ -225,11 +225,18 @@ console.log("effective chain");
 if (!pool) {
   // No clawd pool ⇒ nothing to bypass; skip the whole section (mirrors §6).
 } else {
-  const { auditEffectiveChain, auditSessionOverrides } = await import(
+  const { auditEffectiveChain, auditSessionOverrides, maskSessionKey } = await import(
     join(EXT_DIR, "dist", "chain-audit.js")
   ).catch(() => import(join(REPO_DIR, "dist", "chain-audit.js")));
   const poolId = pool.id ?? "clawd";
   const verbose = process.env.DOCTOR_VERBOSE === "1" || process.argv.includes("--verbose");
+  // Session keys embed the operator's private channel id (e.g. a Telegram chat
+  // id). Mask the id tail by default so doctor output is safe to paste into
+  // issues/support threads; `--raw` restores full keys for local exact-match
+  // debugging. Only case-2 session surfaces carry a key; config surfaces don't.
+  const raw = process.env.DOCTOR_RAW === "1" || process.argv.includes("--raw");
+  const renderSurface = (surface) =>
+    raw ? surface : surface.replace(/^session (.+)$/, (_m, k) => `session ${maskSessionKey(k)}`);
 
   // ── case 1: config-level refs ──────────────────────────────────────────────
   const findings = auditEffectiveChain(config, poolId);
@@ -283,7 +290,7 @@ if (!pool) {
       readable++;
       const sessionFindings = auditSessionOverrides(parsed, true);
       for (const f of sessionFindings) {
-        warn(`${f.surface}: ${f.ref} ${f.reason}`);
+        warn(`${renderSurface(f.surface)}: ${f.ref} ${f.reason}`);
         sessionWarns++;
       }
     }

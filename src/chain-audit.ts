@@ -26,6 +26,26 @@ import { isModernClaudeModelId } from "./models.js";
 
 export type ChainSeverity = "warn" | "note";
 
+/**
+ * Mask the identifier tail of a session key for public-safe diagnostic output.
+ * doctor output is what users paste verbatim into issues/support threads, so a
+ * raw `agent:main:telegram:direct:<chatId>` would leak the operator's private
+ * channel id by default. Keep the structural prefix (scheme + channel + type)
+ * so the warn stays actionable — the operator can still tell WHICH session is
+ * pinned — but replace an id-like final segment with `…<last4>`. Non-id tails
+ * (e.g. the literal `main`) are left intact. Full keys stay available behind an
+ * explicit `--raw` flag in the renderer.
+ */
+export function maskSessionKey(key: string): string {
+  const segs = key.split(":");
+  const last = segs[segs.length - 1];
+  const looksLikeId = /^\d{5,}$/.test(last) || /^[0-9a-f]{6,}(-[0-9a-f]+)*$/i.test(last) || last.length > 12;
+  if (!looksLikeId) return key;
+  const tail = last.length >= 4 ? last.slice(-4) : last;
+  segs[segs.length - 1] = `…${tail}`;
+  return segs.join(":");
+}
+
 export interface ChainFinding {
   /** Dotted path to the offending field, e.g. `agents.defaults.model.fallbacks[1]`. */
   surface: string;
