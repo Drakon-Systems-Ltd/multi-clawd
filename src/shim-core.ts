@@ -186,11 +186,15 @@ export function mergeHealthStates(
   now?: number,
   pruneAfterMs: number = PRUNE_AFTER_MS,
 ): AccountHealthState {
-  const windows: Record<string, WindowHealth> = { ...disk.windows };
+  const merged: Record<string, WindowHealth> = { ...disk.windows };
   for (const [key, w] of Object.entries(live.windows)) {
-    const existing = windows[key];
-    if (!existing || w.seenAt >= existing.seenAt) windows[key] = w;
+    const existing = merged[key];
+    if (!existing || w.seenAt >= existing.seenAt) merged[key] = w;
   }
+  // Migrate legacy pre-canonicalisation model window keys (see
+  // canonicalizeModelWindowKeys): stock v0.3.6 persisted `model:` windows under
+  // the raw argv spelling, which would silently stop gating post-upgrade.
+  const windows = canonicalizeModelWindowKeys(merged);
   if (now !== undefined) {
     for (const [key, w] of Object.entries(windows)) {
       if (now - w.seenAt > pruneAfterMs) delete windows[key];
@@ -236,6 +240,29 @@ export function canonicalizeModelIdForWindow(modelId: string): string {
 /** Window key for a model-scoped limit observation (v0.3.6, canonicalised). */
 export function modelWindowKey(modelId: string): string {
   return `model:${canonicalizeModelIdForWindow(modelId)}`;
+}
+
+/**
+ * Rewrite any `model:` window key to its canonical form, so state files written
+ * by stock v0.3.6 (which keyed by the raw argv model, e.g.
+ * `model:clawd/claude-fable-5`) keep gating after the canonicalisation fix
+ * deploys. Without this, a legacy prefixed window carrying a days-away
+ * `resetsAt` silently stops matching canonical reads on upgrade — a
+ * migration-window regression of the exact class the fix closes. Collisions
+ * (legacy + canonical both present) keep the newer `seenAt`.
+ */
+export function canonicalizeModelWindowKeys(
+  windows: Record<string, WindowHealth>,
+): Record<string, WindowHealth> {
+  const out: Record<string, WindowHealth> = {};
+  for (const [key, w] of Object.entries(windows)) {
+    const canonicalKey = key.startsWith("model:")
+      ? modelWindowKey(key.slice("model:".length))
+      : key;
+    const existing = out[canonicalKey];
+    if (!existing || w.seenAt >= existing.seenAt) out[canonicalKey] = w;
+  }
+  return out;
 }
 
 const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;
