@@ -350,6 +350,30 @@ tested (`src/watchdog-core.ts`).
 - Sticky selection is per-pool, not per-session — OpenClaw's
   `prepareExecution` context has no session id. True session affinity is
   part of the v0.4 standalone-proxy track (Hermes runtimes).
+- **CLI-served turns are extension-tool-mute ("Ekho-mute", observed live
+  17 Jul 2026 on Friday-Mac).** When a turn is served through a CLI backend
+  (reseeded CLI harness rather than the native runtime), extension/MCP tools
+  — `ekho_send`, cron, sessions — are absent for the duration. The mute is
+  **one-directional**: inbound tool calls die, but exec and file writes
+  survive, which is why an ekho-sdk wire call works as a stopgap and why the
+  file-based status JSON keeps reporting. Consequences on the record:
+  - Any host whose Claude fallback is this class (aiquant's claw2→claw3
+    `oauthTokenFile`/CLI-reseed included) is Ekho-mute through the tool
+    exactly when it may most need to send a security alert or refusal
+    (Case's Iron Dome point). Operators should know this before leaning on
+    Claude fallback in anger.
+  - Accepted v0.3.x fix (publisher's call): a **gateway-side queued-outbox
+    flush** — plugin-local and testable, it restores the capability that
+    matters (an agent's outbound Ekho message surviving a CLI-served turn).
+    Full extension-tool bridging into the reseeded CLI harness is
+    OpenClaw-core surgery: file it upstream alongside the startup
+    retry-with-grace item; the plugin does not grow into a shim of the whole
+    tool system.
+  - Design principle, standing: **the telemetry plane stays file-based
+    (git/fleet-context), never Ekho/tool-dependent** — the degraded
+    CLI-served state is precisely when it must keep reporting. The v1
+    status-JSON writer already honours this; Bridge-v2-style
+    delivery-receipts/pending-auth queues must not be built on Ekho alone.
 
 ## v0.3.5: tier-aware degradation + pinned lanes
 
