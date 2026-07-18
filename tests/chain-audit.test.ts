@@ -200,6 +200,35 @@ describe("auditSessionOverrides", () => {
     expect(findings[0].reason).toContain("single pool account");
   });
 
+  test("EPHEMERAL: subagent session with off-pool user pin → ZERO (per-run, not a standing bypass)", () => {
+    // Live aiquant shape: a spawned coding subagent pinned to anthropic/opus.
+    // Ephemeral per-run routing, re-resolved every spawn — must not warn, or
+    // every coding-subagent run wolf-cries the section.
+    const findings = auditSessionOverrides(
+      store({
+        "agent:main:subagent:b29898de-b4e5-4446-aaeb-d4442c7ea568": {
+          providerOverride: "anthropic",
+          modelOverride: "claude-opus-4-8",
+          modelOverrideSource: "user",
+        },
+      }),
+      true,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  test("standing session audited even alongside skipped subagents (mixed store)", () => {
+    const findings = auditSessionOverrides(
+      store({
+        "agent:main:main": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" },
+        "agent:main:subagent:dead-uuid": { providerOverride: "anthropic", modelOverride: "claude-sonnet-5", modelOverrideSource: "user" },
+      }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].surface).toBe("session agent:main:main");
+  });
+
   test("NEGATIVE auto-fallback (live Friday-Mac): clawd/ source=auto → ZERO (source gate excludes)", () => {
     const findings = auditSessionOverrides(
       store({ "agent:main:mac": { providerOverride: "clawd", modelOverride: "claude-opus-4-8", modelOverrideSource: "auto" } }),

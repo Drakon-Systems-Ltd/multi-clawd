@@ -286,6 +286,16 @@ export function auditSessionOverrides(
   for (const [sessionKey, entry] of Object.entries(sessions ?? {})) {
     if (!entry || typeof entry !== "object") continue;
 
+    // 0. RELEVANCE GATE. Ephemeral subagent sessions (`…:subagent:<uuid>`) carry
+    //    a per-run model pin that is re-resolved every spawn — it is NOT a
+    //    standing routing bypass (an agent legitimately spawns a coding subagent
+    //    on a non-pool model per policy). The sweep targets PERSISTENT pins on
+    //    serving sessions (the 17-18 Jul case was the MAIN session, pinned across
+    //    restarts). Surfacing dead/ephemeral subagents is the exact wolf-cry the
+    //    sweep exists to avoid — skip them. Main, channel, and named sessions
+    //    (the standing surfaces) are still audited.
+    if (/:subagent:/.test(sessionKey)) continue;
+
     // 1. SOURCE GATE (first, mandatory). Consider ONLY deliberate overrides.
     //    "user" is the known manual /model literal, but we test `!== "auto"`
     //    (not `=== "user"`) so any future deliberate source — "api"/"operator"/…
