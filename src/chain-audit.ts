@@ -17,8 +17,10 @@
  * gap: a persisted per-session `/model` override lives in session state, not
  * openclaw.json, yet bypasses the pool exactly like a config pin. Both share
  * ONE off-pool predicate (`offPoolClaudeRef`) so the two cases can never drift.
- * (A truly live per-turn `ctx.activeModel` assertion — env / per-launch
- * `--model` on a running request — remains out of scope for both.)
+ * (A truly live per-turn model assertion — env / per-launch `--model` on a
+ * running request, not yet flushed to session state — remains out of scope
+ * for both; the at-rest surface catches persistent pins, which is the class
+ * the 17-18 Jul incident belonged to.)
  */
 import { isModernClaudeModelId } from "./models.js";
 
@@ -304,23 +306,27 @@ export function auditSessionOverrides(
     const source = entry.modelOverrideSource;
     if (typeof source !== "string" || source === "auto") continue;
 
-    // 2. PROVIDER. `providerOverride` is the manual pin; fall back to the
-    //    resolved `modelProvider`. Passing the source gate with no provider at
-    //    all is SCHEMA DRIFT — surface it rather than silently skip (a
-    //    false-negative in a safety doctor is worse than a false-positive).
+    // 2. PROVIDER + MODEL. `providerOverride` is the manual pin; fall back to
+    //    the resolved `modelProvider`. Passing the source gate with EITHER the
+    //    provider OR the model id missing is SCHEMA DRIFT — surface it rather
+    //    than silently skip (a false-negative in a safety doctor is worse than
+    //    a false-positive; a present-but-empty model would otherwise slip
+    //    through `offPoolClaudeRef` as a null classification).
     const provider = entry.providerOverride ?? entry.modelProvider;
-    if (!provider) {
+    const model = entry.modelOverride;
+    if (!provider || !model) {
+      const missing = !provider && !model ? "provider and model" : !provider ? "provider" : "model";
       findings.push({
         surface: `session ${sessionKey}`,
-        ref: entry.modelOverride ?? "(no model)",
+        ref: `${provider ?? "?"}/${model ?? "?"}`,
         severity: "warn",
-        reason: `session override present (source=${source}) but provider field missing — schema drift, cannot verify pool routing`,
+        reason: `session override present (source=${source}) but ${missing} field missing — schema drift, cannot verify pool routing`,
       });
       continue;
     }
 
     // 3. OFF-POOL CLASSIFY via the shared case-1 predicate.
-    const ref = `${provider}/${entry.modelOverride ?? ""}`;
+    const ref = `${provider}/${model}`;
     const severity = offPoolClaudeRef(ref, POOL_PROVIDER);
     if (!severity) continue; // clawd/ (in-pool) or non-Claude → fine
 

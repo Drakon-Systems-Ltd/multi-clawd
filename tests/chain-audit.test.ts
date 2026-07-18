@@ -256,6 +256,19 @@ describe("auditSessionOverrides", () => {
     expect(findings[0].reason).toContain("schema drift");
   });
 
+  test("SCHEMA DRIFT: source+provider present but no model id → one schema-drift warn (not silent skip)", () => {
+    // A present-but-empty model would classify as null in offPoolClaudeRef and
+    // slip through silently — a false-negative. It must surface instead.
+    const findings = auditSessionOverrides(
+      store({ "agent:main:nomodel": { providerOverride: "anthropic", modelOverrideSource: "user" } }),
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("warn");
+    expect(findings[0].reason).toContain("schema drift");
+    expect(findings[0].reason).toContain("model");
+  });
+
   test("NO POOL: any override with poolConfigured=false → ZERO (skip)", () => {
     const findings = auditSessionOverrides(
       store({ "agent:main:x": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
