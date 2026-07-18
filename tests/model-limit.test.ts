@@ -111,10 +111,16 @@ describe("model-aware classifyAccountHealth", () => {
     });
     // within the 60-min default TTL → exhausted for that model
     expect(classifyAccountHealth(state, {}, NOW, "claude-fable-5").verdict).toBe("exhausted");
-    // past the TTL → no longer binding
+    // past the TTL → no longer binding. The account's ONLY window is now an
+    // expired model window, i.e. no live evidence → no_data (which every
+    // selector treats identically to ok: choosePoolAccount/sticky both accept
+    // ok||no_data, degrade only checks exhausted). The pre-v0.3.7 code reported
+    // "ok" here only because the model window still counted toward the generic
+    // staleAfterMs freshness gate; now model windows age purely by their own
+    // TTL, so an expired one is correctly not-evidence.
     const later = NOW + 40 * 60 * 1000;
     const stateFresh = { ...state, updatedAt: later - 1000 };
-    expect(classifyAccountHealth(stateFresh, {}, later, "claude-fable-5").verdict).toBe("ok");
+    expect(classifyAccountHealth(stateFresh, {}, later, "claude-fable-5").verdict).toBe("no_data");
   });
 
   test("model window with a PASSED resetsAt is not binding", () => {

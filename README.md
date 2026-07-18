@@ -10,7 +10,7 @@ Pool every Claude Max account you own into a single failover chain —
 same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
-[![version](https://img.shields.io/badge/version-0.3.6-4c9aff)](package.json)
+[![version](https://img.shields.io/badge/version-0.3.7-4c9aff)](package.json)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -389,6 +389,11 @@ Early but real — built for and dogfooded on our own fleet.
   limit" error is recorded as a model-scoped rejected window, and health is
   model-aware (exhausted-for-Fable ≠ exhausted-for-Opus) — the first hard
   limit teaches the pool, the next launch flips accounts ✅
+- **v0.3.7** — reset-aware per-window staleness: reset-bearing windows
+  (weekly, model:*) bind until their reset regardless of observation age
+  (capped at 8d with a clock-skew alarm), reset-less windows keep TTL/decay,
+  and model windows age by their own TTL independent of pool `staleAfterMs`
+  — closes the quiet-pool blindness half of the no-flip incident class ✅
 - **v0.4** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; true per-session affinity; local
   five-hour-window signal (turn counting)

@@ -250,6 +250,47 @@ describe("reset-aware staleness (fix A)", () => {
     // usable (the live model window is evidence, just not binding for opus).
     expect(classifyAccountHealth(s, {}, NOW, "claude-opus-4-8").verdict).toBe("ok");
   });
+
+  test("aggressive pool staleAfterMs does NOT truncate a model window's own TTL", () => {
+    // Regression for the freshness-gate ordering bug: a reset-less model window
+    // must age by MODEL_REJECTED_TTL_MS (60m), independent of the account-level
+    // staleAfterMs. A pool tuned to rotate five_hour aggressively (staleAfterMs
+    // 30m) must NOT re-launch into a model the reactive-429 capture says is
+    // still limited. A fresh five_hour keeps the account otherwise observed.
+    const s = state(
+      {
+        [modelWindowKey("claude-fable-5")]: { status: "rejected", seenAt: NOW - 45 * 60 * 1000 },
+        five_hour: { status: "allowed", seenAt: NOW - 1000 },
+      },
+      NOW - 1000,
+    );
+    // 45m old, TTL is 60m → still binding, regardless of the 30m staleAfterMs.
+    expect(
+      classifyAccountHealth(s, { staleAfterMs: 30 * 60 * 1000 }, NOW, "claude-fable-5").verdict,
+    ).toBe("exhausted");
+    // Past its own 60m TTL → no longer binding (aged out on its own terms).
+    const old = state(
+      { [modelWindowKey("claude-fable-5")]: { status: "rejected", seenAt: NOW - 75 * 60 * 1000 } },
+      NOW - 75 * 60 * 1000,
+    );
+    expect(classifyAccountHealth(old, {}, NOW, "claude-fable-5").verdict).toBe("no_data");
+  });
+
+  test("a model window seen >8 days ago is dropped AND fires the cap alarm", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Reset-bearing model window whose observation is 9 days old: the 8-day
+    // horizon cap drops it (clock-skew / parse-bug alarm) exactly as it does
+    // for account-level reset-bearing windows.
+    const s = state(
+      { [modelWindowKey("claude-fable-5")]: { status: "rejected", resetsAt: NOW_S + 3600, seenAt: NOW - 9 * DAY } },
+      NOW - 9 * DAY,
+    );
+    const h = classifyAccountHealth(s, {}, NOW, "claude-fable-5");
+    expect(h.verdict).not.toBe("exhausted");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/exceeded 8d reset-horizon cap/);
+    expect(warn.mock.calls[0][0]).toContain("model:claude-fable-5");
+  });
 });
 
 describe("model-id canonicalisation gates across spellings (fix A)", () => {

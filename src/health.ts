@@ -93,16 +93,17 @@ export function classifyAccountHealth(
       continue;
     }
 
-    // Reset-less windows keep the existing TTL/decay: aged out by staleAfterMs
-    // to no positive evidence. Reset-bearing windows never age out here.
-    const fresh = resetBearing || nowMs - w.seenAt <= staleAfterMs;
-    if (!fresh) continue;
-    hasLiveEvidence = true;
-
     // Model-scoped windows (v0.3.6, written from reactive 429 limit errors)
     // gate only requests for that model — exhausted-for-fable must not stop
-    // this account serving opus. Without a reset time they bind for a TTL.
+    // this account serving opus. They age by their OWN rules (resetsAt, or the
+    // MODEL_REJECTED_TTL_MS when reset-less) — NOT the account-level
+    // staleAfterMs. Handled before the generic freshness gate so a pool config
+    // with staleAfterMs < MODEL_REJECTED_TTL_MS cannot discard a model window
+    // that its own TTL still says is binding.
     if (window.startsWith(MODEL_WINDOW_PREFIX)) {
+      const modelFresh = resetBearing || nowMs - w.seenAt <= MODEL_REJECTED_TTL_MS;
+      if (!modelFresh) continue;
+      hasLiveEvidence = true;
       // Canonicalise the STORED key too, not just the requested one: the
       // account-selection path (index.ts readHealthState → classify) reads raw
       // disk state without going through mergeHealthStates, so a legacy
@@ -121,15 +122,19 @@ export function classifyAccountHealth(
         }
         continue; // reset passed — not binding
       }
-      if (nowMs - w.seenAt <= MODEL_REJECTED_TTL_MS) {
-        return {
-          verdict: "exhausted",
-          resumeAt: w.seenAt + MODEL_REJECTED_TTL_MS,
-          reason: `${requestedModel} limit hit ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; TTL block)`,
-        };
-      }
-      continue;
+      return {
+        verdict: "exhausted",
+        resumeAt: w.seenAt + MODEL_REJECTED_TTL_MS,
+        reason: `${requestedModel} limit hit ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; TTL block)`,
+      };
     }
+
+    // Reset-less account windows keep the existing TTL/decay: aged out by
+    // staleAfterMs to no positive evidence. Reset-bearing windows never age
+    // out here.
+    const fresh = resetBearing || nowMs - w.seenAt <= staleAfterMs;
+    if (!fresh) continue;
+    hasLiveEvidence = true;
 
     // Account-level windows gate every model.
     if (w.status === "rejected" && resetBearing) {
