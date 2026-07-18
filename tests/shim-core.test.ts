@@ -256,7 +256,7 @@ describe("mergeHealthStates", () => {
     },
   };
 
-  test("preserves disk windows absent from the live state (the Friday bug)", () => {
+  test("preserves disk windows absent from the live state (disk-window-loss regression)", () => {
     const live: AccountHealthState = {
       accountId: "claw1",
       updatedAt: 6000,

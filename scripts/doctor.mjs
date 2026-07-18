@@ -211,8 +211,8 @@ else {
 // CASE 1: a STATIC, at-rest scan of openclaw.json. Every Claude model reference
 // under `agents` must route through the clawd pool; a Claude tier pinned to
 // `anthropic/…`, `claude-cli/…`, or a single `claw<N>/…` account silently
-// defeats cross-account failover — yet doctor used to still say READY (the
-// 17–18 Jul incident: clawdbot1 pinned `anthropic/claude-fable-5`).
+// defeats cross-account failover — yet doctor used to still say READY (e.g.
+// a Claude fallback pinned to `anthropic/claude-fable-5`).
 //
 // CASE 2: a STATIC scan of session state. A persisted per-session `/model`
 // override (`~/.openclaw/agents/<agent>/sessions/sessions.json`) bypasses the

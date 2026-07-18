@@ -407,8 +407,8 @@ single-account case, pin exemptions, and one fewer failed launch.
 
 ## v0.3.6: reactive model-limit capture + model-aware health
 
-Root cause fix for the 17–18 Jul incident (Fable weekly max-out did not flip
-accounts on two of three boxes). The gap: weekly windows are only written
+Root cause fix for the weekly max-out failure mode (a maxed Fable weekly did
+not flip accounts). The gap: weekly windows are only written
 when turns run on an account near its limit, so a quiet home account has NO
 weekly telemetry — proactive rotation is blind, and the reactive 429 steps
 the chain PAST the pool with no second chance on the other account.

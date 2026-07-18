@@ -13,8 +13,7 @@ the **manual** publish procedure — run by hand from a trusted machine, never C
 - **Scope: `@drakon-systems`** — an existing, active npm org owned by `cyborgninja`;
   sibling packages already ship under it (`@drakon-systems/shieldcortex-realtime`,
   `@drakon-systems/agent-optimizer`). Nothing to create — `multi-clawd` is just the
-  next package in the org. (ClawHub distribution is separate and remains Jarvis's
-  account.)
+  next package in the org. (ClawHub distribution is handled separately.)
 - **Sanity check, not a warning:** `npm whoami` should read `cyborgninja` before
   publishing (it does on the release machine). If it ever doesn't, `npm login` as
   `cyborgninja` first.

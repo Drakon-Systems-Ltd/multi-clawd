@@ -9,8 +9,8 @@ import {
 
 const POOL = "clawd";
 
-/** aiquant's real shape: non-Claude primary, clawd/ fallbacks, non-Claude subagents. */
-const aiquantConfig = {
+/** Healthy shape: non-Claude primary, clawd/ fallbacks, non-Claude subagents. */
+const nonClaudePrimaryConfig = {
   agents: {
     defaults: {
       model: {
@@ -22,8 +22,8 @@ const aiquantConfig = {
   },
 };
 
-/** clawdbot1's regression: a Claude fallback pinned direct to the Anthropic API. */
-const clawdbot1Config = {
+/** The regression this guards against: a Claude fallback pinned direct to the Anthropic API. */
+const anthropicPinnedConfig = {
   agents: {
     defaults: {
       model: {
@@ -53,13 +53,13 @@ describe("isClaudeModelId", () => {
 });
 
 describe("auditEffectiveChain", () => {
-  test("aiquant shape (openai primary, clawd/ fallbacks, openai subagents) → ZERO warnings", () => {
-    const findings = auditEffectiveChain(aiquantConfig, POOL);
+  test("healthy shape (openai primary, clawd/ fallbacks, openai subagents) → ZERO warnings", () => {
+    const findings = auditEffectiveChain(nonClaudePrimaryConfig, POOL);
     expect(findings).toEqual([]);
   });
 
-  test("clawdbot1 shape (anthropic/ Claude fallback) → one strong warn naming the ref", () => {
-    const findings = auditEffectiveChain(clawdbot1Config, POOL);
+  test("anthropic-pinned shape (Claude fallback) → one strong warn naming the ref", () => {
+    const findings = auditEffectiveChain(anthropicPinnedConfig, POOL);
     const warns = warnsOnly(findings);
     expect(warns).toHaveLength(1);
     expect(warns[0].surface).toBe("agents.defaults.model.fallbacks[1]");
@@ -87,8 +87,8 @@ describe("auditEffectiveChain", () => {
   });
 
   test("no clawd pool configured → empty (section skipped)", () => {
-    expect(auditEffectiveChain(clawdbot1Config, undefined)).toEqual([]);
-    expect(auditEffectiveChain(clawdbot1Config, null)).toEqual([]);
+    expect(auditEffectiveChain(anthropicPinnedConfig, undefined)).toEqual([]);
+    expect(auditEffectiveChain(anthropicPinnedConfig, null)).toEqual([]);
   });
 
   test("clawd-only Claude tiers → empty", () => {
@@ -172,11 +172,11 @@ describe("auditEffectiveChain", () => {
 });
 
 describe("auditSessionOverrides", () => {
-  // All fixtures below are LIVE entry shapes lifted verbatim from real
-  // sessions.json stores (aiquant Linux + Friday-Mac), not reconstructed.
+  // All fixtures below are real sessions.json entry shapes (Linux + macOS
+  // hosts), not reconstructed.
   const store = (entries: Record<string, SessionOverrideEntry>) => entries;
 
-  test("POSITIVE strong (live aiquant main): anthropic/ user pin → one strong warn", () => {
+  test("POSITIVE strong (live main session): anthropic/ user pin → one strong warn", () => {
     const findings = auditSessionOverrides(
       store({ "agent:main:x": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
       true,
@@ -189,7 +189,7 @@ describe("auditSessionOverrides", () => {
     expect(findings[0].reason).toContain("no cross-account failover");
   });
 
-  test("POSITIVE warn (live aiquant telegram): claw2/ user pin → one account-pin warn", () => {
+  test("POSITIVE warn (live telegram session): claw2/ user pin → one account-pin warn", () => {
     const findings = auditSessionOverrides(
       store({ "agent:main:telegram": { providerOverride: "claw2", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" } }),
       true,
@@ -201,7 +201,7 @@ describe("auditSessionOverrides", () => {
   });
 
   test("EPHEMERAL: subagent session with off-pool user pin → ZERO (per-run, not a standing bypass)", () => {
-    // Live aiquant shape: a spawned coding subagent pinned to anthropic/opus.
+    // Live shape: a spawned coding subagent pinned to anthropic/opus.
     // Ephemeral per-run routing, re-resolved every spawn — must not warn, or
     // every coding-subagent run wolf-cries the section.
     const findings = auditSessionOverrides(
@@ -229,7 +229,7 @@ describe("auditSessionOverrides", () => {
     expect(findings[0].surface).toBe("session agent:main:main");
   });
 
-  test("NEGATIVE auto-fallback (live Friday-Mac): clawd/ source=auto → ZERO (source gate excludes)", () => {
+  test("NEGATIVE auto-fallback (live macOS host): clawd/ source=auto → ZERO (source gate excludes)", () => {
     const findings = auditSessionOverrides(
       store({ "agent:main:mac": { providerOverride: "clawd", modelOverride: "claude-opus-4-8", modelOverrideSource: "auto" } }),
       true,

@@ -5,7 +5,7 @@
  * hits its rate limit. If a model chain instead routes Claude via a NON-pool
  * provider (`anthropic/…`, `claude-cli/…`, or a single `claw<N>/…` account),
  * that failover silently never fires — and until now `doctor` still said READY
- * (the 17–18 Jul incident: clawdbot1 pinned `anthropic/claude-fable-5`).
+ * (e.g. a Claude fallback pinned to `anthropic/claude-fable-5`).
  *
  * This module classifies every Claude model reference under `agents` (plus any
  * cron/scheduled sections) as pool-routed or bypassing. It is deliberately
@@ -20,7 +20,7 @@
  * (A truly live per-turn model assertion — env / per-launch `--model` on a
  * running request, not yet flushed to session state — remains out of scope
  * for both; the at-rest surface catches persistent pins, which is the class
- * the 17-18 Jul incident belonged to.)
+ * this audit targets.)
  */
 import { isModernClaudeModelId } from "./models.js";
 
@@ -292,7 +292,7 @@ export function auditSessionOverrides(
     //    a per-run model pin that is re-resolved every spawn — it is NOT a
     //    standing routing bypass (an agent legitimately spawns a coding subagent
     //    on a non-pool model per policy). The sweep targets PERSISTENT pins on
-    //    serving sessions (the 17-18 Jul case was the MAIN session, pinned across
+    //    serving sessions (the real-world case was a MAIN session, pinned across
     //    restarts). Surfacing dead/ephemeral subagents is the exact wolf-cry the
     //    sweep exists to avoid — skip them. Main, channel, and named sessions
     //    (the standing surfaces) are still audited.

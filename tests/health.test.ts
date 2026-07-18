@@ -168,10 +168,10 @@ describe("per-window aging (post window-merge persistence)", () => {
     expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
   });
 
-  // Friday-Mac live case: claw1 held a real `unknown:rejected` window (a
+  // Live case: an account held a real `unknown:rejected` window (a
   // Fable-limit 429 that arrived with no recognisable rateLimitType, so no
   // resetsAt). It must age out via the reset-less TTL path, never blackhole.
-  test("reset-less `unknown:rejected` window ages out gracefully (Friday-Mac claw1)", () => {
+  test("reset-less `unknown:rejected` window ages out gracefully", () => {
     // Fresh but reset-less: with no reset stamp we cannot know when it lifts,
     // so it must NOT mark the account exhausted (would strand the account).
     const fresh = state({ unknown: { status: "rejected", seenAt: NOW - 1000 } });

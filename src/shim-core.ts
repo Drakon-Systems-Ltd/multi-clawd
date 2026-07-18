@@ -312,7 +312,7 @@ export function parseModelLimitError(line: string): { displayName: string } | un
 /**
  * Record a reactive model-limit hit as a model-scoped rejected window, so the
  * NEXT launch for that model rotates accounts even when no proactive weekly
- * telemetry was ever captured (the 17-18 Jul incident class). resetsAt is
+ * telemetry was ever captured (the silent-telemetry-gap class). resetsAt is
  * epoch seconds when known; absent, the reader applies a TTL.
  */
 export function recordModelLimit(

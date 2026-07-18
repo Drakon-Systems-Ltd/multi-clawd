@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * multi-clawd eviction watchdog (v0.3, turn-safe) — mitigation for
- * openclaw#107408 with Jarvis's lane-guard pattern.
+ * openclaw#107408 using a turn-safe lane-guard pattern.
  *
  * On OpenClaw <= 2026.7.1, core's scoped harness activation can silently drop
  * plugin-registered CLI backends; affected turns fail with
