@@ -201,6 +201,82 @@ export function mergeHealthStates(
   };
 }
 
+
+/** Window key for a model-scoped limit observation (v0.3.6). */
+export function modelWindowKey(modelId: string): string {
+  return `model:${modelId}`;
+}
+
+const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;
+
+/**
+ * Recognise a reactive model-limit failure in the stream (the 429 the CLI
+ * reports as an error result: "You've reached your Fable 5 limit. /model to
+ * switch models."). Only genuine error records count — successful results
+ * quoting limit text must not trigger. Returns the display name so the shim
+ * can cross-check; the authoritative model id comes from the shim's own argv.
+ */
+export function parseModelLimitError(line: string): { displayName: string } | undefined {
+  if (!/reached your /i.test(line)) return undefined;
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  const r = record as {
+    type?: unknown;
+    is_error?: unknown;
+    subtype?: unknown;
+    result?: unknown;
+    error?: unknown;
+  };
+  const isErrorRecord =
+    r.type === "error" ||
+    r.is_error === true ||
+    (typeof r.subtype === "string" && r.subtype.startsWith("error"));
+  if (!isErrorRecord) return undefined;
+  const texts: string[] = [];
+  if (typeof r.result === "string") texts.push(r.result);
+  if (typeof r.error === "string") texts.push(r.error);
+  if (typeof r.error === "object" && r.error !== null) {
+    const msg = (r.error as { message?: unknown }).message;
+    if (typeof msg === "string") texts.push(msg);
+  }
+  for (const text of texts) {
+    const match = LIMIT_TEXT_RE.exec(text);
+    if (match) return { displayName: match[1].trim() };
+  }
+  return undefined;
+}
+
+/**
+ * Record a reactive model-limit hit as a model-scoped rejected window, so the
+ * NEXT launch for that model rotates accounts even when no proactive weekly
+ * telemetry was ever captured (the 17-18 Jul incident class). resetsAt is
+ * epoch seconds when known; absent, the reader applies a TTL.
+ */
+export function recordModelLimit(
+  state: AccountHealthState,
+  modelId: string,
+  now: number,
+  resetsAt?: number,
+): AccountHealthState {
+  return {
+    ...state,
+    updatedAt: now,
+    windows: {
+      ...state.windows,
+      [modelWindowKey(modelId)]: {
+        status: "rejected",
+        resetsAt,
+        seenAt: now,
+      },
+    },
+  };
+}
+
 /** Fold one event into the account's health state (windows keyed by type). */
 export function updateHealthState(
   state: AccountHealthState,

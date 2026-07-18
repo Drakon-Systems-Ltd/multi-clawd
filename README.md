@@ -10,7 +10,7 @@ Pool every Claude Max account you own into a single failover chain —
 same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
-[![version](https://img.shields.io/badge/version-0.3.5-4c9aff)](package.json)
+[![version](https://img.shields.io/badge/version-0.3.6-4c9aff)](package.json)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -385,6 +385,10 @@ Early but real — built for and dogfooded on our own fleet.
   configured ladder on the same account, e.g. Fable → Opus, instead of
   dropping provider) + never-degrade pins for contractual model lanes +
   single-account pools ✅
+- **v0.3.6** — reactive model-limit capture: a 429 "reached your <model>
+  limit" error is recorded as a model-scoped rejected window, and health is
+  model-aware (exhausted-for-Fable ≠ exhausted-for-Opus) — the first hard
+  limit teaches the pool, the next launch flips accounts ✅
 - **v0.4** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; true per-session affinity; local
   five-hour-window signal (turn counting)

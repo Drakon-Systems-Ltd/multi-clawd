@@ -758,9 +758,12 @@ function registerPoolBackend(
   const backend = buildBackend(poolAccount);
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
     const now = Date.now();
+    // Model-aware (v0.3.6): a model-scoped rejected window (reactive 429
+    // capture) exhausts an account only for the model this launch requests.
+    const requestedModel = canonicalModelId(ctx.modelId) ?? ctx.modelId;
     const verdicts = members.map((a) => ({
       id: a.id,
-      health: classifyAccountHealth(readHealthState(a.id), options, now),
+      health: classifyAccountHealth(readHealthState(a.id), options, now, requestedModel),
     }));
     const previousSticky = readStickyEntry(stickyFile);
     const decision = decideStickySelection({
@@ -782,9 +785,9 @@ function registerPoolBackend(
     }
     if (verdicts.every((v) => v.health.verdict === "exhausted")) {
       raiseAlert({
-        key: `pool-exhausted:${poolId}`,
+        key: `pool-exhausted:${poolId}:${requestedModel}`,
         severity: "error",
-        text: `pool ${poolId}: every account is exhausted — turns are falling through to the next provider in the chain`,
+        text: `pool ${poolId}: every account is exhausted for ${requestedModel} — turns are degrading or falling through the chain`,
       });
     }
     writeStickyEntry(stickyFile, decision.sticky, logger);

@@ -28,6 +28,8 @@ import {
   type AccountHealthState,
 } from "./shim-core.js";
 import { rewriteModelArg } from "./degrade.js";
+import { parseModelLimitError, recordModelLimit } from "./shim-core.js";
+import { canonicalModelId } from "./models.js";
 
 function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
   const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
@@ -146,12 +148,50 @@ const child = spawn(command, childArgs, {
 
 process.stdin.pipe(child.stdin);
 
+/** The model THIS launch actually runs (post-degradation argv, canonical). */
+function effectiveModelId(): string | undefined {
+  const idx = childArgs.indexOf("--model");
+  if (idx < 0 || idx + 1 >= childArgs.length) return undefined;
+  const raw = childArgs[idx + 1];
+  return canonicalModelId(raw) ?? raw;
+}
+
+/**
+ * Best-effort reset time for a reactive model-limit hit: Anthropic's model
+ * caps are weekly, so if this account already has a fresh weekly window with
+ * a future reset, reuse it; otherwise leave unset and let the reader's TTL
+ * govern.
+ */
+function guessLimitResetsAt(): number | undefined {
+  const nowS = Date.now() / 1000;
+  for (const [key, w] of Object.entries(state.windows)) {
+    if (key.includes("seven_day") && typeof w.resetsAt === "number" && w.resetsAt > nowS) {
+      return w.resetsAt;
+    }
+  }
+  return undefined;
+}
+
 const scanner = createLineScanner((line) => {
   try {
     const event = parseRateLimitEvent(line);
     if (event) {
       state = updateHealthState(state, event, Date.now());
       persistState();
+    }
+    // v0.3.6: a reactive 429 model-limit error IS telemetry — record it
+    // model-scoped so the next launch for this model rotates accounts even
+    // when no proactive weekly window was ever captured.
+    const limitHit = parseModelLimitError(line);
+    if (limitHit) {
+      const model = effectiveModelId();
+      if (model) {
+        state = recordModelLimit(state, model, Date.now(), guessLimitResetsAt());
+        persistState();
+        process.stderr.write(
+          `[multi-clawd shim] model limit hit recorded: ${model} (reported as "${limitHit.displayName}")\n`,
+        );
+      }
     }
   } catch {
     // capture must never interfere with the stream

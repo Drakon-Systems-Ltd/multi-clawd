@@ -33,10 +33,20 @@ export interface HealthOptions {
 const DEFAULT_UTILIZATION_THRESHOLD = 0.85;
 const DEFAULT_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * How long a model-scoped rejected window (v0.3.6 reactive 429 capture) stays
+ * binding when the error carried no reset time. Conservative: long enough to
+ * stop hammering a limited model, short enough to re-probe within the hour.
+ */
+export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
+
+const MODEL_WINDOW_PREFIX = "model:";
+
 export function classifyAccountHealth(
   state: AccountHealthState | undefined,
   options: HealthOptions,
   nowMs: number,
+  requestedModel?: string,
 ): AccountHealth {
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
   const threshold = options.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
@@ -47,6 +57,32 @@ export function classifyAccountHealth(
 
   let worst: AccountHealth = { verdict: "ok" };
   for (const [window, w] of Object.entries(state.windows)) {
+    // Model-scoped windows (v0.3.6, written from reactive 429 limit errors)
+    // gate only requests for that model — exhausted-for-fable must not stop
+    // this account serving opus. Without a reset time they bind for a TTL.
+    if (window.startsWith(MODEL_WINDOW_PREFIX)) {
+      if (!requestedModel || window !== MODEL_WINDOW_PREFIX + requestedModel) continue;
+      const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
+      if (w.status !== "rejected") continue;
+      if (resetMs !== undefined) {
+        if (resetMs > nowMs) {
+          return {
+            verdict: "exhausted",
+            resumeAt: resetMs,
+            reason: `${requestedModel} limit rejected until ${new Date(resetMs).toISOString()}`,
+          };
+        }
+        continue; // reset passed — not binding
+      }
+      if (nowMs - w.seenAt <= MODEL_REJECTED_TTL_MS) {
+        return {
+          verdict: "exhausted",
+          resumeAt: w.seenAt + MODEL_REJECTED_TTL_MS,
+          reason: `${requestedModel} limit hit ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; TTL block)`,
+        };
+      }
+      continue;
+    }
     // Windows age individually: now that persisted windows survive across
     // invocations, a fresh five_hour write must not lend credibility to a
     // seven_day entry that is itself stale. Skipped = no positive evidence.

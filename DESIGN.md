@@ -381,6 +381,34 @@ clawd/claude-opus-4-8` (as aiquant runs) achieve tier degradation for
 multi-account pools reactively. Pool-internal degradation adds the
 single-account case, pin exemptions, and one fewer failed launch.
 
+## v0.3.6: reactive model-limit capture + model-aware health
+
+Root cause fix for the 17–18 Jul incident (Fable weekly max-out did not flip
+accounts on two of three boxes). The gap: weekly windows are only written
+when turns run on an account near its limit, so a quiet home account has NO
+weekly telemetry — proactive rotation is blind, and the reactive 429 steps
+the chain PAST the pool with no second chance on the other account.
+
+Fix, two halves:
+
+- **The 429 IS telemetry.** The shim recognises the reactive limit error
+  ("You've reached your Fable 5 limit…" on a genuine error record — quoted
+  text in successful results does not trigger) and records a
+  **model-scoped** rejected window (`model:<canonical-id>`, keyed by the
+  shim's own effective argv model, which is authoritative even under
+  degradation rewrites). Reset time reuses the account's fresh weekly
+  window when present; otherwise a 60-min TTL governs at read time.
+- **Health is model-aware.** `classifyAccountHealth` takes the requested
+  model: `model:*` windows gate only matching requests — exhausted-for-Fable
+  does not stop the account serving Opus. Account-level windows behave as
+  before.
+
+Result: even with zero prior telemetry, the FIRST 429 teaches the pool, and
+the next launch for that model rotates to the other account. The turn that
+hit the 429 itself still escapes to the chain (OpenClaw offers no in-turn
+retry of the same chain entry) — one degraded turn per limit event is the
+accepted cost; every subsequent turn account-flips.
+
 ## Config (user-facing)
 
 ```jsonc

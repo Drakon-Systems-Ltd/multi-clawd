@@ -99,6 +99,58 @@ describe("shim model override (tier degradation)", () => {
   });
 });
 
+describe("shim reactive model-limit capture (v0.3.6)", () => {
+  test("a 429 limit error writes a model-scoped rejected window keyed by the argv model", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    const res = spawnSync(
+      process.execPath,
+      [SHIM, "-p", "--model", "claude-fable-5", "--output-format", "stream-json"],
+      {
+        input: "the prompt\n",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
+          MULTI_CLAWD_STATE_FILE: stateFile,
+          MULTI_CLAWD_ACCOUNT_ID: "claw1",
+          FAKE_CLAUDE_EXIT: "1",
+          FAKE_CLAUDE_EMIT_LIMIT: "1",
+        },
+      },
+    );
+    expect(res.status).toBe(1); // exit code passthrough unchanged
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows["model:claude-fable-5"]).toMatchObject({ status: "rejected" });
+    // the limit error stream still reached the parent untouched
+    expect(res.stdout).toContain("reached your Fable 5 limit");
+  });
+
+  test("limit capture uses the EFFECTIVE model when degradation rewrote argv", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    spawnSync(
+      process.execPath,
+      [SHIM, "-p", "--model", "claude-fable-5", "--output-format", "stream-json"],
+      {
+        input: "x\n",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
+          MULTI_CLAWD_STATE_FILE: stateFile,
+          MULTI_CLAWD_ACCOUNT_ID: "claw1",
+          FAKE_CLAUDE_EMIT_LIMIT: "1",
+          MULTI_CLAWD_MODEL_OVERRIDE: "claude-opus-4-8",
+        },
+      },
+    );
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows["model:claude-opus-4-8"]).toMatchObject({ status: "rejected" });
+    expect(state.windows["model:claude-fable-5"]).toBeUndefined();
+  });
+});
+
 describe("shim health capture", () => {
   test("writes the rate-limit window to the state file", () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
