@@ -55,6 +55,7 @@ import {
   resolveModelSpec,
 } from "./models.js";
 import { decideDegradation, matchesPin } from "./degrade.js";
+import { resolveExecMode, permissionModeArgs } from "./exec-policy.js";
 import { resolveBaseModelIds } from "./catalog-source.js";
 import { classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
@@ -373,7 +374,7 @@ export function healthStateFile(accountId: string): string {
   return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.json`);
 }
 
-function buildBackend(account: AccountConfig): CliBackendPlugin {
+function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
   return {
     id: account.id,
     liveTest: {
@@ -396,8 +397,8 @@ function buildBackend(account: AccountConfig): CliBackendPlugin {
       // observe rate_limit_event records for near-limit account rotation.
       // process.execPath = the node running the gateway; always present.
       command: process.execPath,
-      args: [SHIM_PATH, ...BASE_ARGS],
-      resumeArgs: [SHIM_PATH, ...BASE_ARGS, "--resume", "{sessionId}"],
+      args: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode)],
+      resumeArgs: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode), "--resume", "{sessionId}"],
       output: "jsonl",
       liveSession: "claude-stdio",
       input: "stdin",
@@ -576,6 +577,17 @@ export default definePluginEntry({
         onError: (_ref, error) => logger.error(`[multi-clawd] ${String(error)}`),
       });
     }
+    // Mirror core's permission-mode injection: core adds
+    // --permission-mode bypassPermissions for the BUNDLED claude-cli backend
+    // under a `full` exec policy (by provider id); a plugin backend gets no
+    // flag and headless tool calls lock out. Derive it from the live policy so
+    // a host on a stricter mode is never silently forced into bypass.
+    const execMode = resolveExecMode(runtimeConfigLoader?.() ?? api.config);
+    api.logger.info(
+      `[multi-clawd] exec policy: ${execMode ?? "unknown"} → permission-mode ${
+        permissionModeArgs(execMode).length ? "bypassPermissions" : "default (no override)"
+      }`,
+    );
     const seen = new Set<string>();
     for (const account of accounts) {
       const id = account?.id?.trim();
@@ -594,10 +606,10 @@ export default definePluginEntry({
       }
       seen.add(id);
       const normalized = { ...account, id };
-      api.registerCliBackend(buildBackend(normalized));
+      api.registerCliBackend(buildBackend(normalized, execMode));
       api.registerProvider(buildCatalogProvider(normalized));
     }
-    registerPoolBackend(api, cfg.pool, accounts, seen);
+    registerPoolBackend(api, cfg.pool, accounts, seen, execMode);
 
     // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
     {
@@ -713,6 +725,7 @@ function registerPoolBackend(
   pool: PoolConfig | undefined,
   accounts: AccountConfig[],
   registeredIds: Set<string>,
+  execMode?: string,
 ): void {
   const logger = api.logger;
   if (!pool) return;
@@ -755,7 +768,7 @@ function registerPoolBackend(
   const stickyFile = join(
     homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
   );
-  const backend = buildBackend(poolAccount);
+  const backend = buildBackend(poolAccount, execMode);
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
     const now = Date.now();
     // Model-aware (v0.3.6): a model-scoped rejected window (reactive 429

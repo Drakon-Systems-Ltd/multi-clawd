@@ -16,6 +16,15 @@ versioning from v1.0.
   the runtime into every consumer's `node_modules`. Retained as a devDependency
   so the source repo still builds and tests.
 
+### Fixed
+- **Headless tool lockout under a `full` exec policy.** Core injects
+  `--permission-mode bypassPermissions` only for the bundled `claude-cli`
+  backend (by provider id), so a pool launch booted default-deny and every host
+  tool call died against an unanswerable approval prompt. The backend now mirrors
+  core — but derives the flag from the live `tools.exec.mode`, injecting bypass
+  **only** under `full`, so a host on a stricter policy is never silently
+  overridden.
+
 _Publishes as **v1.0.0** at the release gate — see [PUBLISHING.md](PUBLISHING.md)._
 
 ## [0.3.7] — 2026-07-18
