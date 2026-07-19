@@ -46,7 +46,11 @@ into a code comment. In any TRACKED file — source, comments, `DESIGN.md`,
 ## Before you commit
 
 1. `git grep -nIiE "op://[a-z0-9]{20,}|ghp_|npm_[A-Za-z0-9]{20}|sk-[A-Za-z0-9]|@icloud|@gmail|/Users/"` → expect none.
-2. Scan the diff for internal identifiers (operator / agent / host names, topology).
+2. Scan the diff for internal identifiers (operator / agent / host / project names,
+   real usernames in paths, chat ids, topology). **Use plain, unanchored
+   substrings — `\b` word boundaries are UNRELIABLE in `git grep -E` (POSIX ERE)
+   and silently under-match.** (This exact bug once let internal names survive a
+   pass that reported "clean".)
 3. Know the repo's live visibility: `gh repo view --json visibility`. Assume public.
 
 ## Making the repo public (if ever)
