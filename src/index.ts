@@ -100,6 +100,13 @@ const BASE_ARGS = [
   "stream-json",
   "--include-partial-messages",
   "--verbose",
+  // Core injects --permission-mode for the bundled claude-cli backend only
+  // (recognised by provider id, like the jsonlDialect case below). A custom
+  // backend id gets no flag, so Claude boots default-deny and every non-MCP
+  // tool call dies against an approval prompt no channel can answer.
+  // Mirrors the bundled backend under tools.exec.mode "full".
+  "--permission-mode",
+  "bypassPermissions",
   "--setting-sources",
   "user",
   "--allowedTools",
