@@ -174,7 +174,7 @@ describe("auditEffectiveChain", () => {
 
 describe("maskSessionKey", () => {
   test("masks a numeric channel-id tail to …last4 (Telegram chat id)", () => {
-    expect(maskSessionKey("agent:main:telegram:direct:6963520763")).toBe("agent:main:telegram:direct:…0763");
+    expect(maskSessionKey("agent:main:telegram:direct:1000000001")).toBe("agent:main:telegram:direct:…0001");
   });
   test("masks a uuid/hex tail", () => {
     expect(maskSessionKey("agent:main:subagent:b29898de-b4e5-4446")).toBe("agent:main:subagent:…4446");
@@ -190,9 +190,9 @@ describe("maskSessionKey", () => {
     );
   });
   test("keeps the structural prefix so the warn stays actionable", () => {
-    const masked = maskSessionKey("agent:main:telegram:direct:6963520763");
+    const masked = maskSessionKey("agent:main:telegram:direct:1000000001");
     expect(masked.startsWith("agent:main:telegram:direct:")).toBe(true);
-    expect(masked).not.toContain("6963520763");
+    expect(masked).not.toContain("1000000001");
   });
 });
 
