@@ -4,9 +4,9 @@ name: Publish to ClawHub
 # (version taken from the release tag), or on manual dispatch. npm publishing
 # stays manual by policy (see PUBLISHING.md) — this workflow covers ClawHub only.
 #
-# The repo is private, so ClawHub can't pull a GitHub source directly — the
-# workflow publishes the built package folder from the CI checkout instead,
-# attaching the release commit as source metadata.
+# Publishes the built package folder from the CI checkout (the build step
+# needs devDependencies), attaching the release tag + commit as source
+# metadata so ClawHub links the release to the public repo.
 
 on:
   release:
