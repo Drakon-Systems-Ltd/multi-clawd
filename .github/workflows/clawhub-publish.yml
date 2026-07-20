@@ -1,8 +1,12 @@
 name: Publish to ClawHub
 
-# Publishes the skill folder to ClawHub when a GitHub Release is published
+# Publishes the plugin package to ClawHub when a GitHub Release is published
 # (version taken from the release tag), or on manual dispatch. npm publishing
 # stays manual by policy (see PUBLISHING.md) — this workflow covers ClawHub only.
+#
+# The repo is private, so ClawHub can't pull a GitHub source directly — the
+# workflow publishes the built package folder from the CI checkout instead,
+# attaching the release commit as source metadata.
 
 on:
   release:
@@ -14,9 +18,8 @@ on:
         required: false
 
 env:
-  SKILL_PATH: skills/multi-clawd
-  SKILL_SLUG: multiclawd
-  SKILL_NAME: multi-clawd
+  PACKAGE_NAME: "@drakon-systems/multi-clawd"
+  PACKAGE_OWNER: drakon-systems
 
 jobs:
   publish:
@@ -30,10 +33,12 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install ClawHub CLI
-        run: npm i -g clawhub
+      - name: Install dependencies and ClawHub CLI
+        run: |
+          npm ci
+          npm i -g clawhub
 
-      - name: Publish skill
+      - name: Publish plugin package
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -48,17 +53,15 @@ jobs:
           VERSION="${TAG#v}"
           CHANGELOG="${RELEASE_BODY:-Release v${VERSION} — see CHANGELOG.md in the source repo.}"
 
-          # Keep the published SKILL.md's version metadata in step with the tag
-          # (artifact only — nothing is committed back).
-          sed -i "s/^  version: .*/  version: ${VERSION}/" "$SKILL_PATH/SKILL.md"
-
-          clawhub --no-input skill publish "$SKILL_PATH" \
-            --slug "$SKILL_SLUG" \
-            --name "$SKILL_NAME" \
+          clawhub --no-input package publish . \
+            --family code-plugin \
+            --name "$PACKAGE_NAME" \
+            --display-name "multi-clawd" \
+            --owner "$PACKAGE_OWNER" \
             --version "$VERSION" \
             --changelog "$CHANGELOG" \
             --source-repo "$GITHUB_REPOSITORY" \
-            --source-commit "$GITHUB_SHA" \
-            --source-path "$SKILL_PATH"
+            --source-ref "$TAG" \
+            --source-commit "$GITHUB_SHA"
 
-          echo "Published $SKILL_SLUG@$VERSION to ClawHub"
+          echo "Published $PACKAGE_NAME@$VERSION to ClawHub"
