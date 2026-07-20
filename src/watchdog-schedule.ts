@@ -87,7 +87,7 @@ WantedBy=timers.target
  * reference the watchdog at all.
  */
 export function extractWatchdogTarget(unitText: string): string | undefined {
-  const m = unitText.match(/[^<>\s="']*eviction-watchdog\.mjs/);
+  const m = unitText.match(/[^<>\s="']*(?:eviction-watchdog|watchdog-launcher)\.mjs/);
   return m ? m[0] : undefined;
 }
 
@@ -100,4 +100,65 @@ export function classifyWatchdogUnit(
 ): WatchdogUnitState {
   if (targetPath === undefined) return "absent";
   return exists(targetPath) ? "ok" : "orphaned";
+}
+
+/**
+ * A scheduled unit must never point INTO the npm install: OpenClaw
+ * regenerates that directory on every update, orphaning the unit each time.
+ */
+export function isFragileWatchdogTarget(target: string): boolean {
+  return target.includes("/.openclaw/npm/projects/");
+}
+
+/**
+ * The stable launcher a unit points at instead: written once to the state
+ * dir, it resolves the CURRENT install at runtime and runs its watchdog —
+ * so updates can move the install freely without touching the unit.
+ * Self-contained by design: node built-ins only, no package imports.
+ */
+export function renderWatchdogLauncher(): string {
+  return `#!/usr/bin/env node
+// multi-clawd watchdog launcher — the STABLE target for scheduler units.
+// Installs move on every update (the npm project dir is regenerated), so the
+// unit points HERE; this launcher finds the current install at runtime and
+// runs its eviction watchdog. Managed by the setup wizard / update command.
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const HOME = homedir();
+
+function installDir() {
+  const ext = join(HOME, ".openclaw", "extensions", "multi-clawd");
+  if (existsSync(join(ext, "openclaw.plugin.json"))) return ext;
+  const projects = join(HOME, ".openclaw", "npm", "projects");
+  let best;
+  let bestM = -1;
+  try {
+    for (const p of readdirSync(projects)) {
+      if (!p.startsWith("drakon-systems-multi-clawd-")) continue;
+      const dir = join(projects, p, "node_modules", "@drakon-systems", "multi-clawd");
+      const manifest = join(dir, "openclaw.plugin.json");
+      if (!existsSync(manifest)) continue;
+      const t = statSync(manifest).mtimeMs;
+      if (t > bestM) { bestM = t; best = dir; }
+    }
+  } catch {}
+  return best;
+}
+
+const dir = installDir();
+if (!dir) {
+  console.error("[watchdog-launcher] no multi-clawd install found — nothing to do");
+  process.exit(0);
+}
+const script = join(dir, "scripts", "eviction-watchdog.mjs");
+if (!existsSync(script)) {
+  console.error("[watchdog-launcher] " + script + " missing — nothing to do");
+  process.exit(0);
+}
+const r = spawnSync(process.execPath, [script], { stdio: "inherit" });
+process.exit(r.status ?? 0);
+`;
 }

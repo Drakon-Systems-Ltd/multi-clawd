@@ -1,8 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
   renderWatchdogUnit,
+  renderWatchdogLauncher,
   extractWatchdogTarget,
   classifyWatchdogUnit,
+  isFragileWatchdogTarget,
   WATCHDOG_LAUNCHD_LABEL,
   WATCHDOG_SYSTEMD_NAME,
 } from "../src/watchdog-schedule";
@@ -69,5 +71,41 @@ describe("classifyWatchdogUnit", () => {
 
   test("absent: no unit references the watchdog", () => {
     expect(classifyWatchdogUnit(undefined, () => true)).toBe("absent");
+  });
+});
+
+describe("renderWatchdogLauncher", () => {
+  test("self-contained launcher: resolves install at runtime, spawns its watchdog, fail-safe exits", () => {
+    const src = renderWatchdogLauncher();
+    expect(src).toContain("extensions"); // path-install first
+    expect(src).toContain("drakon-systems-multi-clawd-"); // npm-project scan
+    expect(src).toContain("eviction-watchdog.mjs");
+    expect(src).toContain("spawnSync");
+    expect(src).not.toMatch(/from "\.\.?\//); // no package-relative imports — must survive any install layout
+    expect(src).toContain('from "node:'); // node built-ins only
+  });
+});
+
+describe("isFragileWatchdogTarget", () => {
+  test("npm project paths are fragile (regenerated on every update)", () => {
+    expect(
+      isFragileWatchdogTarget(
+        "/home/u/.openclaw/npm/projects/drakon-systems-multi-clawd-x/node_modules/@drakon-systems/multi-clawd/scripts/eviction-watchdog.mjs",
+      ),
+    ).toBe(true);
+  });
+
+  test("checkout, extensions, and launcher paths are stable", () => {
+    expect(isFragileWatchdogTarget("/home/u/dev/multi-clawd/scripts/eviction-watchdog.mjs")).toBe(false);
+    expect(isFragileWatchdogTarget("/home/u/.openclaw/extensions/multi-clawd/scripts/eviction-watchdog.mjs")).toBe(false);
+    expect(isFragileWatchdogTarget("/home/u/.openclaw/state/multi-clawd/watchdog-launcher.mjs")).toBe(false);
+  });
+});
+
+describe("extractWatchdogTarget — launcher-aware", () => {
+  test("also extracts a watchdog-launcher.mjs target", () => {
+    expect(
+      extractWatchdogTarget("ExecStart=/usr/bin/node /home/u/.openclaw/state/multi-clawd/watchdog-launcher.mjs"),
+    ).toBe("/home/u/.openclaw/state/multi-clawd/watchdog-launcher.mjs");
   });
 });

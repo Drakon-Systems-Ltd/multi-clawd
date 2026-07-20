@@ -229,10 +229,16 @@ async function watchdogStep() {
     console.log("  (auto-scheduling not supported on this platform — see README for manual setup)");
     return;
   }
-  // Install-aware: under npx, __dirname is the EPHEMERAL npx cache — the unit
-  // must point at the installed plugin's copy whenever one exists.
-  const { resolveWatchdogScript } = await import(resolve(__dirname, "_shared.mjs"));
-  const scriptPath = resolveWatchdogScript(__dirname);
+  // Units point at the STABLE LAUNCHER, never at an install path: the npm
+  // install dir is regenerated on every update (orphaning any unit that
+  // points into it), and under npx our own __dirname is an ephemeral cache.
+  // The launcher lives in the state dir and finds the install at runtime.
+  const { WATCHDOG_LAUNCHER } = await import(resolve(__dirname, "_shared.mjs"));
+  const scriptPath = WATCHDOG_LAUNCHER;
+  const refreshLauncher = () => {
+    mkdirSync(dirname(WATCHDOG_LAUNCHER), { recursive: true });
+    writeFileSync(WATCHDOG_LAUNCHER, wds.renderWatchdogLauncher());
+  };
   const scanDir =
     platform === "darwin"
       ? join(homedir(), "Library", "LaunchAgents")
@@ -260,8 +266,25 @@ async function watchdogStep() {
     /* scan dir missing — treated as absent */
   }
   const state = wds.classifyWatchdogUnit(found?.target, existsSync);
-  if (state === "ok") {
+  if (state === "ok" && !wds.isFragileWatchdogTarget(found.target)) {
+    if (found.target === WATCHDOG_LAUNCHER && !DRY_RUN) refreshLauncher();
     console.log(`  ✅ already scheduled and healthy → ${found.target}`);
+    return;
+  }
+  if (state === "ok") {
+    // Exists today, but points INTO the npm install — orphans on next update.
+    console.log(
+      `  ⚠ ${found.file}\n    points INTO the npm install dir:\n    ${found.target}\n    That directory is regenerated on every update — the unit will orphan.`,
+    );
+    if (DRY_RUN) {
+      console.log(`  dry-run: would move it to the stable launcher ${scriptPath}`);
+      return;
+    }
+    if (!(await yes("  Move it to the stable launcher (survives every update)?"))) return;
+    refreshLauncher();
+    writeFileSync(found.file, found.text.split(found.target).join(scriptPath));
+    reloadWatchdogUnit(platform, found.file);
+    console.log(`  ✅ now → ${scriptPath}`);
     return;
   }
   if (state === "orphaned") {
@@ -269,10 +292,11 @@ async function watchdogStep() {
       `  ⚠ ${found.file}\n    points at a MISSING script: ${found.target}\n    (an old install dir — the watchdog has been failing silently)`,
     );
     if (DRY_RUN) {
-      console.log(`  dry-run: would repoint it at ${scriptPath}`);
+      console.log(`  dry-run: would repoint it at the stable launcher ${scriptPath}`);
       return;
     }
-    if (!(await yes("  Repoint it at this install?"))) return;
+    if (!(await yes("  Repoint it at the stable launcher (survives every update)?"))) return;
+    refreshLauncher();
     writeFileSync(found.file, found.text.split(found.target).join(scriptPath));
     reloadWatchdogUnit(platform, found.file);
     console.log(`  ✅ repointed → ${scriptPath}`);
@@ -283,6 +307,7 @@ async function watchdogStep() {
     return;
   }
   if (!(await yes("  Not scheduled. Schedule it now (runs every 5 min)?"))) return;
+  refreshLauncher();
   const unitFiles = wds.renderWatchdogUnit({ platform, nodePath: process.execPath, scriptPath });
   for (const uf of unitFiles) {
     const abs = join(homedir(), uf.path);

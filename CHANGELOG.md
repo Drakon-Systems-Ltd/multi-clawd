@@ -4,6 +4,24 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.2.2] — 2026-07-20
+
+The watchdog gets a permanent home. Fleet run of `update` revealed that
+OpenClaw regenerates the npm install directory on EVERY update — so any
+scheduler unit pointing into it orphans again on each update, forever.
+
+- **Stable watchdog launcher**: units now point at
+  `~/.openclaw/state/multi-clawd/watchdog-launcher.mjs` — a tiny
+  self-contained script (node built-ins only) that resolves the CURRENT
+  install at runtime and runs its watchdog. Installs can move freely; the
+  unit never breaks again. Fail-safe: no install found → clean exit.
+- **`update` self-heals the unit**: after installing, any watchdog unit whose
+  target is missing OR points into the npm install dir is automatically moved
+  to the launcher (and the launcher content refreshed). No more
+  "run setup to repair" for this class.
+- **Wizard detects fragile-but-working units** (target inside the npm install
+  dir) and offers the move before they break; **doctor warns** on them.
+
 ## [1.2.1] — 2026-07-20
 
 Fixes from the first real fleet run of `npx … update`:
@@ -116,6 +134,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.2.2]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.1...v1.1.0

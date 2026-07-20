@@ -127,6 +127,7 @@ async function update() {
   } else {
     console.log("  ⏳ remember: the new version loads on the next gateway restart.");
   }
+  await healWatchdogUnit();
   console.log(`\n${BOLD}  health check${RESET}`);
   const doc = spawnSync(process.execPath, [join(__dirname, "doctor.mjs")], { stdio: "inherit" });
   if (doc.status !== 0) {
@@ -134,6 +135,73 @@ async function update() {
     process.exit(doc.status ?? 1);
   }
   console.log(`\n  ✅ done — now on v${installedVersion() ?? "?"}`);
+}
+
+/**
+ * Self-heal the scheduled watchdog after an update: the npm install dir is
+ * regenerated on every update, so a unit pointing into it just orphaned.
+ * Move any broken-or-fragile unit onto the stable launcher; refresh the
+ * launcher's content when a unit already uses it. Never fatal.
+ */
+async function healWatchdogUnit() {
+  try {
+    const wds = await import(resolve(__dirname, "..", "dist", "watchdog-schedule.js"));
+    const { WATCHDOG_LAUNCHER } = await import(join(__dirname, "_shared.mjs"));
+    const { existsSync, readdirSync, readFileSync: rf, writeFileSync, mkdirSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const { dirname: dn } = await import("node:path");
+    for (const d of [
+      join(homedir(), "Library", "LaunchAgents"),
+      join(homedir(), ".config", "systemd", "user"),
+    ]) {
+      let files = [];
+      try {
+        files = readdirSync(d);
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        if (!/\.(plist|service|timer)$/.test(f)) continue;
+        const file = join(d, f);
+        let text;
+        try {
+          text = rf(file, "utf8");
+        } catch {
+          continue;
+        }
+        const target = wds.extractWatchdogTarget(text);
+        if (!target) continue;
+        const refreshLauncher = () => {
+          mkdirSync(dn(WATCHDOG_LAUNCHER), { recursive: true });
+          writeFileSync(WATCHDOG_LAUNCHER, wds.renderWatchdogLauncher());
+        };
+        if (target === WATCHDOG_LAUNCHER) {
+          refreshLauncher();
+          continue;
+        }
+        if (!existsSync(target) || wds.isFragileWatchdogTarget(target)) {
+          refreshLauncher();
+          writeFileSync(file, text.split(target).join(WATCHDOG_LAUNCHER));
+          if (d.endsWith("LaunchAgents")) {
+            try {
+              execFileSync("/bin/sh", ["-c", `launchctl unload "${file}" 2>/dev/null; launchctl load "${file}" 2>&1 || true`]);
+            } catch {
+              /* manual load needed */
+            }
+          } else {
+            try {
+              execFileSync("systemctl", ["--user", "daemon-reload"]);
+            } catch {
+              /* manual reload needed */
+            }
+          }
+          console.log(`  🔧 watchdog unit ${f} → stable launcher (survives future updates)`);
+        }
+      }
+    }
+  } catch {
+    /* healing is best-effort; doctor still reports the truth */
+  }
 }
 
 switch (cmd) {

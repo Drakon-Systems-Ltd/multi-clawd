@@ -371,8 +371,13 @@ if (watchdogFound) {
       } catch {
         continue;
       }
-      const target = text.match(/[^<>\s="']*eviction-watchdog\.mjs/)?.[0];
+      const target = text.match(/[^<>\s="']*(?:eviction-watchdog|watchdog-launcher)\.mjs/)?.[0];
       if (target && !existsSync(target)) orphan = { file: join(d, f), target };
+      else if (target && target.includes("/.openclaw/npm/projects/")) {
+        warn(
+          `watchdog unit ${join(d, f)} points INTO the npm install dir — regenerated on every update, so it WILL orphan. Run the setup wizard (or \`update\`) to move it to the stable launcher.`,
+        );
+      }
     }
   }
   if (orphan) {
