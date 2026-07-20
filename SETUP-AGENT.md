@@ -43,6 +43,13 @@ openclaw plugins install "$(pwd)"
 
 ## 3. Second-account login — **ASK YOUR HUMAN**
 
+**Prefer the wizard.** `node scripts/setup.mjs` (or `npm run setup` in a
+checkout) walks through accounts, token storage, and the pool, and merges
+`openclaw.json` non-destructively with a backup — it replaces steps 3–4 and
+most of 6. Run it WITH your human present: the second-account OAuth login in
+the middle of it is theirs to do, never yours. `--dry-run` previews the
+changes first. The manual steps below remain for when the wizard can't run.
+
 Create the isolated config dir, then hand control to your human for the
 OAuth login (it opens a browser and needs their credentials — you cannot
 and must not do this part for them):

@@ -180,6 +180,23 @@ install → re-add plan.
 
 ## Set up a second account
 
+**Easiest: the setup wizard.** It walks you through the whole shape below —
+main account, isolated second account, token storage, pool — and merges the
+result into `openclaw.json` non-destructively (backup first, merge by id,
+re-runs are no-ops, never sees a token value):
+
+```bash
+npm run setup                                            # source checkout
+node ~/.openclaw/extensions/multi-clawd/scripts/setup.mjs  # installed copy
+# add --dry-run to preview the changes without writing anything
+```
+
+The key idea either way: your **main** account keeps the default `~/.claude`
+login untouched, and each **extra** account gets its *own isolated config
+dir* — a separate Claude "app" — so the logins can never clobber each other.
+
+**Or by hand:**
+
 1. Give the account an isolated config dir and capture its Claude Code
    setup-token into it.
 

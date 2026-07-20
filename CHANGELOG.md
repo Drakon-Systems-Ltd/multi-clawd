@@ -16,6 +16,15 @@ versioning from v1.0.
   the runtime into every consumer's `node_modules`. Retained as a devDependency
   so the source repo still builds and tests.
 
+### Added
+- **Interactive setup wizard** (`npm run setup` / `scripts/setup.mjs`). Walks a
+  user through the standard multi-account shape — main native account, second
+  account in its own isolated config dir, token via secret-manager ref / token
+  file / dir login, failover pool — and merges the result into
+  `openclaw.json` non-destructively (backup first, accounts merged by id, an
+  existing pool never overwritten, re-runs are no-ops). `--dry-run` previews.
+  The wizard never sees, stores, or prints a token value.
+
 ### Fixed
 - **Headless tool lockout under a `full` exec policy.** Core injects
   `--permission-mode bypassPermissions` only for the bundled `claude-cli`
