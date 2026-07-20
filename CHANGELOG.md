@@ -4,6 +4,20 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.0.1] — 2026-07-20
+
+Fixes from the first real registry-install migration:
+
+- **`openclaw` peer marked optional** (`peerDependenciesMeta`) so npm no longer
+  auto-installs a full nested copy of the host runtime into the plugin's
+  `node_modules`. Proven safe live: the gateway provides the module to
+  registry installs (verified by serving a real pool turn with the nested copy
+  removed).
+- **doctor finds registry installs.** The install check now resolves
+  `~/.openclaw/npm/projects/…/@drakon-systems/multi-clawd` as well as the
+  classic `~/.openclaw/extensions/multi-clawd` path install (which still wins
+  when both exist), instead of reporting ❌ on the recommended install method.
+
 ## [1.0.0] — 2026-07-20
 
 First public npm release. Everything in 0.2–0.3.7 — the pooled backend with
@@ -64,6 +78,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.0.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v0.3.7...v1.0.0
 [0.3.7]: https://github.com/Drakon-Systems-Ltd/multi-clawd/releases/tag/v0.3.7
 [0.3.6]: https://github.com/Drakon-Systems-Ltd/multi-clawd/releases/tag/v0.3.6

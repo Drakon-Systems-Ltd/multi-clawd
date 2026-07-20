@@ -26,7 +26,38 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOME = homedir();
-const EXT_DIR = join(HOME, ".openclaw", "extensions", "multi-clawd");
+
+/**
+ * Where is the plugin actually installed? Path installs land in
+ * ~/.openclaw/extensions/multi-clawd; registry installs (npm spec) land in
+ * ~/.openclaw/npm/projects/<pkg-hash>/node_modules/@drakon-systems/multi-clawd.
+ * Prefer the extensions dir when both exist (it shadows), else the newest
+ * npm-project install carrying a manifest.
+ */
+function resolveInstallDir() {
+  const extDir = join(HOME, ".openclaw", "extensions", "multi-clawd");
+  if (existsSync(join(extDir, "openclaw.plugin.json"))) return extDir;
+  const projects = join(HOME, ".openclaw", "npm", "projects");
+  let best = extDir;
+  let bestM = -1;
+  try {
+    for (const p of readdirSync(projects)) {
+      if (!p.startsWith("drakon-systems-multi-clawd-")) continue;
+      const dir = join(projects, p, "node_modules", "@drakon-systems", "multi-clawd");
+      const manifest = join(dir, "openclaw.plugin.json");
+      if (!existsSync(manifest)) continue;
+      const m = statSync(manifest).mtimeMs;
+      if (m > bestM) {
+        bestM = m;
+        best = dir;
+      }
+    }
+  } catch {
+    /* no npm projects dir */
+  }
+  return best;
+}
+const EXT_DIR = resolveInstallDir();
 const CONFIG_PATH = join(HOME, ".openclaw", "openclaw.json");
 const STATE_DIR = join(HOME, ".openclaw", "state", "multi-clawd");
 const REPO_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
