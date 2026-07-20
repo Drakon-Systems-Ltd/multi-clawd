@@ -33,6 +33,7 @@ function usage() {
 ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
 
   ${BOLD}setup${RESET}     guided setup wizard (accounts, pool, watchdog)
+  ${BOLD}explain${RESET}   your setup in plain English — accounts, pool, fallback chain
   ${BOLD}update${RESET}    update the plugin to the latest version
   ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
   ${BOLD}version${RESET}   show CLI + installed plugin versions
@@ -204,9 +205,77 @@ async function healWatchdogUnit() {
   }
 }
 
+/** `explain` — gather config + live health, render the plain-English view. */
+async function explain() {
+  const { readFileSync: rf, existsSync } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  let ec, health, shim;
+  try {
+    ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
+    health = await import(resolve(__dirname, "..", "dist", "health.js"));
+    shim = await import(resolve(__dirname, "..", "dist", "shim-core.js"));
+  } catch {
+    console.error("explain: built dist/ is missing — reinstall the package.");
+    process.exit(1);
+  }
+  let config = {};
+  try {
+    config = JSON.parse(rf(join(homedir(), ".openclaw", "openclaw.json"), "utf8"));
+  } catch {
+    console.error("explain: could not read ~/.openclaw/openclaw.json");
+    process.exit(1);
+  }
+  const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
+  const accounts = Array.isArray(pc.accounts) ? pc.accounts : [];
+  const pool = pc.pool
+    ? { ...pc.pool, id: pc.pool.id?.trim() || "clawd", accounts: pc.pool.accounts ?? [] }
+    : undefined;
+  const chain = config?.agents?.defaults?.model;
+  const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
+  const now = Date.now();
+  const rel = (ms) => {
+    const m = Math.round((ms - now) / 60000);
+    return m >= 90 ? `~${Math.round(m / 60)}h` : `~${m}m`;
+  };
+  const healthRows = accounts.map((a) => {
+    let state;
+    try {
+      state = shim.parseStoredState(rf(join(stateDir, `${a.id}.json`), "utf8"));
+    } catch {
+      /* no telemetry yet */
+    }
+    const h = health.classifyAccountHealth(state, {
+      utilizationThreshold: pool?.utilizationThreshold,
+      staleAfterMs: pool?.staleAfterMs,
+    }, now);
+    let detail = h.reason;
+    if (h.verdict === "exhausted" && h.resumeAt) {
+      detail = `${h.reason ?? "limit hit"} — back in ${rel(h.resumeAt)}`;
+    }
+    return { id: a.id, verdict: h.verdict, detail };
+  });
+  let stickyAccount;
+  if (pool) {
+    try {
+      const sticky = JSON.parse(rf(join(stateDir, `pool-${pool.id}.sticky.json`), "utf8"));
+      if (sticky?.account && sticky.account !== pool.accounts[0]) stickyAccount = sticky.account;
+    } catch {
+      /* no sticky state */
+    }
+  }
+  console.log(`\n${BOLD}🦞 multi-clawd — your setup, in plain English${RESET}\n`);
+  console.log(
+    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount }),
+  );
+  console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
+}
+
 switch (cmd) {
   case "setup":
     runSibling("setup.mjs", rest);
+    break;
+  case "explain":
+    await explain();
     break;
   case "doctor":
     runSibling("doctor.mjs", rest);

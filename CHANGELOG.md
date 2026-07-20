@@ -4,6 +4,15 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.3.0] — 2026-07-20
+
+- **`multi-clawd explain`** — your whole setup in plain English: what each
+  account actually is (native login / isolated dir / secret-ref token — the
+  reference itself is never printed), how the pool decides, every fallback
+  rung annotated with what it means (pool hop, tier drop, pool bypass,
+  leaves-Claude), and live health right now (near-limit / exhausted with
+  human reset times, rotation state).
+
 ## [1.2.3] — 2026-07-20
 
 Wizard safety, from a real fleet run that overwrote a working account:
@@ -147,6 +156,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.3.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.0...v1.2.1
