@@ -26,7 +26,7 @@ If `claude` is missing: `npm install -g @anthropic-ai/claude-code`.
 
 ## 2. Install the plugin
 
-**Registry install (recommended, v1.0+)** — the gateway pulls the prebuilt
+**Registry install (recommended)** — the gateway pulls the prebuilt
 package; no clone, no build, nothing to keep in sync:
 
 ```bash

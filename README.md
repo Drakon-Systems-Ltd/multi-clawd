@@ -10,7 +10,8 @@ Pool every Claude Max account you own into a single failover chain —
 same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
-[![version](https://img.shields.io/badge/version-0.3.7-4c9aff)](package.json)
+[![npm](https://img.shields.io/badge/npm-%40drakon--systems%2Fmulti--clawd-cb3837)](https://www.npmjs.com/package/@drakon-systems/multi-clawd)
+[![version](https://img.shields.io/badge/version-1.0.1-4c9aff)](CHANGELOG.md)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -112,7 +113,7 @@ Code backend runs.
 
 ## Install
 
-**From npm (recommended, v1.0+):**
+**From npm (recommended):**
 
 ```bash
 openclaw plugins install @drakon-systems/multi-clawd --pin
@@ -123,8 +124,9 @@ The gateway pulls the prebuilt package — no clone, no build step, nothing to
 keep in sync. `--pin` records the exact resolved version, so an upgrade is a
 deliberate `@latest`, never a surprise. `openclaw` itself is a *peer*
 dependency (the host provides it), so the install stays lean. Confirm with
-`openclaw plugins list` (expect `multi-clawd` enabled), then run the doctor:
-`node ~/.openclaw/extensions/multi-clawd/scripts/doctor.mjs`.
+`openclaw plugins list` (expect `multi-clawd` enabled) — it also shows the
+install path; run the doctor from there:
+`node <install-path>/scripts/doctor.mjs`.
 
 **From ClawHub (alternative registry):**
 

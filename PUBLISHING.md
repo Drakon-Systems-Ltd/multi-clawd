@@ -18,12 +18,13 @@ the **manual** publish procedure — run by hand from a trusted machine, never C
   publishing (it does on the release machine). If it ever doesn't, `npm login` as
   `cyborgninja` first.
 
-## Gate
+## Status
 
-Publish the **v1.0.0** debut once the v1.0 readiness gates are met (weekly quota
-reset observed; publish dry-run evidence captured). The packaging prep — scoped
-name, peer-dependency `openclaw`, `publishConfig.access: public`, docs — already
-landed at v0.3.7; only the version bump and the publish itself remain.
+**v1.0.0 and v1.0.1 published 2026-07-20** — the package is live at
+[npmjs.com/package/@drakon-systems/multi-clawd](https://www.npmjs.com/package/@drakon-systems/multi-clawd).
+The registry-install migration was verified end-to-end (install → gateway
+restart → doctor READY → live pool turn). The steps below remain the runbook
+for every future release.
 
 ## Steps
 
