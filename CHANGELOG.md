@@ -4,6 +4,21 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.4.0] — 2026-07-20
+
+- **`multi-clawd login <account>`** — set up or re-auth any configured
+  account's Claude sign-in without remembering environment incantations. It
+  launches the right flow for what the account IS (native → `claude auth
+  login` against the default dir/keychain; isolated dir → the same inside
+  that dir, created 0700 if missing; secret-ref/token-file accounts →
+  `claude setup-token`, with a throwaway scratch dir when the account has no
+  dir so the default login is never disturbed), then verifies: shows **which
+  email** is signed in (no more wrong-account mix-ups), checks the token file
+  landed (and chmods it 600), or reminds where the token goes. The human does
+  the OAuth; the CLI never captures, stores, or prints a token value.
+  `multi-clawd login` with no argument lists the accounts in plain English.
+- Wizard and README now point at `login` as the easy path for the sign-in step.
+
 ## [1.3.1] — 2026-07-20
 
 - **README restructured around the CLI.** A Quick start now leads the page:
@@ -163,6 +178,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.4.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.2...v1.2.3

@@ -28,6 +28,7 @@ npm i -g @drakon-systems/multi-clawd   # the CLI (once)
 
 multi-clawd update    # install (or update) the OpenClaw plugin — right flags, restart, doctor
 multi-clawd setup     # guided wizard: accounts, isolated second login, pool, watchdog
+multi-clawd login claw2   # launch the right Claude sign-in for an account (or re-auth it)
 multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
 multi-clawd doctor    # health check (add --probe for a live end-to-end turn)
 ```

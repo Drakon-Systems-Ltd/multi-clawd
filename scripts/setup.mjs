@@ -156,8 +156,12 @@ async function secondAccountFlow(id, prior) {
     console.log(`  ✗ ${err}`);
   }
   console.log(`
-  Now log the SECOND account in (you, in your own terminal — the wizard
-  cannot and must not do this for you):
+  Now log the SECOND account in (you — it needs your browser and your
+  credentials). Easiest AFTER this wizard finishes:
+
+      multi-clawd login ${id}      # launches the right flow, right dir, verified
+
+  or manually, right now, in your own terminal:
 
       CLAUDE_CONFIG_DIR=${configDir} claude setup-token
 
@@ -395,6 +399,7 @@ if (DRY_RUN || !wroteConfig) {
 console.log(`
 Done. Finish with:
 
+  multi-clawd login <account-id>   # if any account still needs its Claude sign-in
   openclaw gateway restart
   node ${join(__dirname, "doctor.mjs")}     # expect READY
 

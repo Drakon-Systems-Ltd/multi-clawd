@@ -33,6 +33,7 @@ function usage() {
 ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
 
   ${BOLD}setup${RESET}     guided setup wizard (accounts, pool, watchdog)
+  ${BOLD}login${RESET}     log a configured account in (or re-auth it) — right dir, right env
   ${BOLD}explain${RESET}   your setup in plain English — accounts, pool, fallback chain
   ${BOLD}update${RESET}    update the plugin to the latest version
   ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
@@ -270,9 +271,101 @@ async function explain() {
   console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
 }
 
+/**
+ * `login <account>` — launch the RIGHT Claude login flow for a configured
+ * account: correct config-dir environment, dir created if missing, verified
+ * afterwards (shows which email is signed in). The human does the OAuth; this
+ * never captures, stores, or prints a token value.
+ */
+async function login() {
+  const { readFileSync: rf, existsSync, mkdirSync, chmodSync, statSync, mkdtempSync, rmSync } =
+    await import("node:fs");
+  const { homedir, tmpdir } = await import("node:os");
+  let lp, ec;
+  try {
+    lp = await import(resolve(__dirname, "..", "dist", "login-plan.js"));
+    ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
+  } catch {
+    console.error("login: built dist/ is missing — reinstall the package.");
+    process.exit(1);
+  }
+  let config = {};
+  try {
+    config = JSON.parse(rf(join(homedir(), ".openclaw", "openclaw.json"), "utf8"));
+  } catch {
+    console.error("login: could not read ~/.openclaw/openclaw.json — run `multi-clawd setup` first.");
+    process.exit(1);
+  }
+  const accounts = config?.plugins?.entries?.["multi-clawd"]?.config?.accounts ?? [];
+  if (accounts.length === 0) {
+    console.error("login: no multi-clawd accounts configured — run `multi-clawd setup` first.");
+    process.exit(1);
+  }
+  const target = rest[0];
+  const acc = accounts.find((a) => a.id === target);
+  if (!acc) {
+    console.log(`\n${BOLD}Which account?${RESET}  multi-clawd login <id>\n`);
+    for (const a of accounts) {
+      console.log(`  ${BOLD}${a.id}${RESET}${a.label ? `  "${a.label}"` : ""}`);
+      console.log(`    → ${ec.describeAccount(a)}`);
+    }
+    process.exit(target ? 1 : 0);
+  }
+  const plan = lp.loginPlanForAccount(acc);
+  const expand = (p) => (p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
+  const env = { ...process.env };
+  delete env.CLAUDE_CONFIG_DIR;
+  let scratch;
+  if (plan.scratchDir) {
+    scratch = mkdtempSync(join(tmpdir(), "multi-clawd-login-"));
+    env.CLAUDE_CONFIG_DIR = scratch;
+  } else if (plan.configDir) {
+    const dir = expand(plan.configDir);
+    if (plan.ensureDir && !existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    env.CLAUDE_CONFIG_DIR = dir;
+  }
+  if (plan.warn) console.log(`  ⚠ ${plan.warn}`);
+  console.log(`\n  Launching ${DIM}${plan.command.join(" ")}${RESET} for ${BOLD}${acc.id}${RESET}${acc.label ? ` ("${acc.label}")` : ""}.`);
+  console.log(`  ${BOLD}Sign in as the account this slot is for${RESET} — not your other one!\n`);
+  const r = spawnSync(plan.command[0], plan.command.slice(1), { stdio: "inherit", env });
+  if (scratch) rmSync(scratch, { recursive: true, force: true });
+  if (r.status !== 0) {
+    console.error(`\n  ❌ ${plan.command.join(" ")} exited with ${r.status ?? "an error"}.`);
+    process.exit(1);
+  }
+  if (plan.verify === "auth-status") {
+    try {
+      const out = spawnSync("claude", ["auth", "status"], { encoding: "utf8", env }).stdout ?? "";
+      const email = out.match(/"email"\s*:\s*"([^"]+)"/)?.[1];
+      const loggedIn = /"loggedIn"\s*:\s*true/.test(out);
+      if (loggedIn) console.log(`\n  ✅ ${acc.id} is signed in${email ? ` as ${BOLD}${email}${RESET}` : ""} — double-check that's the right account for this slot.`);
+      else console.log("\n  ⚠ auth status does not show a login — try again or check `claude auth status` yourself.");
+    } catch {
+      console.log("\n  (could not verify — run `claude auth status` to confirm)");
+    }
+  } else if (plan.verify === "token-file" && acc.oauthTokenFile) {
+    const f = expand(acc.oauthTokenFile);
+    console.log(`\n  Now: ${plan.afterNote}`);
+    if (await askYes("  Done — token saved?")) {
+      if (existsSync(f) && statSync(f).size > 0) {
+        chmodSync(f, 0o600);
+        console.log(`  ✅ ${f} present (permissions set to 600). Restart the gateway to pick it up.`);
+      } else {
+        console.log(`  ❌ ${f} is missing or empty — the account won't authenticate until it's there.`);
+      }
+    }
+  } else if (plan.afterNote) {
+    console.log(`\n  Now: ${plan.afterNote}`);
+    console.log("  Then restart the gateway; its login probe will confirm within ~15 min (or run `multi-clawd doctor`).");
+  }
+}
+
 switch (cmd) {
   case "setup":
     runSibling("setup.mjs", rest);
+    break;
+  case "login":
+    await login();
     break;
   case "explain":
     await explain();
