@@ -224,16 +224,27 @@ install → re-add plan.
 
 ## Set up a second account
 
-**Easiest: the setup wizard.** It walks you through the whole shape below —
-main account, isolated second account, token storage, pool — and merges the
-result into `openclaw.json` non-destructively (backup first, merge by id,
-re-runs are no-ops, never sees a token value):
+**Easiest: the wizard, then the login command.** The wizard walks you through
+the whole shape below — main account, isolated second account, token storage,
+pool — and merges the result into `openclaw.json` non-destructively (backup
+first, merge by id, existing accounts never overwritten, re-runs are no-ops,
+never sees a token value). Then `login` performs the actual Claude sign-in
+for any account — right flow, right config dir, verified afterwards with the
+signed-in email shown:
 
 ```bash
-npm run setup                                            # source checkout
-node ~/.openclaw/extensions/multi-clawd/scripts/setup.mjs  # installed copy
-# add --dry-run to preview the changes without writing anything
+multi-clawd setup            # wire the accounts + pool (add --dry-run to preview)
+multi-clawd login claw2      # launch the second account's Claude sign-in
+multi-clawd login claw1      # (works for re-authing ANY account, any time)
 ```
+
+`login` knows what each account is: a native account signs in against the
+default dir/keychain, an isolated-dir account inside its own dir (created
+`0700` if missing), and token accounts get `claude setup-token` — in a
+throwaway scratch dir when the account has no dir of its own, so your main
+login is never disturbed. You do the OAuth in the launched flow; the CLI
+never captures, stores, or prints a token value.
+(From a source checkout, `npm run setup` still works for the wizard.)
 
 The key idea either way: your **main** account keeps the default `~/.claude`
 login untouched, and each **extra** account gets its *own isolated config

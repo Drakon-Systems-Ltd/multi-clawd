@@ -4,6 +4,13 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.4.1] — 2026-07-20
+
+- Docs: the "Set up a second account" section now leads with
+  `multi-clawd setup` + `multi-clawd login` (and explains what `login` does
+  per account shape), replacing a stale wizard invocation that still pointed
+  at the pre-registry `~/.openclaw/extensions/…` path.
+
 ## [1.4.0] — 2026-07-20
 
 - **`multi-clawd login <account>`** — set up or re-auth any configured
@@ -178,6 +185,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.4.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.3...v1.3.0
