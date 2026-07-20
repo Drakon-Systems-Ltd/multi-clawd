@@ -4,6 +4,13 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.3.1] — 2026-07-20
+
+- **README restructured around the CLI.** A Quick start now leads the page:
+  `npm i -g` once, then `multi-clawd update / setup / explain / doctor` — the
+  whole lifecycle in five lines, with the 3-step account/pool picture up top
+  instead of buried mid-page. Docs-only release.
+
 ## [1.3.0] — 2026-07-20
 
 - **`multi-clawd explain`** — your whole setup in plain English: what each
@@ -156,6 +163,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.3.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.3...v1.3.0
 [1.2.3]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.1...v1.2.2

@@ -21,6 +21,37 @@ same model, next account, full harness on every hop.
 
 ---
 
+## Quick start
+
+```bash
+npm i -g @drakon-systems/multi-clawd   # the CLI (once)
+
+multi-clawd update    # install (or update) the OpenClaw plugin — right flags, restart, doctor
+multi-clawd setup     # guided wizard: accounts, isolated second login, pool, watchdog
+multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
+multi-clawd doctor    # health check (add --probe for a live end-to-end turn)
+```
+
+That's the entire lifecycle. `update` installs the plugin when it's missing and
+upgrades it when it's not — nobody types registry flags. `setup` walks you
+through the whole shape below and merges config **non-destructively** (backup
+first, existing accounts never overwritten, re-runs are no-ops). Prefer not to
+install anything? Every command also runs as
+`npx @drakon-systems/multi-clawd <command>`.
+
+**The 3-step picture** `setup` walks you through:
+
+1. **Main account** — your existing `claude` login, used as-is (nothing to do).
+2. **Second account** — lives in its **own isolated config dir** (a separate
+   Claude "app", e.g. `~/.claw2`), so the two logins can never clobber each
+   other; token via a secret-manager reference (recommended), token file, or
+   the dir's own login.
+3. **The pool** — one backend id (`clawd/…`) fronting both: every launch runs
+   on the first account that isn't nearly maxed out, and your fallback chain
+   routes through it.
+
+Then `multi-clawd explain` shows you exactly what you built.
+
 ## Why
 
 OpenClaw's bundled `claude-cli` backend runs Claude Code on a **single**
@@ -113,20 +144,24 @@ Code backend runs.
 
 ## Install
 
-**From npm (recommended):**
+**The CLI does it all (recommended)** — see [Quick start](#quick-start):
+
+```bash
+npm i -g @drakon-systems/multi-clawd && multi-clawd update
+```
+
+`update` runs the registry install with the right flags, offers the gateway
+restart, and finishes with a doctor health check. Prefer the raw form?
 
 ```bash
 openclaw plugins install @drakon-systems/multi-clawd --pin
 openclaw gateway restart
 ```
 
-The gateway pulls the prebuilt package — no clone, no build step, nothing to
-keep in sync. `--pin` records the exact resolved version, so an upgrade is a
-deliberate `@latest`, never a surprise. `openclaw` itself is a *peer*
-dependency (the host provides it), so the install stays lean. Confirm with
-`openclaw plugins list` (expect `multi-clawd` enabled) — it also shows the
-install path; run the doctor from there:
-`node <install-path>/scripts/doctor.mjs`.
+Either way the gateway pulls the prebuilt package — no clone, no build step,
+nothing to keep in sync. `--pin` records the exact resolved version, so an
+upgrade is a deliberate act, never a surprise. `openclaw` itself is a *peer*
+dependency (the host provides it), so the install stays lean.
 
 **From ClawHub (alternative registry):**
 
