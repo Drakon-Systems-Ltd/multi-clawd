@@ -4,6 +4,15 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.2.0] — 2026-07-20
+
+- **`multi-clawd` CLI** (npm `bin`): `npx @drakon-systems/multi-clawd <cmd>` —
+  or a bare `multi-clawd <cmd>` after `npm i -g`. Commands: `setup` (wizard),
+  `doctor`, `version`, and the new **`update`** — one command that checks the
+  registry, runs the openclaw install with the right flags (nobody types
+  `--pin --force` again), offers the gateway restart, and finishes with a
+  doctor health check. Never downgrades; degrades gracefully offline.
+
 ## [1.1.0] — 2026-07-20
 
 The setup wizard now owns the eviction watchdog:
@@ -94,6 +103,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.2.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v0.3.7...v1.0.0

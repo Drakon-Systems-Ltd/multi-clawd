@@ -1,6 +1,6 @@
 {
   "name": "@drakon-systems/multi-clawd",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Multi-account Claude Code failover for OpenClaw — register additional Claude (Max/Pro) logins as first-class CLI backends and keep the full skills/MCP harness across every account.",
   "type": "module",
   "license": "MIT",
@@ -35,6 +35,9 @@
     }
   },
   "main": "./dist/index.js",
+  "bin": {
+    "multi-clawd": "./scripts/cli.mjs"
+  },
   "publishConfig": {
     "access": "public"
   },

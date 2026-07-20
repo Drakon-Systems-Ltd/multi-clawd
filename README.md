@@ -165,10 +165,15 @@ second Claude subscription you own.
 **Upgrading:**
 
 ```bash
-# Registry install (npm / ClawHub):
-openclaw plugins install @drakon-systems/multi-clawd@latest --force
-openclaw gateway restart
+npx @drakon-systems/multi-clawd update
+```
 
+One command: checks the registry, installs the new version with the right
+flags, offers the gateway restart, and finishes with a doctor health check.
+(`npm i -g @drakon-systems/multi-clawd` once, and it's just `multi-clawd
+update` — with `multi-clawd setup` and `multi-clawd doctor` alongside.)
+
+```bash
 # From source:
 cd multi-clawd && git pull && npm install && npm run build && npm run doctor
 ```

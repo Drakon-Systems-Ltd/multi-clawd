@@ -141,8 +141,8 @@ one on output; resolution trims it (guaranteed).
 
 After any install or upgrade, run `npm run doctor` (add `--probe` to spend
 one turn proving the pool answers). Fix every ❌ before reporting done.
-Registry upgrade (npm / ClawHub): `openclaw plugins install
-@drakon-systems/multi-clawd@latest --force` → `openclaw gateway restart` →
+Registry upgrade: `npx @drakon-systems/multi-clawd update` — one command
+that checks the registry, installs, offers the gateway restart, and runs the
 doctor. From source the full sequence is `git pull` → `npm install` →
 `npm run build` → `npm run doctor`; run the build explicitly — the
 `prepare` hook does not reliably refresh `dist/` on this path.
