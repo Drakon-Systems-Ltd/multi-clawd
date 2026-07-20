@@ -15,15 +15,13 @@
  * has to remember `--pin --force`.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG = "@drakon-systems/multi-clawd";
-const HOME = homedir();
 const BOLD = process.stdout.isTTY ? "\x1b[1m" : "";
 const DIM = process.stdout.isTTY ? "\x1b[2m" : "";
 const RESET = process.stdout.isTTY ? "\x1b[0m" : "";
@@ -44,30 +42,7 @@ Run via npx (${DIM}npx ${PKG} <command>${RESET}) or install globally
 `);
 }
 
-/** Same resolution as the doctor: path install wins, else newest npm-project install. */
-function resolveInstallDir() {
-  const extDir = join(HOME, ".openclaw", "extensions", "multi-clawd");
-  if (existsSync(join(extDir, "openclaw.plugin.json"))) return extDir;
-  const projects = join(HOME, ".openclaw", "npm", "projects");
-  let best;
-  let bestM = -1;
-  try {
-    for (const p of readdirSync(projects)) {
-      if (!p.startsWith("drakon-systems-multi-clawd-")) continue;
-      const dir = join(projects, p, "node_modules", "@drakon-systems", "multi-clawd");
-      const manifest = join(dir, "openclaw.plugin.json");
-      if (!existsSync(manifest)) continue;
-      const m = statSync(manifest).mtimeMs;
-      if (m > bestM) {
-        bestM = m;
-        best = dir;
-      }
-    }
-  } catch {
-    /* no npm projects dir */
-  }
-  return best;
-}
+const { resolveInstallDir } = await import(join(__dirname, "_shared.mjs"));
 
 function installedVersion() {
   const dir = resolveInstallDir();
@@ -155,7 +130,7 @@ async function update() {
   console.log(`\n${BOLD}  health check${RESET}`);
   const doc = spawnSync(process.execPath, [join(__dirname, "doctor.mjs")], { stdio: "inherit" });
   if (doc.status !== 0) {
-    console.log(`\n  ⚠ doctor found problems — if it flagged the watchdog, run ${BOLD}multi-clawd setup${RESET} to repair it.`);
+    console.log(`\n  ⚠ doctor found problems — if it flagged the watchdog, run ${BOLD}npx ${PKG} setup${RESET} to repair it.`);
     process.exit(doc.status ?? 1);
   }
   console.log(`\n  ✅ done — now on v${installedVersion() ?? "?"}`);

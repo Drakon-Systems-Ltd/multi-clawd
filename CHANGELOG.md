@@ -4,6 +4,19 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.2.1] — 2026-07-20
+
+Fixes from the first real fleet run of `npx … update`:
+
+- **Watchdog repoint targets the installed plugin, never the npx cache.** Run
+  via `npx`, the wizard's own directory is the ephemeral npx cache — pointing
+  a scheduled unit there breaks on the next cache clean. The target is now
+  resolved install-aware (installed plugin first, `__dirname` only for a
+  source checkout with no install).
+- **The post-doctor repair hint uses the npx-form command** — `multi-clawd
+  setup` is only on PATH after a global install; `npx @drakon-systems/multi-clawd
+  setup` works for everyone.
+
 ## [1.2.0] — 2026-07-20
 
 - **`multi-clawd` CLI** (npm `bin`): `npx @drakon-systems/multi-clawd <cmd>` —
@@ -103,6 +116,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.2.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.0...v1.0.1

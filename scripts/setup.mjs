@@ -229,7 +229,10 @@ async function watchdogStep() {
     console.log("  (auto-scheduling not supported on this platform — see README for manual setup)");
     return;
   }
-  const scriptPath = join(__dirname, "eviction-watchdog.mjs");
+  // Install-aware: under npx, __dirname is the EPHEMERAL npx cache — the unit
+  // must point at the installed plugin's copy whenever one exists.
+  const { resolveWatchdogScript } = await import(resolve(__dirname, "_shared.mjs"));
+  const scriptPath = resolveWatchdogScript(__dirname);
   const scanDir =
     platform === "darwin"
       ? join(homedir(), "Library", "LaunchAgents")
