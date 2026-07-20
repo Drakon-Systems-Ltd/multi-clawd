@@ -4,7 +4,12 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.0.0] — 2026-07-20
+
+First public npm release. Everything in 0.2–0.3.7 — the pooled backend with
+proactive near-limit rotation, reactive model-limit capture, reset-aware
+staleness, tier degradation, login-health probes, the eviction watchdog, and
+the doctor's pool-bypass audits — plus:
 
 ### Changed
 - **Packaged for npm distribution.** The package is now
@@ -34,8 +39,6 @@ versioning from v1.0.
   **only** under `full`, so a host on a stricter policy is never silently
   overridden.
 
-_Publishes as **v1.0.0** at the release gate — see [PUBLISHING.md](PUBLISHING.md)._
-
 ## [0.3.7] — 2026-07-18
 - Reset-aware per-window staleness: reset-bearing windows bind until their own
   reset (8-day cap + clock-skew alarm), reset-less windows keep TTL/decay, and
@@ -61,7 +64,7 @@ _Publishes as **v1.0.0** at the release gate — see [PUBLISHING.md](PUBLISHING.
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
-[Unreleased]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v0.3.7...HEAD
+[1.0.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v0.3.7...v1.0.0
 [0.3.7]: https://github.com/Drakon-Systems-Ltd/multi-clawd/releases/tag/v0.3.7
 [0.3.6]: https://github.com/Drakon-Systems-Ltd/multi-clawd/releases/tag/v0.3.6
 [0.3.5]: https://github.com/Drakon-Systems-Ltd/multi-clawd/releases/tag/v0.3.5
