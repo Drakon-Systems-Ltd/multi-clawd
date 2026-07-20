@@ -4,6 +4,22 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.1.0] — 2026-07-20
+
+The setup wizard now owns the eviction watchdog:
+
+- **Wizard schedules the watchdog** (launchd on macOS, systemd user timer on
+  Linux) pointing at the current install, and — the important half — **detects
+  an orphaned unit** whose target script no longer exists (the classic case: a
+  path install replaced by a registry install deletes the old directory out
+  from under the unit) and offers to repoint it. Re-running the wizard after
+  any migration repairs the watchdog.
+- **doctor verifies the watchdog's target**, not just that a unit is
+  scheduled: a unit firing every 5 minutes against a missing script is now a
+  loud ❌ with the exact repoint path, instead of a silent dead safety net.
+  Deliberately self-contained so it still works when the install itself is
+  what went missing. Backup files (`*.bak-*`) are never flagged or "repaired".
+
 ## [1.0.1] — 2026-07-20
 
 Fixes from the first real registry-install migration:
@@ -78,6 +94,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.1.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v0.3.7...v1.0.0
 [0.3.7]: https://github.com/Drakon-Systems-Ltd/multi-clawd/releases/tag/v0.3.7

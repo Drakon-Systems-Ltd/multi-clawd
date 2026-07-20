@@ -22,7 +22,7 @@
  * The wizard never sees or stores a token value. All scaffolding logic is
  * pure and unit-tested in src/setup-core.ts; this file owns prompts and IO.
  */
-import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,11 +33,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DRY_RUN = process.argv.includes("--dry-run");
 const CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
 
-let core;
+let core, wds;
 try {
   core = await import(resolve(__dirname, "..", "dist", "setup-core.js"));
+  wds = await import(resolve(__dirname, "..", "dist", "watchdog-schedule.js"));
 } catch {
-  console.error("setup: dist/setup-core.js is missing — run `npm run build` first (source checkout) or reinstall the plugin.");
+  console.error("setup: built dist/ modules are missing — run `npm run build` first (source checkout) or reinstall the plugin.");
   process.exit(1);
 }
 const { buildMainAccount, buildSecondAccount, buildPool, validateSecondConfigDir, planFromExisting, mergeSetupIntoConfig } = core;
@@ -195,25 +196,145 @@ console.log("\nPlanned changes:");
 if (changes.length === 0) console.log("  (none — config already matches)");
 for (const c of changes) console.log(`  • ${c}`);
 
-if (DRY_RUN || changes.length === 0) {
+let wroteConfig = false;
+if (DRY_RUN) {
+  if (changes.length > 0) console.log("\ndry-run: config not written.");
+} else if (changes.length > 0) {
+  if (!(await yes(`\nWrite these to ${CONFIG_PATH}? (backup taken first)`))) {
+    console.log("Aborted — nothing written.");
+    rl.close();
+    process.exit(0);
+  }
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+  if (existsSync(CONFIG_PATH)) {
+    const backup = `${CONFIG_PATH}.bak-setup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    copyFileSync(CONFIG_PATH, backup);
+    console.log(`backup: ${backup}`);
+  }
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+  console.log(`wrote ${CONFIG_PATH}`);
+  wroteConfig = true;
+}
+
+// ── eviction watchdog: create, or repair an orphaned unit ────────────────────
+// The unit points at a script INSIDE an install dir, and installs move
+// (path→registry migration, uninstall/reinstall) — an orphaned unit fires
+// every 5 min against a missing file, silently. The wizard owns this now.
+await watchdogStep();
+
+async function watchdogStep() {
+  const platform = process.platform;
+  console.log("\nEviction watchdog (openclaw#107408 mitigation — see README):");
+  if (platform !== "darwin" && platform !== "linux") {
+    console.log("  (auto-scheduling not supported on this platform — see README for manual setup)");
+    return;
+  }
+  const scriptPath = join(__dirname, "eviction-watchdog.mjs");
+  const scanDir =
+    platform === "darwin"
+      ? join(homedir(), "Library", "LaunchAgents")
+      : join(homedir(), ".config", "systemd", "user");
+  let found;
+  try {
+    for (const f of readdirSync(scanDir)) {
+      // Only real unit files — backups like *.plist.bak-... are inert; never
+      // detect (or "repair") one of those instead of the live unit.
+      if (!/\.(plist|service|timer)$/.test(f)) continue;
+      const p = join(scanDir, f);
+      let text;
+      try {
+        text = readFileSync(p, "utf8");
+      } catch {
+        continue;
+      }
+      const target = wds.extractWatchdogTarget(text);
+      if (target) {
+        found = { file: p, target, text };
+        break;
+      }
+    }
+  } catch {
+    /* scan dir missing — treated as absent */
+  }
+  const state = wds.classifyWatchdogUnit(found?.target, existsSync);
+  if (state === "ok") {
+    console.log(`  ✅ already scheduled and healthy → ${found.target}`);
+    return;
+  }
+  if (state === "orphaned") {
+    console.log(
+      `  ⚠ ${found.file}\n    points at a MISSING script: ${found.target}\n    (an old install dir — the watchdog has been failing silently)`,
+    );
+    if (DRY_RUN) {
+      console.log(`  dry-run: would repoint it at ${scriptPath}`);
+      return;
+    }
+    if (!(await yes("  Repoint it at this install?"))) return;
+    writeFileSync(found.file, found.text.split(found.target).join(scriptPath));
+    reloadWatchdogUnit(platform, found.file);
+    console.log(`  ✅ repointed → ${scriptPath}`);
+    return;
+  }
+  if (DRY_RUN) {
+    console.log(`  dry-run: not scheduled — would offer to schedule it → ${scriptPath}`);
+    return;
+  }
+  if (!(await yes("  Not scheduled. Schedule it now (runs every 5 min)?"))) return;
+  const unitFiles = wds.renderWatchdogUnit({ platform, nodePath: process.execPath, scriptPath });
+  for (const uf of unitFiles) {
+    const abs = join(homedir(), uf.path);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, uf.content);
+    console.log(`  wrote ${abs}`);
+  }
+  if (platform === "darwin") {
+    reloadWatchdogUnit(platform, join(homedir(), unitFiles[0].path));
+  } else {
+    try {
+      execFileSync("systemctl", ["--user", "daemon-reload"]);
+      execFileSync("systemctl", ["--user", "enable", "--now", `${wds.WATCHDOG_SYSTEMD_NAME}.timer`]);
+      console.log("  ✅ timer enabled");
+    } catch {
+      console.log(
+        `  ⚠ units written but enabling failed — run: systemctl --user enable --now ${wds.WATCHDOG_SYSTEMD_NAME}.timer`,
+      );
+    }
+  }
+}
+
+function reloadWatchdogUnit(platform, file) {
+  if (platform === "darwin") {
+    try {
+      execFileSync("launchctl", ["unload", file], { stdio: "ignore" });
+    } catch {
+      /* was not loaded */
+    }
+    try {
+      // launchctl can print "Load failed" to stderr and still exit 0 — merge
+      // the streams and check the text, not just the exit code.
+      const out = execFileSync("/bin/sh", ["-c", `launchctl load "${file}" 2>&1 || true`], {
+        encoding: "utf8",
+      });
+      if (/load failed|bootstrap failed/i.test(out)) throw new Error(out.trim());
+      console.log("  ✅ launchd agent (re)loaded");
+    } catch {
+      console.log(`  ⚠ plist written but load failed — run: launchctl load ${file}`);
+    }
+  } else {
+    try {
+      execFileSync("systemctl", ["--user", "daemon-reload"]);
+      console.log("  ✅ systemd reloaded");
+    } catch {
+      console.log("  ⚠ run: systemctl --user daemon-reload");
+    }
+  }
+}
+
+if (DRY_RUN || !wroteConfig) {
   console.log(DRY_RUN ? "\ndry-run: nothing written." : "");
   rl.close();
   process.exit(0);
 }
-
-if (!(await yes(`\nWrite these to ${CONFIG_PATH}? (backup taken first)`))) {
-  console.log("Aborted — nothing written.");
-  rl.close();
-  process.exit(0);
-}
-mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-if (existsSync(CONFIG_PATH)) {
-  const backup = `${CONFIG_PATH}.bak-setup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-  copyFileSync(CONFIG_PATH, backup);
-  console.log(`backup: ${backup}`);
-}
-writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
-console.log(`wrote ${CONFIG_PATH}`);
 
 // ── next steps ───────────────────────────────────────────────────────────────
 console.log(`

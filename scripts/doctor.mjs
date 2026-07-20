@@ -344,8 +344,43 @@ try {
 } catch {
   /* not systemd */
 }
-if (watchdogFound) ok("watchdog scheduled");
-else warn("no watchdog found (needed until openclaw#107596 ships — see README)");
+if (watchdogFound) {
+  // "Scheduled" is not enough: the unit points at a script INSIDE an install
+  // dir, and installs move (path→registry migration, uninstall/reinstall).
+  // An orphaned unit fires every tick against a missing file — silently.
+  // Deliberately self-contained (no dist import): the check must work even
+  // when the install itself is the thing that went missing.
+  let orphan;
+  for (const d of [
+    join(HOME, "Library", "LaunchAgents"),
+    join(HOME, ".config", "systemd", "user"),
+  ]) {
+    let files = [];
+    try {
+      files = readdirSync(d);
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      // Only real unit files — launchd loads *.plist, systemd *.service/*.timer;
+      // backups like *.plist.bak-... are inert and must not be flagged.
+      if (!/\.(plist|service|timer)$/.test(f)) continue;
+      let text;
+      try {
+        text = readFileSync(join(d, f), "utf8");
+      } catch {
+        continue;
+      }
+      const target = text.match(/[^<>\s="']*eviction-watchdog\.mjs/)?.[0];
+      if (target && !existsSync(target)) orphan = { file: join(d, f), target };
+    }
+  }
+  if (orphan) {
+    bad(
+      `watchdog unit ${orphan.file} points at a MISSING script (${orphan.target}) — it fails silently every tick. Repoint it at ${join(EXT_DIR, "scripts", "eviction-watchdog.mjs")} or run the setup wizard to repair.`,
+    );
+  } else ok("watchdog scheduled");
+} else warn("no watchdog found (needed until openclaw#107596 ships — see README)");
 
 // ── 9. optional live probe ──────────────────────────────────────────────────
 if (args.has("--probe")) {
