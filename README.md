@@ -11,7 +11,7 @@ same model, next account, full harness on every hop.
 
 [![OpenClaw plugin](https://img.shields.io/badge/OpenClaw-plugin-ff4f00)](https://docs.openclaw.ai/plugins)
 [![npm](https://img.shields.io/badge/npm-%40drakon--systems%2Fmulti--clawd-cb3837)](https://www.npmjs.com/package/@drakon-systems/multi-clawd)
-[![version](https://img.shields.io/badge/version-1.0.1-4c9aff)](CHANGELOG.md)
+[![version](https://img.shields.io/npm/v/%40drakon-systems%2Fmulti-clawd?color=4c9aff&label=version)](CHANGELOG.md)
 [![license: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
