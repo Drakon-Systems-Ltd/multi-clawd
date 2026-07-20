@@ -251,15 +251,15 @@ describe("mergeSetupIntoConfig", () => {
 describe("existingAccountDefaults", () => {
   const cfg = {
     plugins: { entries: { "multi-clawd": { config: { accounts: [
-      { id: "claw2", label: "iCloud Max account", configDir: "~/.claude-icloud",
+      { id: "claw2", label: "Work account", configDir: "~/.claude-work",
         oauthTokenRef: { source: "exec", provider: "onepassword", id: "op://V/I/f" } },
       { id: "claw1", native: true },
     ] } } } },
   };
   test("prefills dir/label from the existing entry and reports credentials present", () => {
     expect(existingAccountDefaults(cfg, "claw2")).toEqual({
-      configDir: "~/.claude-icloud",
-      label: "iCloud Max account",
+      configDir: "~/.claude-work",
+      label: "Work account",
       hasCredentials: true,
     });
   });
@@ -289,7 +289,7 @@ describe("mergeSetupIntoConfig — keep-existing-credentials account", () => {
   test("an account carrying only id (keep-existing) changes nothing on a full existing entry", () => {
     const existing = {
       plugins: { entries: { "multi-clawd": { enabled: true, config: { accounts: [
-        { id: "claw2", label: "iCloud Max account", configDir: "~/.claude-icloud",
+        { id: "claw2", label: "Work account", configDir: "~/.claude-work",
           oauthTokenRef: { source: "exec", provider: "onepassword", id: "op://V/I/f" } },
       ] } } } },
     };
@@ -298,9 +298,9 @@ describe("mergeSetupIntoConfig — keep-existing-credentials account", () => {
       modelRungs: [],
     });
     const claw2 = (config as any).plugins.entries["multi-clawd"].config.accounts[0];
-    expect(claw2.configDir).toBe("~/.claude-icloud");
+    expect(claw2.configDir).toBe("~/.claude-work");
     expect(claw2.oauthTokenRef.id).toBe("op://V/I/f");
-    expect(claw2.label).toBe("iCloud Max account");
+    expect(claw2.label).toBe("Work account");
     expect(changes).toEqual([]);
   });
 });
