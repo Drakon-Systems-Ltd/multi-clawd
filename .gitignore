@@ -32,3 +32,6 @@ npm-debug.log*
 # Editor
 .vscode/
 .idea/
+
+# Plugin Inspector output
+reports/
