@@ -221,3 +221,37 @@ export function mergeSetupIntoConfig(
 
   return { config, changes };
 }
+
+/**
+ * Defaults for an account id that already exists in the config, so the wizard
+ * prefills reality instead of generic placeholders — pressing Enter through
+ * the prompts must never overwrite a working account with defaults.
+ */
+export function existingAccountDefaults(
+  config: unknown,
+  id: string,
+): { configDir?: string; label?: string; hasCredentials: boolean } | undefined {
+  const entries = asRecord(asRecord(asRecord(config)?.plugins)?.entries);
+  const entryConfig = asRecord(asRecord(entries?.["multi-clawd"])?.config);
+  const accounts = Array.isArray(entryConfig?.accounts) ? (entryConfig?.accounts as unknown[]) : [];
+  const acc = accounts.map(asRecord).find((a) => a?.id === id);
+  if (!acc) return undefined;
+  return {
+    configDir: typeof acc.configDir === "string" ? acc.configDir : undefined,
+    label: typeof acc.label === "string" ? acc.label : undefined,
+    hasCredentials:
+      acc.native === true ||
+      acc.oauthTokenRef !== undefined ||
+      acc.oauthTokenFile !== undefined ||
+      typeof acc.configDir === "string",
+  };
+}
+
+/**
+ * Sanity heuristic for secret-reference INPUT: real references are URI-ish
+ * (`op://Vault/Item/field`, `vault://…`). A bare word is almost certainly a
+ * mistake — the wizard warns before accepting one.
+ */
+export function looksLikeSecretRef(id: string): boolean {
+  return id.includes("://");
+}

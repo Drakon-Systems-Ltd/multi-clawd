@@ -4,6 +4,19 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.2.3] — 2026-07-20
+
+Wizard safety, from a real fleet run that overwrote a working account:
+
+- **Existing accounts are protected.** When the second-account id already
+  exists, the wizard shows what's configured and defaults to **keeping its
+  credentials and config unchanged** — pressing Enter through the prompts can
+  no longer replace a working account with placeholder defaults. Declining
+  the keep prefills every prompt from the existing entry.
+- **Secret references are sanity-checked at input.** A bare word (not
+  URI-like, e.g. not `op://Vault/Item/field`) is challenged with a
+  default-No confirmation instead of silently accepted.
+
 ## [1.2.2] — 2026-07-20
 
 The watchdog gets a permanent home. Fleet run of `update` revealed that
@@ -134,6 +147,7 @@ the doctor's pool-bypass audits — plus:
   near-limit rotation, native (keychain) accounts, a future-proof model catalog,
   and the eviction watchdog.
 
+[1.2.3]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.2...v1.2.3
 [1.2.2]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Drakon-Systems-Ltd/multi-clawd/compare/v1.1.0...v1.2.0

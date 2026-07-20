@@ -6,6 +6,8 @@ import {
   validateSecondConfigDir,
   planFromExisting,
   mergeSetupIntoConfig,
+  existingAccountDefaults,
+  looksLikeSecretRef,
   type SetupPlan,
 } from "../src/setup-core";
 
@@ -243,5 +245,62 @@ describe("mergeSetupIntoConfig", () => {
     const second = mergeSetupIntoConfig(first.config, plan);
     expect(second.config).toEqual(first.config);
     expect(second.changes).toEqual([]);
+  });
+});
+
+describe("existingAccountDefaults", () => {
+  const cfg = {
+    plugins: { entries: { "multi-clawd": { config: { accounts: [
+      { id: "claw2", label: "iCloud Max account", configDir: "~/.claude-icloud",
+        oauthTokenRef: { source: "exec", provider: "onepassword", id: "op://V/I/f" } },
+      { id: "claw1", native: true },
+    ] } } } },
+  };
+  test("prefills dir/label from the existing entry and reports credentials present", () => {
+    expect(existingAccountDefaults(cfg, "claw2")).toEqual({
+      configDir: "~/.claude-icloud",
+      label: "iCloud Max account",
+      hasCredentials: true,
+    });
+  });
+  test("unknown id → undefined (fresh-account defaults apply)", () => {
+    expect(existingAccountDefaults(cfg, "claw9")).toBeUndefined();
+  });
+  test("tolerates junk config", () => {
+    expect(existingAccountDefaults({}, "claw2")).toBeUndefined();
+    expect(existingAccountDefaults(null, "claw2")).toBeUndefined();
+  });
+});
+
+describe("looksLikeSecretRef", () => {
+  test("real reference shapes pass", () => {
+    expect(looksLikeSecretRef("op://Vault/Item/field")).toBe(true);
+    expect(looksLikeSecretRef("vault://secret/path")).toBe(true);
+    expect(looksLikeSecretRef("aws-sm://prod/claw2-token")).toBe(true);
+  });
+  test("bare words do not (the 'clawd1' incident)", () => {
+    expect(looksLikeSecretRef("clawd1")).toBe(false);
+    expect(looksLikeSecretRef("my token")).toBe(false);
+    expect(looksLikeSecretRef("")).toBe(false);
+  });
+});
+
+describe("mergeSetupIntoConfig — keep-existing-credentials account", () => {
+  test("an account carrying only id (keep-existing) changes nothing on a full existing entry", () => {
+    const existing = {
+      plugins: { entries: { "multi-clawd": { enabled: true, config: { accounts: [
+        { id: "claw2", label: "iCloud Max account", configDir: "~/.claude-icloud",
+          oauthTokenRef: { source: "exec", provider: "onepassword", id: "op://V/I/f" } },
+      ] } } } },
+    };
+    const { config, changes } = mergeSetupIntoConfig(existing, {
+      accounts: [{ id: "claw2" }],
+      modelRungs: [],
+    });
+    const claw2 = (config as any).plugins.entries["multi-clawd"].config.accounts[0];
+    expect(claw2.configDir).toBe("~/.claude-icloud");
+    expect(claw2.oauthTokenRef.id).toBe("op://V/I/f");
+    expect(claw2.label).toBe("iCloud Max account");
+    expect(changes).toEqual([]);
   });
 });

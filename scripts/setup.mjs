@@ -41,7 +41,7 @@ try {
   console.error("setup: built dist/ modules are missing — run `npm run build` first (source checkout) or reinstall the plugin.");
   process.exit(1);
 }
-const { buildMainAccount, buildSecondAccount, buildPool, validateSecondConfigDir, planFromExisting, mergeSetupIntoConfig } = core;
+const { buildMainAccount, buildSecondAccount, buildPool, validateSecondConfigDir, planFromExisting, mergeSetupIntoConfig, existingAccountDefaults, looksLikeSecretRef } = core;
 
 // Line-queued prompts: interactive AND pipe-safe. With piped stdin, readline
 // emits every buffered line immediately — a plain question() would capture one
@@ -128,9 +128,29 @@ if (await yes("Add your MAIN account (the machine's existing `claude` login) to 
 // ── second account ───────────────────────────────────────────────────────────
 if (await yes("Set up a SECOND Claude account (its own isolated config dir)?")) {
   const id = await ask("  id for the second account:", "claw2");
+  // Existing-aware: this account may already be fully configured. Pressing
+  // Enter through prompts must NEVER overwrite a working account, so the
+  // default here is to keep it exactly as it is.
+  const prior = existingAccountDefaults(existing, id);
+  if (prior?.hasCredentials) {
+    console.log(
+      `  "${id}" is already configured${prior.label ? ` (${prior.label}` : " ("}${prior.configDir ? `, dir ${prior.configDir})` : ")"}.`,
+    );
+    if (await yes("  Keep its existing credentials and config unchanged?", true)) {
+      accounts.push({ id });
+      console.log("  ✅ keeping as-is");
+    } else {
+      await secondAccountFlow(id, prior);
+    }
+  } else {
+    await secondAccountFlow(id, prior);
+  }
+}
+
+async function secondAccountFlow(id, prior) {
   let configDir;
   for (;;) {
-    configDir = await ask("  isolated config dir:", `~/.${id}`);
+    configDir = await ask("  isolated config dir:", prior?.configDir ?? `~/.${id}`);
     const err = validateSecondConfigDir(configDir);
     if (!err) break;
     console.log(`  ✗ ${err}`);
@@ -158,12 +178,19 @@ if (await yes("Set up a SECOND Claude account (its own isolated config dir)?")) 
     let refId;
     for (;;) {
       refId = await ask("  secret reference (e.g. op://Vault/Item/field):");
-      if (refId) break;
-      if (stdinClosed) {
-        console.error("setup: a secret reference is required for token source 1 — aborting (nothing written).");
-        process.exit(1);
+      if (!refId) {
+        if (stdinClosed) {
+          console.error("setup: a secret reference is required for token source 1 — aborting (nothing written).");
+          process.exit(1);
+        }
+        console.log("  ✗ the reference is required (it is NOT the token itself — just the pointer to it; answer 3 above for no token)");
+        continue;
       }
-      console.log("  ✗ the reference is required (it is NOT the token itself — just the pointer to it)");
+      if (!looksLikeSecretRef(refId)) {
+        console.log(`  ⚠ "${refId}" doesn't look like a secret reference (expected something URI-like, e.g. op://Vault/Item/field)`);
+        if (!(await yes("  Use it anyway?", false))) continue;
+      }
+      break;
     }
     tokenSource = { kind: "ref", ref: { source: "exec", provider, id: refId } };
   } else if (choice === "2") {
@@ -171,7 +198,7 @@ if (await yes("Set up a SECOND Claude account (its own isolated config dir)?")) 
   } else {
     tokenSource = { kind: "dir-login" };
   }
-  accounts.push(buildSecondAccount({ id, label: await ask("  label:", "Second Claude"), configDir, tokenSource }));
+  accounts.push(buildSecondAccount({ id, label: await ask("  label:", prior?.label ?? "Second Claude"), configDir, tokenSource }));
 }
 
 if (accounts.length === 0 && state.accountIds.length === 0) {
