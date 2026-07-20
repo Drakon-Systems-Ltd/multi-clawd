@@ -167,7 +167,7 @@ dependency (the host provides it), so the install stays lean.
 **From ClawHub (alternative registry):**
 
 ```bash
-openclaw plugins install clawhub:drakon-systems/multi-clawd
+openclaw plugins install clawhub:@drakon-systems/multi-clawd
 ```
 
 **From source (contributors, or ahead of a release):**
@@ -488,10 +488,25 @@ Early but real — built for and dogfooded in production.
   (capped at 8d with a clock-skew alarm), reset-less windows keep TTL/decay,
   and model windows age by their own TTL independent of pool `staleAfterMs`
   — closes the quiet-pool blindness half of the no-flip failure class ✅
-- **v0.4** — standalone localhost proxy (OpenAI-compatible) so Hermes and
+- **v1.0** — the public line: published to npm as
+  [`@drakon-systems/multi-clawd`](https://www.npmjs.com/package/@drakon-systems/multi-clawd),
+  `openclaw` demoted to an optional peer, registry installs verified
+  end-to-end ✅
+- **v1.1–v1.2** — the `multi-clawd` CLI (`update` / `setup` / `doctor`);
+  wizard owns the eviction watchdog (schedules it, detects + repoints
+  orphaned units after migrations); wizard account-protection (existing
+  accounts default to keep-unchanged; suspicious secret refs challenged) ✅
+- **v1.3** — `multi-clawd explain`: the whole setup in plain English —
+  accounts, pool decisions, every fallback rung annotated, live health with
+  reset times ✅
+- **v1.4** — `multi-clawd login <account>`: the right Claude sign-in flow
+  for each account shape, verified afterwards (signed-in email shown, token
+  values never touched); ClawHub package published under
+  `@drakon-systems` ✅
+- **Next** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; true per-session affinity; local
-  five-hour-window signal (turn counting)
-- **v1.0** — npm + ClawHub parity releases
+  five-hour-window signal (turn counting); per-account lock for the shim
+  persistence race
 
 See [`DESIGN.md`](./DESIGN.md) for the architecture, the three obvious
 approaches that *don't* work, and why.
