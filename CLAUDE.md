@@ -7,9 +7,9 @@ they overlap, the stricter rule wins.
 
 multi-clawd is a **distributable** OpenClaw plugin. It publishes **publicly to
 npm** (`@drakon-systems/multi-clawd`, scoped; only the built `dist/` + scripts +
-manifest + README + LICENSE ship). The source repo is **private** — but treat
-everything you commit as if it could become public: git history is permanent,
-visibility can be flipped, and this repo was already public-by-default once.
+manifest + README + LICENSE ship). The source repo is **public** (flipped
+2026-07-20) — everything you commit IS public the moment it's pushed: git
+history is permanent, so secrets hygiene below is absolute, not precautionary.
 
 ## Never commit — secrets
 

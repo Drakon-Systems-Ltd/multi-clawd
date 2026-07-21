@@ -20,67 +20,64 @@ the **manual** publish procedure — run by hand from a trusted machine, never C
 
 ## Status
 
-**v1.0.0 and v1.0.1 published 2026-07-20** — the package is live at
-[npmjs.com/package/@drakon-systems/multi-clawd](https://www.npmjs.com/package/@drakon-systems/multi-clawd).
-The registry-install migration was verified end-to-end (install → gateway
-restart → doctor READY → live pool turn). The steps below remain the runbook
-for every future release.
+**Live and current** — first published v1.0.0 on 2026-07-20; releases since have
+followed the runbook below (v1.4.2, 2026-07-21, was published headlessly with
+the automation token). The registry-install path is verified end-to-end
+(install → gateway restart → doctor READY → live pool turn). ClawHub
+distribution is automated separately: cutting a GitHub Release fires
+`.github/workflows/clawhub-publish.yml`, which publishes the plugin package to
+ClawHub with the release notes as changelog.
 
 ## Steps
 
 1. **Clean tree, green tests, on master:**
    ```bash
    git switch master && git pull
-   npm install && npm run build && npm test        # expect 185+ passing
+   npm install && npm run build && npm test        # full suite green (290+ tests)
    ```
 
-2. **Bump to 1.0.0 and update the changelog:**
+2. **Bump the version and update the changelog:**
    ```bash
-   npm version 1.0.0 --no-git-tag-version           # package.json only
+   npm version <X.Y.Z> --no-git-tag-version         # package.json only
    ```
-   Move the CHANGELOG `[Unreleased]` items under a new `## [1.0.0] — <date>`
-   heading and add the compare/tag links.
+   Add the release's items under a new `## [X.Y.Z] — <date>` heading in
+   CHANGELOG.md.
 
 3. **Verify the tarball before going live:**
    ```bash
    npm pack --dry-run
    ```
-   Expect `@drakon-systems/multi-clawd@1.0.0`, ~19 files, `dist/` prebuilt, **no
-   `dependencies` block** (openclaw is peer-only), nothing under `src/` or `tests/`.
+   Expect `@drakon-systems/multi-clawd@X.Y.Z`, `dist/` prebuilt, **no
+   `dependencies` block** (openclaw is peer-only), nothing under `src/` or
+   `tests/`.
 
 4. **Confirm the publishing identity:**
    ```bash
    npm whoami                                        # -> cyborgninja
-   npm org ls drakon-systems                         # cyborgninja = owner
    ```
-   If `whoami` isn't `cyborgninja`: `npm login` (complete 2FA/OTP).
+   If it isn't: `npm login` as `cyborgninja` (or use the automation token).
 
 5. **Publish** (public is enforced by `publishConfig`, but be explicit):
    ```bash
    npm publish --access public
    ```
 
-6. **Tag + GitHub release:**
+6. **Tag + GitHub release** (the release also triggers the ClawHub publish):
    ```bash
-   git commit -am "v1.0.0: first npm release (@drakon-systems/multi-clawd)"
-   git tag v1.0.0 && git push && git push --tags
-   gh release create v1.0.0 --title "v1.0.0" --notes-from-tag
+   git commit -am "vX.Y.Z: <summary>"
+   git tag vX.Y.Z && git push && git push --tags
+   gh release create vX.Y.Z --title "vX.Y.Z — <summary>" --notes "<changelog section>"
    ```
 
-7. **End-to-end verify the real install** — the first true test of the
-   peer-dependency install path; do it on a box, not just locally:
+7. **End-to-end verify the real install on a box:**
    ```bash
-   npm view @drakon-systems/multi-clawd version      # -> 1.0.0
-   openclaw plugins install @drakon-systems/multi-clawd --pin
-   openclaw gateway restart
-   node ~/.openclaw/extensions/multi-clawd/scripts/doctor.mjs   # expect READY
-   openclaw plugins list                             # multi-clawd enabled, v1.0.0
+   npm view @drakon-systems/multi-clawd version      # -> X.Y.Z
+   npx @drakon-systems/multi-clawd update            # installs, offers restart, runs doctor
+   npx @drakon-systems/multi-clawd doctor --probe    # READY + live turn
+   openclaw plugins list                             # multi-clawd enabled, vX.Y.Z
    ```
-   Confirm the installed copy carries **no** `node_modules/openclaw` (host-provided)
-   and that the backends register.
-
-8. **Flip the docs markers:** drop the "(v1.0+)" / "recommended, v1.0+" notes in
-   README.md and SETUP-AGENT.md now that the registry install is live.
+   Confirm the installed copy carries **no** `node_modules/openclaw`
+   (host-provided) and that the backends register.
 
 ## Migrating a box from a source/local install
 
