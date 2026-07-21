@@ -3,6 +3,7 @@
  * each caused a production incident when set wrong, so they are pinned by
  * test rather than trusted to survive refactors.
  */
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildBackend } from "../src/index.js";
 
@@ -27,5 +28,17 @@ describe("buildBackend config", () => {
     const backend = buildBackend(account);
     expect(backend.config.resumeArgs).toContain("--resume");
     expect(backend.config.resumeArgs).toContain("{sessionId}");
+  });
+});
+
+describe("plugin manifest", () => {
+  it("carries a version that matches package.json (synced by the npm version script)", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
+    );
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    expect(manifest.version).toBe(pkg.version);
   });
 });

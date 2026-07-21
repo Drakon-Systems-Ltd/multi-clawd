@@ -1,9 +1,18 @@
 {
   "id": "multi-clawd",
   "name": "multi-clawd",
+  "version": "1.4.2",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
-  "cliBackends": ["claw1", "claw2", "clawd"],
-  "providers": ["claw1", "claw2", "clawd"],
+  "cliBackends": [
+    "claw1",
+    "claw2",
+    "clawd"
+  ],
+  "providers": [
+    "claw1",
+    "claw2",
+    "clawd"
+  ],
   "modelCatalog": {
     "runtimeAugment": true
   },
@@ -29,7 +38,9 @@
           },
           "accounts": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Account ids (from accounts[]) in preference order; the first is the home account and reclaims the pool when its usage window resets."
           },
           "utilizationThreshold": {
@@ -51,7 +62,9 @@
             "properties": {
               "ladder": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Same-provider models to step down to, best first (e.g. [\"claude-opus-4-8\"]). Requests already at/below the ladder never degrade further."
               },
               "pins": {
@@ -61,8 +74,14 @@
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
-                    "agentDirIncludes": { "type": "string", "description": "Pin when the launching agent's dir contains this substring." },
-                    "workspaceDirIncludes": { "type": "string", "description": "Pin when the workspace dir contains this substring." }
+                    "agentDirIncludes": {
+                      "type": "string",
+                      "description": "Pin when the launching agent's dir contains this substring."
+                    },
+                    "workspaceDirIncludes": {
+                      "type": "string",
+                      "description": "Pin when the workspace dir contains this substring."
+                    }
                   }
                 }
               }
@@ -70,7 +89,9 @@
           },
           "models": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Extra model ids to expose on the pool backend."
           },
           "defaultModel": {
@@ -85,7 +106,9 @@
         "items": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id"],
+          "required": [
+            "id"
+          ],
           "properties": {
             "id": {
               "type": "string",
@@ -112,14 +135,25 @@
               "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers — same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
               "additionalProperties": true,
               "properties": {
-                "source": { "type": "string", "description": "Secret source kind: env | file | exec." },
-                "provider": { "type": "string", "description": "Configured secret provider name, e.g. \"onepassword\"." },
-                "id": { "type": "string", "description": "Provider-scoped secret id, e.g. an op:// reference." }
+                "source": {
+                  "type": "string",
+                  "description": "Secret source kind: env | file | exec."
+                },
+                "provider": {
+                  "type": "string",
+                  "description": "Configured secret provider name, e.g. \"onepassword\"."
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Provider-scoped secret id, e.g. an op:// reference."
+                }
               }
             },
             "models": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Extra model ids to expose for this account beyond the mirrored claude-cli catalog (e.g. a brand-new model OpenClaw doesn't list yet). Unknown modern claude-* ids also resolve on demand without being listed here."
             },
             "defaultModel": {

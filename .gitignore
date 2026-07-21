@@ -24,6 +24,11 @@ docs/incidents/
 *.internal.md
 INTERNAL_*
 
+# Packed artifacts / coverage / local Claude Code state
+*.tgz
+coverage/
+.claude/
+
 # Logs / OS
 *.log
 .DS_Store
