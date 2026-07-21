@@ -4,6 +4,25 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.4.2] — 2026-07-21
+
+- **Fixed: mid-conversation pool rotation no longer knocks the turn off
+  Claude entirely.** When rotation landed mid-conversation, the Claude CLI
+  session being resumed lived in the previous account's config dir, so the
+  resume failed with `session_expired` — and because the backend config set
+  `reseedFromRawTranscriptWhenUncompacted: false`, the gateway had no
+  pre-built history prompt and skipped its fresh-session retry, cascading
+  the turn down the model-fallback chain past every pooled Claude rung to
+  the next provider (observed live 2026-07-21: four rungs "expired" in 8
+  seconds, turn served by OpenAI). The flag is now `true`, matching the
+  bundled `claude-cli` backend: a failed resume reseeds a fresh session from
+  OpenClaw's sanitized, char-bounded session history and the conversation
+  stays on the pooled account. The flag had been disabled (ce63bc9) to stop
+  raw stream JSON being replayed as history — a pollution whose actual
+  source was fixed separately by the `jsonlDialect` declaration — so
+  re-enabling carries none of the original risk. Backend config flags are
+  now pinned by regression tests (`tests/backend-config.test.ts`).
+
 ## [1.4.1] — 2026-07-20
 
 - Docs: the "Set up a second account" section now leads with

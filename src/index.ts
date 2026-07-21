@@ -76,7 +76,7 @@ import {
 } from "./login-health.js";
 import { execFileSync } from "node:child_process";
 
-interface AccountConfig {
+export interface AccountConfig {
   id: string;
   label?: string;
   /**
@@ -374,7 +374,7 @@ export function healthStateFile(accountId: string): string {
   return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.json`);
 }
 
-function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
+export function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
   return {
     id: account.id,
     liveTest: {
@@ -418,7 +418,22 @@ function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlug
       imagePathScope: "workspace",
       sessionArg: "--session-id",
       sessionMode: "always",
-      reseedFromRawTranscriptWhenUncompacted: false,
+      // MUST stay true (parity with the bundled claude-cli backend). When a
+      // pool rotation lands mid-conversation, the Claude CLI session being
+      // resumed lives in the PREVIOUS account's config dir, so the resume
+      // fails with session_expired. The gateway's fresh-session retry — the
+      // only thing that keeps the turn on this backend instead of cascading
+      // down the model-fallback chain to another provider — requires a
+      // pre-built history prompt, and the gateway only builds one for a
+      // resumable session when this flag is set. It was briefly false
+      // (ce63bc9) because pre-jsonlDialect turns stored raw stream JSON in
+      // the session history and reseeding replayed the garbage; the dialect
+      // declaration above fixed the pollution at the source, and the reseed
+      // reads OpenClaw's sanitized session store bounded by the auto history
+      // char limit, so re-enabling is safe. Observed live 2026-07-21 07:37Z:
+      // with false, a claw1→claw2 rotation "expired" four pooled Claude
+      // rungs in 8s and the turn leaked to OpenAI.
+      reseedFromRawTranscriptWhenUncompacted: true,
       sessionIdFields: ["session_id", "sessionId", "conversation_id", "conversationId"],
       systemPromptFileArg: "--append-system-prompt-file",
       systemPromptMode: "append",
