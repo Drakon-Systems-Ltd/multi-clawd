@@ -446,6 +446,19 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
 ## Security
 
+**Full declaration of what this plugin touches — nothing else:**
+
+| Surface | What multi-clawd does |
+|---|---|
+| Network | **Zero egress of its own.** The only network activity is npm/registry traffic during `install`/`update`, and the Claude Code subprocesses talking to Anthropic exactly as the bundled backend does. No telemetry, no analytics, no vendor endpoints. |
+| Credentials | Reads each account's setup-token at launch (file, or a secret-manager reference resolved by your gateway) and passes it **only** via the child process env. Never written elsewhere, never logged, never printed — log redaction is covered by dedicated tests. |
+| Files read | `~/.openclaw/openclaw.json` (config), account config dirs you declare (e.g. `~/.claw2`), token files you declare. |
+| Files written | `~/.openclaw/state/multi-clawd/<account>.json` (local usage-health telemetry, stays on the box), config backups the wizard takes before merging, and — only if you accept the wizard's watchdog step — one systemd user unit / launchd plist pointing at the installed watchdog script. |
+| Processes | Spawns the `claude` CLI per turn (same as the bundled backend). The optional watchdog may restart the OpenClaw gateway when the eviction signature appears — that's its entire job, documented below. |
+| Consent | The wizard asks before every write, merges non-destructively, and never overwrites an existing account entry. `--dry-run` previews everything. |
+
+Housekeeping:
+
 - Tokens are never committed and never logged; `.gitignore` blocks token
   and account directories by default.
 - Prefer a secret reference (`oauthTokenRef`, v0.3) over a plaintext
