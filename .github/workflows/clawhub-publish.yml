@@ -34,8 +34,10 @@ jobs:
           node-version: 22
 
       - name: Install dependencies and ClawHub CLI
+        # npm install, not npm ci: this repo gitignores package-lock.json,
+        # and npm ci refuses to run without a lockfile.
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           npm i -g clawhub
 
       - name: Publish plugin package
