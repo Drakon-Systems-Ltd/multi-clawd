@@ -139,6 +139,47 @@ describe("model-aware classifyAccountHealth", () => {
     expect(classifyAccountHealth(stateFresh, {}, later, "claude-fable-5").verdict).toBe("no_data");
   });
 
+  // Friday's 21 Jul 2026 post-weekly-reset deadlock, exact live shapes (fleet
+  // SIGNALS 02:25–04:25Z). Both fixtures pass at HEAD — the un-bind rules date
+  // to v0.3.6/7089c88 — so they pin that the deadlock class can never RETURN,
+  // and document that a box exhibiting it is running a pre-fix build.
+  test("Friday claw1 shape: stale rejected fable window with passed reset + healthy base windows → account serves fable", () => {
+    const passedResetS = NOW_S - 90 * 60; // weekly reset 90m ago
+    const state = stateWith({
+      [modelWindowKey("claude-fable-5")]: {
+        status: "rejected",
+        resetsAt: passedResetS,
+        seenAt: NOW - 12 * 60 * 60 * 1000, // observation from the previous day
+      },
+      seven_day: { status: "allowed_warning", utilization: 0.79, seenAt: NOW - 5 * 60 * 1000 },
+      five_hour: { status: "allowed", utilization: 0.2, seenAt: NOW - 5 * 60 * 1000 },
+    });
+    const h = classifyAccountHealth(state, {}, NOW, "claude-fable-5");
+    expect(h.verdict).toBe("ok"); // NOT exhausted — the deadlock verdict
+  });
+
+  test("Friday claw2 shape: account-level rejected window with passed reset, file untouched for days → not binding", () => {
+    const state = stateWith({
+      seven_day_overage_included: {
+        status: "rejected",
+        resetsAt: NOW_S - 2 * 24 * 60 * 60, // reset passed two days ago
+        seenAt: NOW - 3 * 24 * 60 * 60 * 1000,
+      },
+    });
+    const h = classifyAccountHealth(state, {}, NOW, "claude-fable-5");
+    expect(h.verdict).not.toBe("exhausted");
+  });
+
+  test("absence of a model window means unconstrained: success writes no per-model telemetry", () => {
+    // Friday autopsy finding 1: a successful fable-5 turn writes NO
+    // model-scoped window, so a state holding only healthy account windows
+    // must classify as serviceable for any requested model.
+    const state = stateWith({
+      five_hour: { status: "allowed", utilization: 0.3, seenAt: NOW - 60 * 1000 },
+    });
+    expect(classifyAccountHealth(state, {}, NOW, "claude-fable-5").verdict).toBe("ok");
+  });
+
   test("model window with a PASSED resetsAt is not binding", () => {
     const state = stateWith({
       [modelWindowKey("claude-fable-5")]: { status: "rejected", resetsAt: NOW_S - 60, seenAt: NOW - 1000 },

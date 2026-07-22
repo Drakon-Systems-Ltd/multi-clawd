@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  EXPIRED_REJECTED_GRACE_MS,
   PRUNE_AFTER_MS,
   classifyStateReadFailure,
   createLineScanner,
@@ -345,6 +346,99 @@ describe("mergeHealthStates", () => {
     const merged = mergeHealthStates(stale, { accountId: "claw1", windows: {} }, now);
     expect(merged.windows.old_junk).toBeUndefined();
     expect(merged.windows.recent).toBeDefined();
+  });
+
+  // Writer-side expiry of spent rejections — Friday's 21 Jul 2026 post-reset
+  // deadlock (fleet SIGNALS 02:25–04:25Z). The reader already un-binds a
+  // rejected window once its reset passes; these pin that the state FILE
+  // self-heals too, because success never writes a per-model window, so only
+  // deletion/expiry can clear a stale rejection from disk.
+  test("expires a rejected model window whose resetsAt has passed (Friday claw1 shape)", () => {
+    const now = 1_784_600_000_000; // ~21 Jul 2026 03:33Z
+    const passedReset = 1_784_595_600; // 21 Jul 2026 01:00Z weekly reset (epoch s)
+    const disk: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: now - 1000,
+      windows: {
+        "model:claude-fable-5": {
+          status: "rejected",
+          resetsAt: passedReset,
+          seenAt: now - 13 * 60 * 60 * 1000, // stale obs from the previous day
+        },
+        seven_day: { status: "allowed_warning", utilization: 0.79, seenAt: now - 1000 },
+      },
+    };
+    const merged = mergeHealthStates(disk, { accountId: "claw1", windows: {} }, now);
+    expect(merged.windows["model:claude-fable-5"]).toBeUndefined();
+    expect(merged.windows.seven_day).toBeDefined(); // healthy evidence untouched
+  });
+
+  test("expires an ACCOUNT-level rejected window with a passed reset too (Friday claw2 shape)", () => {
+    const now = 1_784_600_000_000;
+    const disk: AccountHealthState = {
+      accountId: "claw2",
+      windows: {
+        seven_day_overage_included: {
+          status: "rejected",
+          resetsAt: 1_784_595_600,
+          seenAt: now - 2 * 24 * 60 * 60 * 1000,
+        },
+      },
+    };
+    const merged = mergeHealthStates(disk, { accountId: "claw2", windows: {} }, now);
+    expect(merged.windows.seven_day_overage_included).toBeUndefined();
+  });
+
+  test("keeps a rejected window whose reset is still in the future", () => {
+    const now = 1_784_600_000_000;
+    const disk: AccountHealthState = {
+      accountId: "claw1",
+      windows: {
+        "model:claude-fable-5": {
+          status: "rejected",
+          resetsAt: now / 1000 + 3600,
+          seenAt: now - 1000,
+        },
+      },
+    };
+    const merged = mergeHealthStates(disk, { accountId: "claw1", windows: {} }, now);
+    expect(merged.windows["model:claude-fable-5"]).toBeDefined();
+  });
+
+  test("keeps a just-passed rejection inside the clock-skew grace window", () => {
+    const now = 1_784_600_000_000;
+    const justPassed = (now - EXPIRED_REJECTED_GRACE_MS / 2) / 1000;
+    const disk: AccountHealthState = {
+      accountId: "claw1",
+      windows: {
+        five_hour: { status: "rejected", resetsAt: justPassed, seenAt: now - 1000 },
+      },
+    };
+    const merged = mergeHealthStates(disk, { accountId: "claw1", windows: {} }, now);
+    expect(merged.windows.five_hour).toBeDefined();
+  });
+
+  test("reset-LESS rejected windows are untouched by expiry (age out via TTL/prune instead)", () => {
+    const now = 1_784_600_000_000;
+    const disk: AccountHealthState = {
+      accountId: "claw1",
+      windows: {
+        "model:claude-fable-5": { status: "rejected", seenAt: now - 30 * 60 * 1000 },
+      },
+    };
+    const merged = mergeHealthStates(disk, { accountId: "claw1", windows: {} }, now);
+    expect(merged.windows["model:claude-fable-5"]).toBeDefined();
+  });
+
+  test("expiry never runs without a now reference (2-arg callers unchanged)", () => {
+    const disk: AccountHealthState = {
+      accountId: "claw1",
+      windows: {
+        five_hour: { status: "rejected", resetsAt: 1000, seenAt: 2_000_000 },
+      },
+    };
+    const merged = mergeHealthStates(disk, { accountId: "claw1", windows: {} });
+    expect(merged.windows.five_hour).toBeDefined();
   });
 
   test("prunes against the newest observation, so a fresh live obs rescues a stale disk window", () => {

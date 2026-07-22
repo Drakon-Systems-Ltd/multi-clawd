@@ -44,6 +44,22 @@ export interface WindowHealth {
  */
 export const PRUNE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
+/**
+ * Grace period before a rejected window with a PASSED `resetsAt` is expired
+ * from the persisted state. The reader (health.ts) already un-binds such a
+ * window the moment its reset passes; this writer-side expiry makes the state
+ * FILE self-heal too, instead of carrying a dead rejection for up to 14 days
+ * (the generic prune horizon). Motivating incident: Friday's 21 Jul 2026
+ * post-reset deadlock — a `model:claude-fable-5` `status=rejected` record with
+ * a passed reset sat in the state file indefinitely (a successful launch never
+ * writes a per-model window, so nothing ever overwrote it) and an older
+ * deployed reader kept pre-empting from it, costing the box its Anthropic tier
+ * until manual state surgery. The grace absorbs clock skew between the box and
+ * the reset timestamp so we never delete a rejection that is actually still
+ * binding by the provider's clock.
+ */
+export const EXPIRED_REJECTED_GRACE_MS = 5 * 60 * 1000;
+
 /** Longest compact-JSON snapshot of an unknown window we retain. */
 const RAW_INFO_MAX_CHARS = 512;
 
@@ -197,7 +213,23 @@ export function mergeHealthStates(
   const windows = canonicalizeModelWindowKeys(merged);
   if (now !== undefined) {
     for (const [key, w] of Object.entries(windows)) {
-      if (now - w.seenAt > pruneAfterMs) delete windows[key];
+      if (now - w.seenAt > pruneAfterMs) {
+        delete windows[key];
+        continue;
+      }
+      // Writer-side expiry of spent rejections (see EXPIRED_REJECTED_GRACE_MS):
+      // once a rejected window's reset has passed (plus grace), the record is
+      // dead evidence — the reader ignores it, success can never overwrite it
+      // (successful launches write no per-model window), and leaving it on disk
+      // traps older readers and anyone doing state-file forensics.
+      const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
+      if (
+        w.status === "rejected" &&
+        resetMs !== undefined &&
+        now - resetMs > EXPIRED_REJECTED_GRACE_MS
+      ) {
+        delete windows[key];
+      }
     }
   }
   const updatedAt = Math.max(disk.updatedAt ?? 0, live.updatedAt ?? 0);
