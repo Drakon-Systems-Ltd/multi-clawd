@@ -253,7 +253,11 @@ async function explain() {
     if (h.verdict === "exhausted" && h.resumeAt) {
       detail = `${h.reason ?? "limit hit"} — back in ${rel(h.resumeAt)}`;
     }
-    return { id: a.id, verdict: h.verdict, detail };
+    const usage = health.summarizeWindowUsage(state, {
+      utilizationThreshold: pool?.utilizationThreshold,
+      staleAfterMs: pool?.staleAfterMs,
+    }, now);
+    return { id: a.id, verdict: h.verdict, detail, usage };
   });
   let stickyAccount;
   if (pool) {
@@ -266,7 +270,7 @@ async function explain() {
   }
   console.log(`\n${BOLD}🦞 multi-clawd — your setup, in plain English${RESET}\n`);
   console.log(
-    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount }),
+    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, nowMs: now }),
   );
   console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
 }

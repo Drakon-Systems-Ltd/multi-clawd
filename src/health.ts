@@ -165,6 +165,47 @@ export function classifyAccountHealth(
   return worst;
 }
 
+export interface WindowUsage {
+  /** Raw window key as recorded by the shim (e.g. `seven_day`). */
+  window: string;
+  /** 0..1 fraction of the window consumed. */
+  utilization: number;
+  /** Epoch ms when the window resets, when the provider sent one. */
+  resetsAt?: number;
+}
+
+/**
+ * Live utilization per window, for display (`explain` / `doctor`). Applies the
+ * SAME liveness rules as classifyAccountHealth so the numbers shown are the
+ * numbers rotation acts on: a passed reset voids the observation (that
+ * utilization belonged to the previous cycle), reset-less windows age out by
+ * staleAfterMs, and windows beyond the 8-day reset horizon are dropped.
+ * Model-scoped and utilization-less windows are omitted — this is a usage
+ * readout, not a health verdict (rejections already surface via the verdict).
+ */
+export function summarizeWindowUsage(
+  state: AccountHealthState | undefined,
+  options: HealthOptions,
+  nowMs: number,
+): WindowUsage[] {
+  if (!state) return [];
+  const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  const usage: WindowUsage[] = [];
+  for (const [window, w] of Object.entries(state.windows)) {
+    if (window.startsWith(MODEL_WINDOW_PREFIX)) continue;
+    if (typeof w.utilization !== "number") continue;
+    const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
+    const resetBearing = resetMs !== undefined && resetMs > nowMs;
+    if (resetBearing && nowMs - w.seenAt > MAX_RESET_HORIZON_MS) continue;
+    // A passed reset voids the utilization; reset-less counts on freshness alone.
+    if (resetMs !== undefined && !resetBearing) continue;
+    if (!resetBearing && nowMs - w.seenAt > staleAfterMs) continue;
+    usage.push({ window, utilization: w.utilization, resetsAt: resetMs });
+  }
+  // Longest window first: the weekly number is the one that matters most.
+  return usage.sort((a, b) => (b.resetsAt ?? 0) - (a.resetsAt ?? 0));
+}
+
 /**
  * Pick the account that should serve the next turn, in pool order:
  * healthy/no-data first, then near-limit, never exhausted. Undefined when

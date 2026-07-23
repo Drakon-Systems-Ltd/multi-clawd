@@ -3,6 +3,7 @@ import {
   classifyAccountHealth,
   choosePoolAccount,
   pickPoolAccountForLaunch,
+  summarizeWindowUsage,
 } from "../src/health";
 import { modelWindowKey, type AccountHealthState } from "../src/shim-core";
 
@@ -331,5 +332,61 @@ describe("model-id canonicalisation gates across spellings (fix A)", () => {
     );
     expect(classifyAccountHealth(legacy, {}, NOW_LOCAL, "claude-fable-5").verdict).toBe("exhausted");
     expect(classifyAccountHealth(legacy, {}, NOW_LOCAL, "clawd/claude-fable-5").verdict).toBe("exhausted");
+  });
+});
+
+describe("summarizeWindowUsage", () => {
+
+  test("no state → empty", () => {
+    expect(summarizeWindowUsage(undefined, {}, NOW)).toEqual([]);
+  });
+
+  test("live reset-bearing windows surface, longest window first", () => {
+    const s = state({
+      five_hour: { status: "allowed", utilization: 0.04, resetsAt: NOW_S + 7200, seenAt: NOW - 1000 },
+      seven_day: { status: "allowed_warning", utilization: 0.12, resetsAt: NOW_S + 3 * 86400, seenAt: NOW - 1000 },
+    });
+    const u = summarizeWindowUsage(s, {}, NOW);
+    expect(u.map((x) => x.window)).toEqual(["seven_day", "five_hour"]);
+    expect(u[0].utilization).toBe(0.12);
+    expect(u[0].resetsAt).toBe((NOW_S + 3 * 86400) * 1000);
+  });
+
+  test("passed reset voids the utilization (previous cycle)", () => {
+    const s = state({
+      seven_day: { status: "allowed_warning", utilization: 0.85, resetsAt: NOW_S - 60, seenAt: NOW - 1000 },
+    });
+    expect(summarizeWindowUsage(s, {}, NOW)).toEqual([]);
+  });
+
+  test("reset-less windows count on freshness alone", () => {
+    const fresh = state({
+      five_hour: { status: "allowed", utilization: 0.3, seenAt: NOW - 1000 },
+    });
+    expect(summarizeWindowUsage(fresh, {}, NOW)).toHaveLength(1);
+    const stale = state({
+      five_hour: { status: "allowed", utilization: 0.3, seenAt: NOW - 7 * 3_600_000 },
+    });
+    expect(summarizeWindowUsage(stale, {}, NOW)).toEqual([]);
+  });
+
+  test("model-scoped and utilization-less windows are omitted", () => {
+    const s = state({
+      "model:claude-fable-5": { status: "rejected", utilization: 0.99, resetsAt: NOW_S + 3600, seenAt: NOW - 1000 },
+      five_hour: { status: "allowed", resetsAt: NOW_S + 3600, seenAt: NOW - 1000 },
+    });
+    expect(summarizeWindowUsage(s, {}, NOW)).toEqual([]);
+  });
+
+  test("windows beyond the 8-day reset horizon are dropped", () => {
+    const s = state({
+      seven_day: {
+        status: "allowed",
+        utilization: 0.5,
+        resetsAt: NOW_S + 86400,
+        seenAt: NOW - 9 * 86400 * 1000,
+      },
+    });
+    expect(summarizeWindowUsage(s, {}, NOW)).toEqual([]);
   });
 });

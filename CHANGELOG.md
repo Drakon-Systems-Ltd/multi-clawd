@@ -4,6 +4,18 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.5.0] — 2026-07-23
+
+- **Added: live usage-percent readout in `explain`.** Each account's RIGHT NOW
+  entry now shows how full its rate windows actually are — e.g.
+  `usage: weekly 12% (resets ~3d) · 5-hour 4% (resets ~2h)` — using the SAME
+  liveness rules the rotation logic acts on (`summarizeWindowUsage` in
+  health.ts): a passed reset voids the previous cycle's number, reset-less
+  windows age out at the pool's staleness horizon, and model-scoped rejection
+  markers stay out of the usage line (they already surface via the verdict).
+  Accounts with no live utilization telemetry say so honestly
+  (`usage: no live telemetry`) rather than showing stale numbers.
+
 ## [1.4.2] — 2026-07-21
 
 - **Fixed: mid-conversation pool rotation no longer knocks the turn off

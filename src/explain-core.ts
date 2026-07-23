@@ -24,12 +24,49 @@ export interface ExplainPool {
   degrade?: { ladder?: string[]; pins?: unknown[] };
 }
 
+export interface ExplainUsage {
+  window: string;
+  utilization: number;
+  /** Epoch ms. */
+  resetsAt?: number;
+}
+
 export interface ExplainModel {
   accounts: ExplainAccount[];
   pool?: ExplainPool;
   chain?: { primary?: string; fallbacks?: string[] };
-  health: Array<{ id: string; verdict: string; detail?: string }>;
+  health: Array<{ id: string; verdict: string; detail?: string; usage?: ExplainUsage[] }>;
   stickyAccount?: string;
+  /** Clock for usage reset countdowns; defaults to Date.now() at render time. */
+  nowMs?: number;
+}
+
+/** Human name for a shim window key. Unknown keys pass through as-is. */
+const WINDOW_LABELS: Record<string, string> = {
+  five_hour: "5-hour",
+  seven_day: "weekly",
+  seven_day_overage_included: "weekly incl. overage",
+};
+
+/** "~42m" / "~7h" / "~3d" until an epoch-ms timestamp. */
+export function relativeUntil(ms: number, nowMs: number): string {
+  const mins = Math.max(0, Math.round((ms - nowMs) / 60000));
+  if (mins < 90) return `~${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `~${hours}h`;
+  return `~${Math.round(hours / 24)}d`;
+}
+
+/** One usage line: "weekly 12% (resets ~3d) · 5-hour 4% (resets ~2h)". */
+export function renderUsageLine(usage: ExplainUsage[], nowMs: number): string {
+  return usage
+    .map((u) => {
+      const label = WINDOW_LABELS[u.window] ?? u.window;
+      const pct = `${Math.round(u.utilization * 100)}%`;
+      const reset = u.resetsAt !== undefined ? ` (resets ${relativeUntil(u.resetsAt, nowMs)})` : "";
+      return `${label} ${pct}${reset}`;
+    })
+    .join(" · ");
 }
 
 /** One-line plain-English description of where an account's login lives. */
@@ -127,10 +164,14 @@ export function renderExplanation(model: ExplainModel): string {
   lines.push("");
 
   if (model.health.length > 0) {
+    const nowMs = model.nowMs ?? Date.now();
     lines.push("RIGHT NOW");
     for (const h of model.health) {
       const word = VERDICT_WORDS[h.verdict] ?? h.verdict;
       lines.push(`  ${h.id}: ${word}${h.detail ? ` — ${h.detail}` : ""}`);
+      lines.push(
+        `      usage: ${h.usage?.length ? renderUsageLine(h.usage, nowMs) : "no live telemetry"}`,
+      );
     }
     if (model.pool) {
       lines.push(
