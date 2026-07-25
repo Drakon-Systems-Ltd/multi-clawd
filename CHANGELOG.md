@@ -4,6 +4,14 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.5.1] — 2026-07-25
+
+- **Added: Claude Opus 5 (`claude-opus-5`, released 24 Jul 2026) as a known
+  model spec** — 1M context window, 128k max output, plus the `opus-5` CLI
+  alias. The dynamic catalog mirror already surfaced the id automatically;
+  this upgrades it from the conservative 200k-context fallback to its real
+  specs.
+
 ## [1.5.0] — 2026-07-23
 
 - **Added: live usage-percent readout in `explain`.** Each account's RIGHT NOW

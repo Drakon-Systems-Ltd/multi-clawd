@@ -62,13 +62,18 @@ describe("resolveModelSpec", () => {
     expect(fable.contextWindow).toBe(1000000);
     expect(fable.maxTokens).toBe(128000);
     expect(fable.name).toBe("Claude Fable 5");
+    // Opus 5 (released 24 Jul 2026) is a KNOWN spec — 1M context, 128k output.
+    const opus5 = resolveModelSpec("claude-opus-5");
+    expect(opus5.contextWindow).toBe(1000000);
+    expect(opus5.maxTokens).toBe(128000);
+    expect(opus5.name).toBe("Claude Opus 5");
   });
 
   test("unknown modern ids get conservative defaults and a derived name", () => {
-    const spec = resolveModelSpec("claude-opus-5");
+    const spec = resolveModelSpec("claude-opus-6");
     expect(spec.contextWindow).toBe(200000);
     expect(spec.maxTokens).toBe(64000);
-    expect(spec.name).toBe("Claude Opus 5");
+    expect(spec.name).toBe("Claude Opus 6");
   });
 
   test("derived names handle date suffixes", () => {
