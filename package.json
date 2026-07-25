@@ -1,6 +1,6 @@
 {
   "name": "@drakon-systems/multi-clawd",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Multi-account Claude Code failover for OpenClaw — register additional Claude (Max/Pro) logins as first-class CLI backends and keep the full skills/MCP harness across every account.",
   "type": "module",
   "license": "MIT",
@@ -56,7 +56,7 @@
     "prepare": "npm run build",
     "doctor": "node scripts/doctor.mjs",
     "setup": "node scripts/setup.mjs",
-    "sync-manifest": "node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('openclaw.plugin.json','utf8'));m.version=require('./package.json').version;fs.writeFileSync('openclaw.plugin.json',JSON.stringify(m,null,2)+'\\n')\"",
+    "sync-manifest": "node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('openclaw.plugin.json','utf8'));m.version=process.env.npm_package_version||JSON.parse(fs.readFileSync('package.json','utf8')).version;fs.writeFileSync('openclaw.plugin.json',JSON.stringify(m,null,2)+'\\n')\"",
     "version": "npm run sync-manifest && git add openclaw.plugin.json"
   },
   "peerDependencies": {
