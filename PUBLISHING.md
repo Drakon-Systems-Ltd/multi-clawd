@@ -28,6 +28,24 @@ distribution is automated separately: cutting a GitHub Release fires
 `.github/workflows/clawhub-publish.yml`, which publishes the plugin package to
 ClawHub with the release notes as changelog.
 
+## ⚠ Do not trust the `npm version` hook
+
+The `version` lifecycle script — which syncs `openclaw.plugin.json` and the
+README's pinned release tag to the new version — is **silently skipped**
+wherever npm runs with `ignore-scripts=true`. That is a sensible supply-chain
+hardening setting, and it is exactly what our release box uses for headless
+publishing, so on that box the hook has never once fired.
+
+The symptom is a tagged release whose manifest version sits one behind. It bit
+v1.5.1 and v1.5.2, and was twice misdiagnosed as an npm ordering quirk before
+the real cause turned up.
+
+**So run the syncs explicitly after every bump** (step 2 below), and let the
+tests confirm: `tests/backend-config.test.ts` fails when the manifest
+disagrees with `package.json`, and `tests/security-posture.test.ts` fails when
+the README's pinned tag does. Those guards only help if the suite runs *after*
+the bump — which is why step 3 re-runs it.
+
 ## Steps
 
 1. **Clean tree, green tests, on master:**
@@ -36,12 +54,17 @@ ClawHub with the release notes as changelog.
    npm install && npm run build && npm test        # full suite green (290+ tests)
    ```
 
-2. **Bump the version and update the changelog:**
+2. **Bump the version, sync the derived files, update the changelog:**
    ```bash
    npm version <X.Y.Z> --no-git-tag-version         # package.json only
+   npm run sync-manifest                            # openclaw.plugin.json
+   npm run sync-readme-tag                          # pinned SETUP-AGENT.md URL
+   npm test                                         # re-run: guards the syncs
    ```
-   Add the release's items under a new `## [X.Y.Z] — <date>` heading in
-   CHANGELOG.md.
+   The two sync commands are **not optional** — see the warning above; the
+   lifecycle hook that is supposed to run them does not fire under
+   `ignore-scripts`. Then add the release's items under a new
+   `## [X.Y.Z] — <date>` heading in CHANGELOG.md.
 
 3. **Verify the tarball before going live:**
    ```bash
