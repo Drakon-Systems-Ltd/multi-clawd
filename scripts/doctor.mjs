@@ -182,6 +182,9 @@ console.log("account credentials");
 const { checkAccountCredential } = await import(join(EXT_DIR, "dist", "login-health.js")).catch(
   () => import(join(REPO_DIR, "dist", "login-health.js")),
 );
+const { summarizeWindowUsage } = await import(join(EXT_DIR, "dist", "health.js")).catch(() =>
+  import(join(REPO_DIR, "dist", "health.js")),
+);
 const io = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
   keychainHasClaudeCredentials: () => {
@@ -218,10 +221,32 @@ for (const account of accounts) {
     continue;
   }
   const ageMin = Math.round((Date.now() - (state.updatedAt ?? 0)) / 60000);
+  // A window whose own reset has PASSED describes the previous cycle, and the
+  // rotation logic already voids it ("a passed reset voids the observation",
+  // health.ts). Doctor used to print it raw beside a fresh `(0m old)` stamp,
+  // so a five-day-dead `seven_day@96%` read as "96% used right now" when
+  // nothing was acting on it. The age stamp is the age of the OBSERVATION,
+  // never the window's validity.
+  //
+  // `summarizeWindowUsage` is the same function `explain` uses, so all three
+  // surfaces — rotation, explain, doctor — agree on what counts as live
+  // rather than each carrying its own copy of the rule.
+  const live = new Set(
+    summarizeWindowUsage(state, { staleAfterMs: pluginConfig.pool?.staleAfterMs }, Date.now()).map(
+      (u) => u.window,
+    ),
+  );
   const windows = Object.entries(state.windows ?? {})
-    .map(([w, d]) => `${w}:${d.status}${typeof d.utilization === "number" ? `@${Math.round(d.utilization * 100)}%` : ""}`)
+    .map(([w, d]) => {
+      const hasUtil = typeof d.utilization === "number";
+      const util = hasUtil ? `@${Math.round(d.utilization * 100)}%` : "";
+      // Only utilization-bearing account windows are summarised; a window
+      // carrying a number that did NOT survive is one the pool ignores.
+      const stale = hasUtil && !w.startsWith("model:") && !live.has(w);
+      return `${w}:${d.status}${util}${stale ? " (expired — ignored)" : ""}`;
+    })
     .join(" ");
-  ok(`${account.id}: ${windows || "no windows"} (${ageMin}m old)`);
+  ok(`${account.id}: ${windows || "no windows"} (observed ${ageMin}m ago)`);
 }
 
 // ── 6. pool ─────────────────────────────────────────────────────────────────
