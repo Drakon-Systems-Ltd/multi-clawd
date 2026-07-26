@@ -4,6 +4,20 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.5.3] — 2026-07-26
+
+- **Fixed: `SECURITY.md` now ships to npm users.** v1.5.2 added the disclosure
+  policy but left it out of `package.json` `files`, so it existed only on
+  GitHub — a disclosure policy nobody receives is decoration. It is now
+  packaged and linked from the README's Security section, and a test asserts
+  both so it cannot silently fall out again.
+- **Docs: `PUBLISHING.md` records why `npm version` hooks cannot be trusted.**
+  The `version` lifecycle script is silently skipped under
+  `ignore-scripts=true` (our release box's setting), which is the real reason
+  the plugin manifest lagged a version on v1.5.1 and v1.5.2 — twice
+  misdiagnosed as an npm ordering bug. The runbook now syncs explicitly and
+  re-runs the suite after the bump, where the parity tests catch it.
+
 ## [1.5.2] — 2026-07-26
 
 Security-hardening release. No behaviour changes to pooling, rotation or

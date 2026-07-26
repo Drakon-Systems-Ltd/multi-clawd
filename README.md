@@ -451,6 +451,10 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
 ## Security
 
+See **[SECURITY.md](SECURITY.md)** for how to report a vulnerability, exactly
+how credentials are handled, and a table documenting every process-spawn
+callsite (the ones static scanners flag) and why each exists.
+
 **Full declaration of what this plugin touches — nothing else:**
 
 | Surface | What multi-clawd does |

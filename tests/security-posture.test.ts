@@ -62,6 +62,13 @@ describe("SECURITY.md claims stay true", () => {
     expect(read("SECURITY.md")).toMatch(/zero runtime\s+dependencies/i);
   });
 
+  test("SECURITY.md actually ships to npm users, and the README points at it", () => {
+    // A disclosure policy nobody receives is decoration. It must be in `files`
+    // (v1.5.2 shipped without it) and linked from the page npm renders.
+    expect(JSON.parse(read("package.json")).files).toContain("SECURITY.md");
+    expect(read("README.md")).toMatch(/\[SECURITY\.md\]\(SECURITY\.md\)/);
+  });
+
   test("no shell-string exec anywhere in shipped scripts or src", () => {
     for (const file of ["scripts/setup.mjs", "scripts/cli.mjs", "src/shim.ts"]) {
       const src = read(file);
