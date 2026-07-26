@@ -57,7 +57,8 @@
     "doctor": "node scripts/doctor.mjs",
     "setup": "node scripts/setup.mjs",
     "sync-manifest": "node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('openclaw.plugin.json','utf8'));m.version=process.env.npm_package_version||JSON.parse(fs.readFileSync('package.json','utf8')).version;fs.writeFileSync('openclaw.plugin.json',JSON.stringify(m,null,2)+'\\n')\"",
-    "version": "npm run sync-manifest && git add openclaw.plugin.json"
+    "sync-readme-tag": "node scripts/sync-readme-tag.mjs",
+    "version": "npm run sync-manifest && npm run sync-readme-tag && git add openclaw.plugin.json README.md"
   },
   "peerDependencies": {
     "openclaw": ">=2026.6"

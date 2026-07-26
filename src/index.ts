@@ -44,7 +44,7 @@ import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 import { homedir } from "node:os";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -67,7 +67,11 @@ import {
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { addAlert, clearAlert, pendingAlertText, type AlertState } from "./alerts.js";
-import { buildAccountChildEnv, validateAccountTokenSources } from "./account-env.js";
+import {
+  buildAccountChildEnv,
+  tokenFileModeWarning,
+  validateAccountTokenSources,
+} from "./account-env.js";
 import {
   checkAccountCredential,
   createRefProbeTracker,
@@ -300,11 +304,32 @@ function startLoginHealthProbe(
   loginProbeTimer.unref?.();
 }
 
+/**
+ * Paths already warned about this process, so a loose-permission token file
+ * logs once at first use rather than on every single launch.
+ */
+const warnedTokenFileModes = new Set<string>();
+
+/** Advisory permission check on a plaintext token file — never blocks the read. */
+function warnIfTokenFileExposed(path: string): void {
+  if (warnedTokenFileModes.has(path)) return;
+  warnedTokenFileModes.add(path);
+  try {
+    const warning = tokenFileModeWarning(path, statSync(path).mode);
+    if (warning) console.warn(`[multi-clawd] ${warning}`);
+  } catch {
+    // stat failed (races, odd filesystems) — the read below reports the real
+    // problem; a hygiene check must never be the thing that breaks a launch.
+  }
+}
+
 /** Sync token access: file reads and warm ref-cache hits only. */
 function peekToken(account: AccountConfig): string | undefined {
   if (account.native) return undefined;
   if (account.oauthTokenFile) {
-    return readFileSync(expandHome(account.oauthTokenFile), "utf8").trim();
+    const path = expandHome(account.oauthTokenFile);
+    warnIfTokenFileExposed(path);
+    return readFileSync(path, "utf8").trim();
   }
   if (isSecretRefShape(account.oauthTokenRef)) {
     return activeTokenResolver?.peek(account.oauthTokenRef);

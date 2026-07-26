@@ -43,6 +43,29 @@ export function buildAccountChildEnv(
 }
 
 /**
+ * Warn when a plaintext token file is readable beyond its owner.
+ *
+ * The setup guidance has always said `chmod 600`, but nothing verified it, so
+ * a token file left group- or world-readable was consumed in silence. This is
+ * advisory ONLY — it must never block a launch: the user's credential is
+ * usable, and refusing to run would turn a hygiene problem into an outage on
+ * a machine where the file may be perfectly fine (single-user box, restrictive
+ * parent directory). Returns the warning text, or undefined when mode is tight.
+ *
+ * `mode` is the raw `statSync().mode`; only the low 9 permission bits matter.
+ */
+export function tokenFileModeWarning(path: string, mode: number): string | undefined {
+  const perms = mode & 0o777;
+  // Anything readable/writable by group or other.
+  if ((perms & 0o077) === 0) return undefined;
+  return (
+    `token file ${path} is mode ${perms.toString(8).padStart(3, "0")} — readable beyond your ` +
+    `user account. Anyone with a login on this machine can take the Claude credential. ` +
+    `Fix: chmod 600 ${path}`
+  );
+}
+
+/**
  * Token sources are mutually exclusive per account (native | configDir-login |
  * oauthTokenFile | oauthTokenRef). Returns human-readable warnings; the
  * caller logs them and applies deterministic precedence (file > ref) so a

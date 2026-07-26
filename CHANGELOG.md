@@ -4,6 +4,37 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.5.2] — 2026-07-26
+
+Security-hardening release. No behaviour changes to pooling, rotation or
+failover; findings came from a full security review of the package.
+
+- **Added: plaintext token files are checked, not trusted.** `oauthTokenFile`
+  is now inspected on first use and warns (once per process) when the file is
+  group- or world-accessible. The docs always said `chmod 600`; nothing
+  verified it, so a world-readable Claude credential was consumed in silence.
+  Advisory only — it never blocks a launch, because the credential still works
+  and turning a hygiene problem into an outage would be the wrong trade.
+- **Changed: the agent-install URL in the README is pinned to a release tag**
+  instead of `master`. What someone's assistant reads — and therefore executes
+  — is now fixed at a chosen version rather than whatever the branch says that
+  day. The `version` hook rewrites the tag automatically, with a test pinning
+  it to `package.json`, so it cannot drift.
+- **Changed: removed the last two shell-string spawns.** The macOS launchd
+  reload in `scripts/setup.mjs` and `scripts/cli.mjs` used
+  `/bin/sh -c "launchctl … \"${file}\""`; both are now direct `spawnSync`
+  calls with argument arrays. Not exploitable before (paths are ours), but it
+  removes the quoting/injection surface entirely and drops two of the
+  `dangerous_exec` findings on the ClawHub audit page.
+- **Added: `SECURITY.md`** — disclosure policy, exactly how credentials are
+  handled, and a table documenting every remaining process-spawn callsite and
+  why it exists.
+- **Added: `tests/security-posture.test.ts`** — turns the public security
+  claims into build failures if the code stops backing them: the documented
+  `CLEAR_ENV` count must match the real list, dependencies must stay empty, no
+  shell-string spawns may reappear, and the README tag must match the version.
+  (This test found the second `/bin/sh` callsite the manual review missed.)
+
 ## [1.5.1] — 2026-07-25
 
 - **Added: Claude Opus 5 (`claude-opus-5`, released 24 Jul 2026) as a known

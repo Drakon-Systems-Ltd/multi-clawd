@@ -26,7 +26,7 @@ import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, readd
 import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import readline from "node:readline/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -369,12 +369,16 @@ function reloadWatchdogUnit(platform, file) {
       /* was not loaded */
     }
     try {
-      // launchctl can print "Load failed" to stderr and still exit 0 — merge
-      // the streams and check the text, not just the exit code.
-      const out = execFileSync("/bin/sh", ["-c", `launchctl load "${file}" 2>&1 || true`], {
-        encoding: "utf8",
-      });
-      if (/load failed|bootstrap failed/i.test(out)) throw new Error(out.trim());
+      // launchctl can print "Load failed" to stderr and still exit 0, so we
+      // inspect BOTH streams rather than trusting the exit code. spawnSync
+      // (not a `/bin/sh -c` string) keeps this off the shell entirely: no
+      // quoting to get wrong, and nothing for a path to break out of.
+      const r = spawnSync("launchctl", ["load", file], { encoding: "utf8" });
+      if (r.error) throw r.error;
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      if (r.status !== 0 || /load failed|bootstrap failed/i.test(out)) {
+        throw new Error(out.trim() || `launchctl exited ${r.status}`);
+      }
       console.log("  ✅ launchd agent (re)loaded");
     } catch {
       console.log(`  ⚠ plist written but load failed — run: launchctl load ${file}`);

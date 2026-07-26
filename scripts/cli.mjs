@@ -185,11 +185,11 @@ async function healWatchdogUnit() {
           refreshLauncher();
           writeFileSync(file, text.split(target).join(WATCHDOG_LAUNCHER));
           if (d.endsWith("LaunchAgents")) {
-            try {
-              execFileSync("/bin/sh", ["-c", `launchctl unload "${file}" 2>/dev/null; launchctl load "${file}" 2>&1 || true`]);
-            } catch {
-              /* manual load needed */
-            }
+            // Direct spawns, not a `sh -c` string: no quoting to get wrong and
+            // no shell for a path to break out of. Both calls are best-effort —
+            // unload fails harmlessly when nothing is loaded yet.
+            spawnSync("launchctl", ["unload", file], { stdio: "ignore" });
+            spawnSync("launchctl", ["load", file], { stdio: "ignore" });
           } else {
             try {
               execFileSync("systemctl", ["--user", "daemon-reload"]);
