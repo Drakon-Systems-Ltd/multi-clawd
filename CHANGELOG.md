@@ -4,6 +4,20 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.5.4] — 2026-07-26
+
+- **Fixed: `doctor` no longer reports expired rate-limit windows as current
+  usage.** It printed raw window telemetry, so a `seven_day@96%` whose reset
+  had passed five days earlier appeared beside a fresh `(0m old)` stamp and
+  read as "96% of the weekly cap used right now" — while rotation and
+  `explain` both correctly voided it. Non-live windows are now tagged
+  `(expired — ignored)`, and the age label reads `observed Nm ago` because
+  that was always the age of the observation, never the window's validity.
+- **Changed: `doctor` shares `explain`'s liveness rule instead of copying it.**
+  It now calls the same `summarizeWindowUsage` that `explain` uses, so
+  rotation, `explain` and `doctor` cannot drift on what counts as live
+  telemetry — one definition, three surfaces.
+
 ## [1.5.3] — 2026-07-26
 
 - **Fixed: `SECURITY.md` now ships to npm users.** v1.5.2 added the disclosure
