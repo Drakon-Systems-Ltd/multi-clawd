@@ -88,6 +88,30 @@ async function askYes(question, dflt = true) {
   return a.startsWith("y");
 }
 
+/** This package's own version (the CLI half). */
+function cliVersion() {
+  return JSON.parse(readFileSync(resolve(__dirname, "..", "package.json"), "utf8")).version;
+}
+
+/**
+ * Skew advice for the current install, or undefined when the two halves agree.
+ * Loads the pure classifier from dist; stays silent if dist is unavailable so
+ * a missing build can never turn an informational note into a hard failure.
+ */
+async function cliSkewNote(cli = cliVersion(), plugin = installedVersion()) {
+  try {
+    const uc = await import(resolve(__dirname, "..", "dist", "update-core.js"));
+    return uc.formatCliSkew({
+      cliVersion: cli,
+      pluginVersion: plugin,
+      installKind: uc.detectCliInstallKind(resolve(__dirname, "..")),
+      pkg: PKG,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 async function update() {
   let uc;
   try {
@@ -130,6 +154,7 @@ async function update() {
     console.log("  ⏳ remember: the new version loads on the next gateway restart.");
   }
   await healWatchdogUnit();
+  await offerCliSelfUpdate(uc);
   console.log(`\n${BOLD}  health check${RESET}`);
   const doc = spawnSync(process.execPath, [join(__dirname, "doctor.mjs")], { stdio: "inherit" });
   if (doc.status !== 0) {
@@ -137,6 +162,46 @@ async function update() {
     process.exit(doc.status ?? 1);
   }
   console.log(`\n  ✅ done — now on v${installedVersion() ?? "?"}`);
+}
+
+/**
+ * `update` upgrades the PLUGIN; this finishes the job by offering to upgrade
+ * the CLI too, so "update" means what a user reasonably assumes it means.
+ *
+ * Runs LAST in the update flow on purpose: `npm i -g` replaces this package's
+ * own directory, so nothing may dynamically import from it afterwards. Skipped
+ * silently when the halves already agree, and never forced — a global install
+ * can need permissions we shouldn't assume, and npx users have nothing to
+ * update at all.
+ */
+async function offerCliSelfUpdate(uc) {
+  const cli = cliVersion();
+  const plugin = installedVersion();
+  if (uc.classifyCliSkew({ cliVersion: cli, pluginVersion: plugin }) !== "cli-behind") return;
+
+  const kind = uc.detectCliInstallKind(resolve(__dirname, ".."));
+  const fix = uc.cliUpdateCommand(kind, PKG);
+  console.log(
+    `\n  ⚠️  Your ${BOLD}multi-clawd${RESET} command is v${cli} but the plugin is now v${plugin}.`,
+  );
+  console.log(
+    `     ${DIM}doctor and setup run from the command, so they'd report on the new plugin using old logic.${RESET}`,
+  );
+
+  if (kind !== "global") {
+    console.log(`     Bring it up to date with: ${BOLD}${fix}${RESET}`);
+    return;
+  }
+  if (!(await askYes(`     Update the command now? (${fix})`))) {
+    console.log(`     ${DIM}Skipped — run \`${fix}\` when you're ready.${RESET}`);
+    return;
+  }
+  const r = spawnSync("npm", ["i", "-g", `${PKG}@latest`], { stdio: "inherit" });
+  if (r.status === 0) {
+    console.log(`  ✅ command updated — the new version applies from your next run.`);
+  } else {
+    console.log(`  ⚠ that failed (permissions?) — run it yourself: ${BOLD}${fix}${RESET}`);
+  }
 }
 
 /**
@@ -386,8 +451,13 @@ switch (cmd) {
     const cliVersion = JSON.parse(
       readFileSync(resolve(__dirname, "..", "package.json"), "utf8"),
     ).version;
+    const pluginVersion = installedVersion();
     console.log(`cli: v${cliVersion}`);
-    console.log(`installed plugin: ${installedVersion() ? `v${installedVersion()}` : "(not installed)"}`);
+    console.log(`installed plugin: ${pluginVersion ? `v${pluginVersion}` : "(not installed)"}`);
+    // Two versions printed side by side invite exactly one question — "is that
+    // a problem?" — so answer it here rather than leaving the reader to guess.
+    const skewNote = await cliSkewNote(cliVersion, pluginVersion);
+    if (skewNote) console.log(`\n⚠️  ${skewNote}`);
     break;
   }
   default:

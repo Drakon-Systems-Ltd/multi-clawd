@@ -26,6 +26,85 @@ export function decideUpdateAction(opts: {
   return compareVersions(opts.installed, opts.latest) < 0 ? "update" : "up-to-date";
 }
 
+/**
+ * Version skew between the two halves of an install.
+ *
+ * multi-clawd ships as TWO artifacts from one package: the global CLI (the
+ * `multi-clawd` command, which owns `doctor`/`setup`/`explain`) and the
+ * OpenClaw plugin (which actually serves turns). `update` upgrades the plugin
+ * only, so the CLI can silently fall behind — and because the diagnostics live
+ * in the CLI, a stale CLI then reports stale findings about a perfectly
+ * current plugin. That trap is why this exists: skew must never be silent.
+ */
+export type CliSkew = "aligned" | "cli-behind" | "cli-ahead" | "plugin-missing";
+
+export function classifyCliSkew(opts: {
+  cliVersion: string;
+  pluginVersion: string | undefined;
+}): CliSkew {
+  if (opts.pluginVersion === undefined) return "plugin-missing";
+  const d = compareVersions(opts.cliVersion, opts.pluginVersion);
+  if (d === 0) return "aligned";
+  return d < 0 ? "cli-behind" : "cli-ahead";
+}
+
+/**
+ * How this CLI was invoked, which decides what "update yourself" even means.
+ * Derived from the package's own directory so it stays a pure function.
+ */
+export type CliInstallKind = "global" | "npx" | "source";
+
+export function detectCliInstallKind(cliDir: string): CliInstallKind {
+  // npm's npx cache: ~/.npm/_npx/<hash>/node_modules/<pkg>
+  if (/[/\\]_npx[/\\]/.test(cliDir)) return "npx";
+  if (/[/\\]node_modules[/\\]/.test(cliDir)) return "global";
+  return "source";
+}
+
+/** The exact command that brings a stale CLI up to date, for this install kind. */
+export function cliUpdateCommand(kind: CliInstallKind, pkg: string): string {
+  switch (kind) {
+    case "global":
+      return `npm i -g ${pkg}@latest`;
+    case "npx":
+      return `npx ${pkg}@latest <command>`;
+    case "source":
+      return "git pull && npm run build";
+  }
+}
+
+/**
+ * One-line advice about skew, or undefined when there is nothing to say.
+ * Deliberately explicit about the CONSEQUENCE, not just the numbers — the
+ * version pair alone is what confused us in the first place.
+ */
+export function formatCliSkew(opts: {
+  cliVersion: string;
+  pluginVersion: string | undefined;
+  installKind: CliInstallKind;
+  pkg: string;
+}): string | undefined {
+  const skew = classifyCliSkew(opts);
+  const fix = cliUpdateCommand(opts.installKind, opts.pkg);
+  switch (skew) {
+    case "aligned":
+      return undefined;
+    case "plugin-missing":
+      return undefined; // `update` already reports "not installed" plainly.
+    case "cli-behind":
+      return (
+        `CLI v${opts.cliVersion} is older than the installed plugin v${opts.pluginVersion} — ` +
+        `\`doctor\`/\`setup\` run from the CLI, so this one reports on the plugin using ` +
+        `older logic. Fix: ${fix}`
+      );
+    case "cli-ahead":
+      return (
+        `CLI v${opts.cliVersion} is newer than the installed plugin v${opts.pluginVersion} — ` +
+        `the plugin serving your turns is behind. Fix: multi-clawd update`
+      );
+  }
+}
+
 export function formatUpdateBanner(opts: {
   installed: string | undefined;
   latest: string | undefined;

@@ -4,6 +4,39 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.6.0] — 2026-07-27
+
+**CLI/plugin version skew is no longer silent.**
+
+multi-clawd ships two artifacts from one package: the global CLI (the
+`multi-clawd` command, which owns `doctor`, `setup` and `explain`) and the
+OpenClaw plugin that actually serves turns. `update` upgraded the plugin only,
+so the CLI could drift behind without a word — and because the diagnostics
+live in the CLI, a stale CLI then reported stale findings about a perfectly
+current plugin. Someone hit exactly that: `doctor` re-printed a bug that had
+already been fixed in the plugin, because the doctor asking the question was
+three versions old.
+
+- **`update` now finishes its own job.** After upgrading the plugin it detects
+  a lagging CLI and offers to update it too, running the global install on
+  your confirmation. It runs last in the flow on purpose — that install
+  replaces this package's own directory, so nothing may import from it
+  afterwards. Never forced: npx users are told the `@latest` invocation
+  instead, a source checkout is told to pull and build, and a failed global
+  install (permissions) prints the command rather than pretending.
+- **`doctor` reports skew first, before anything else.** If the CLI is behind,
+  every finding underneath it was produced by older logic, so that has to be
+  the first line you read. Aligned installs get a plain
+  `CLI and plugin both vX.Y.Z`.
+- **`version` answers the obvious question.** Printing two version numbers side
+  by side invites "…is that a problem?", so it now says, rather than leaving
+  you to guess.
+- New pure helpers in `update-core.ts` — `classifyCliSkew`,
+  `detectCliInstallKind`, `cliUpdateCommand`, `formatCliSkew` — with tests
+  covering both skew directions, all three install kinds, and Windows paths.
+  The messages state the *consequence*, not just the numbers: the version pair
+  alone is what caused the confusion in the first place.
+
 ## [1.5.4] — 2026-07-26
 
 - **Fixed: `doctor` no longer reports expired rate-limit windows as current

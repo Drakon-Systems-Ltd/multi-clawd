@@ -114,6 +114,31 @@ const entry = config?.plugins?.entries?.["multi-clawd"];
 const pluginConfig = entry?.config ?? {};
 if (!manifest) bad(`no installed manifest at ${EXT_DIR}`);
 else ok(`installed at ${EXT_DIR}`);
+
+// Doctor itself ships in the CLI half, so a stale CLI means these very
+// findings were produced by older logic than the plugin they describe. That
+// has to be the first thing reported, or every line below is suspect.
+{
+  // REPO_DIR first, unlike the health imports below: this is CLI-side logic and
+  // doctor IS the CLI half, so it must use its own copy. Reaching for the
+  // plugin's copy would ask a possibly-older artifact whether it is older.
+  const uc = await import(join(REPO_DIR, "dist", "update-core.js")).catch(() =>
+    import(join(EXT_DIR, "dist", "update-core.js")).catch(() => undefined),
+  );
+  const cliVer = readJson(join(REPO_DIR, "package.json"))?.version;
+  const pluginVer = manifest?.version;
+  const note =
+    uc && cliVer && typeof uc.formatCliSkew === "function"
+      ? uc.formatCliSkew({
+          cliVersion: cliVer,
+          pluginVersion: pluginVer,
+          installKind: uc.detectCliInstallKind(REPO_DIR),
+          pkg: "@drakon-systems/multi-clawd",
+        })
+      : undefined;
+  if (note) warn(note);
+  else if (cliVer && pluginVer) ok(`CLI and plugin both v${cliVer}`);
+}
 if (!entry) bad("no plugins.entries[\"multi-clawd\"] in openclaw.json");
 else if (entry.enabled !== true) bad("plugin entry present but not enabled");
 else ok("plugin entry enabled");
