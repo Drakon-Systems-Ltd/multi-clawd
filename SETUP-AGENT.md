@@ -40,6 +40,22 @@ npx @drakon-systems/multi-clawd update   # installs (or updates) the OpenClaw pl
 npx @drakon-systems/multi-clawd setup    # guided wizard: accounts, token storage, pool, watchdog
 ```
 
+**If this machine has used multi-clawd before, install the CLI globally once,
+first:**
+
+```bash
+npm i -g @drakon-systems/multi-clawd@latest
+```
+
+The package is two halves: the **plugin** (serves turns, updated by `update`)
+and the **CLI** (`doctor`, `chain`, `setup` — updated only by the global
+install). `update` does not upgrade the command running it. Since v1.6.0 the
+command warns when it lags, but that warning ships *in the command*, so an
+older one stays silent — we found three machines running current plugins
+behind stale commands. A stale CLI reports stale diagnostics about a current
+plugin, so do this before you trust anything `doctor` tells you. Check with
+`multi-clawd version`: both halves should match.
+
 Run the wizard WITH your human present — it pauses on decisions that are
 theirs (which accounts, pool or not, where tokens live). The wizard merges
 `openclaw.json` non-destructively with a backup, **never overwrites an

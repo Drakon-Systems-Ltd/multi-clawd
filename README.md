@@ -153,7 +153,37 @@ npm i -g @drakon-systems/multi-clawd && multi-clawd update
 ```
 
 `update` runs the registry install with the right flags, offers the gateway
-restart, and finishes with a doctor health check. Prefer the raw form?
+restart, and finishes with a doctor health check.
+
+> ### ⚠️ Keeping up to date: there are two halves
+>
+> One package installs as **two separate artifacts**, and they update by
+> different routes:
+>
+> | Half | What it is | How it updates |
+> |---|---|---|
+> | **The plugin** | serves your turns — pooling, rotation, credentials | `multi-clawd update` |
+> | **The CLI** | the `multi-clawd` command — `doctor`, `chain`, `setup`, `explain` | `npm i -g @drakon-systems/multi-clawd@latest` |
+>
+> **`multi-clawd update` upgrades the plugin, not itself.** Since v1.6.0 it
+> notices when the command has fallen behind and offers to update it — but
+> that notice ships *in the command*, so a CLI older than v1.6.0 has no code
+> to warn you with. We found this on three of our own machines, all running
+> current plugins behind commands that were three versions stale.
+>
+> **So run the global install once, by hand, to arm it:**
+>
+> ```bash
+> npm i -g @drakon-systems/multi-clawd@latest
+> ```
+>
+> After that it maintains itself. It matters because `doctor` and `chain` live
+> in the CLI — a stale command reports *stale diagnostics about a current
+> plugin*, which is a confusing way to be told nothing is wrong. `multi-clawd
+> version` shows both halves, and since v1.6.0 says plainly whether the pair
+> is a problem.
+
+Prefer the raw form?
 
 ```bash
 openclaw plugins install @drakon-systems/multi-clawd --pin

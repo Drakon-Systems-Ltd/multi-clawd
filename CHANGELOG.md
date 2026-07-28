@@ -4,6 +4,19 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.7.1] — 2026-07-28
+
+Documentation only — no code change.
+
+- **README and SETUP-AGENT.md now explain the two halves.** One package
+  installs as a plugin (serves turns, updated by `multi-clawd update`) and a
+  CLI (`doctor`, `chain`, `setup` — updated only by a global install). `update`
+  upgrades the plugin, not itself, and while v1.6.0 added a warning for a
+  lagging CLI, that warning ships *inside* the CLI — so an older one stays
+  silent. We found three of our own machines running current plugins behind
+  commands three versions stale. The fix is one manual global install, and it
+  now says so where people actually look rather than only in a chat reply.
+
 ## [1.7.0] — 2026-07-28
 
 **Routing that audits itself.** Every fault this project has hit in production
