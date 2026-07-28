@@ -267,6 +267,99 @@ export function auditEffectiveChain(config: unknown, poolId: string | undefined 
   return findings;
 }
 
+// ── CASE 3 — per-agent chain shadowing ───────────────────────────────────────
+
+/**
+ * A per-agent `model` block silently overrides `agents.defaults.model` for that
+ * agent's sessions. Cases 1 and 2 cannot see this: a shadowing chain is often
+ * perfectly pool-routed, so nothing about it is "off-pool" — it is simply NOT
+ * the chain the operator thinks they edited.
+ *
+ * The motivating incident (25 Jul 2026): the default chain was switched to a
+ * new primary, verified, and restarted — and every main-agent conversation kept
+ * serving the OLD model, because `agents.list[main].model` carried its own
+ * chain. Two gateway restarts and a long hunt later, the shadowing block was
+ * the answer. Nothing in the product said a word.
+ *
+ * Reported as `note` when the shadow agrees with defaults (harmless but worth
+ * deleting) and `warn` when it changes the PRIMARY — the case that silently
+ * decides which model actually answers.
+ */
+export interface ShadowFinding extends ChainFinding {
+  /** Agent whose own chain shadows the defaults. */
+  agent: string;
+  /** Primary from `agents.defaults.model`, if any. */
+  defaultPrimary?: string;
+  /** Primary this agent actually serves. */
+  agentPrimary?: string;
+}
+
+function primaryOf(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const p = (value as { primary?: unknown }).primary;
+    if (typeof p === "string") return p;
+  }
+  return undefined;
+}
+
+/** Every per-agent model block, from both the object-keyed and array forms. */
+function collectAgentModelBlocks(config: unknown): Array<{ agent: string; surface: string; model: unknown }> {
+  const cfg = (config ?? {}) as Record<string, unknown>;
+  const agents = (cfg.agents ?? {}) as Record<string, unknown>;
+  const out: Array<{ agent: string; surface: string; model: unknown }> = [];
+
+  for (const [name, v] of Object.entries(agents)) {
+    if (RESERVED_AGENT_KEYS.has(name)) continue;
+    if (!v || typeof v !== "object") continue;
+    const agent = v as Record<string, unknown>;
+    if ("model" in agent) out.push({ agent: name, surface: `agents.${name}.model`, model: agent.model });
+  }
+  if (Array.isArray(agents.list)) {
+    agents.list.forEach((a, i) => {
+      if (!a || typeof a !== "object") return;
+      const agent = a as Record<string, unknown>;
+      if (!("model" in agent)) return;
+      const label = typeof agent.id === "string" ? agent.id : String(i);
+      out.push({ agent: label, surface: `agents.list[${label}].model`, model: agent.model });
+    });
+  }
+  return out;
+}
+
+/**
+ * Find per-agent chains that shadow `agents.defaults.model`.
+ * Returns [] when there are no per-agent model blocks (the common, clean case).
+ */
+export function auditChainShadowing(config: unknown): ShadowFinding[] {
+  const cfg = (config ?? {}) as Record<string, unknown>;
+  const agents = (cfg.agents ?? {}) as Record<string, unknown>;
+  const defaults = (agents.defaults ?? {}) as Record<string, unknown>;
+  const defaultPrimary = primaryOf(defaults.model);
+
+  const findings: ShadowFinding[] = [];
+  for (const { agent, surface, model } of collectAgentModelBlocks(config)) {
+    const agentPrimary = primaryOf(model);
+    const diverges = agentPrimary !== undefined && agentPrimary !== defaultPrimary;
+    findings.push({
+      surface,
+      ref: agentPrimary ?? "(no primary)",
+      severity: diverges ? "warn" : "note",
+      agent,
+      defaultPrimary,
+      agentPrimary,
+      reason: diverges
+        ? `agent "${agent}" has its OWN chain, so it serves ${agentPrimary} — NOT the ` +
+          `${defaultPrimary ?? "(unset)"} in agents.defaults.model. Editing the defaults will not ` +
+          `change this agent. Fix: update this block too, or delete it to inherit the defaults`
+        : `agent "${agent}" repeats the default chain — harmless, but it will silently ` +
+          `stop tracking agents.defaults.model the next time you change it. Fix: delete this ` +
+          `block to inherit the defaults`,
+    });
+  }
+  return findings;
+}
+
 // ── CASE 2 — session-override audit ──────────────────────────────────────────
 
 /**

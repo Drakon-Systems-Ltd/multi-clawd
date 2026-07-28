@@ -6,6 +6,7 @@ import {
   maskSessionKey,
   type ChainFinding,
   type SessionOverrideEntry,
+  auditChainShadowing,
 } from "../src/chain-audit";
 
 const POOL = "clawd";
@@ -352,5 +353,73 @@ describe("auditSessionOverrides", () => {
     expect(findings).toHaveLength(2);
     expect(findings.map((f) => f.ref).sort()).toEqual(["anthropic/claude-opus-4-8", "claw2/claude-opus-4-8"]);
     expect(findings.every((f) => f.severity === "warn")).toBe(true);
+  });
+});
+
+describe("auditChainShadowing (case 3 — per-agent chains that shadow defaults)", () => {
+  test("no per-agent model blocks means nothing to report", () => {
+    expect(
+      auditChainShadowing({
+        agents: { defaults: { model: { primary: "clawd/claude-opus-5" } } },
+      }),
+    ).toEqual([]);
+  });
+
+  test("THE 25 Jul incident: a pool-routed per-agent chain silently overrides defaults", () => {
+    // Both refs are perfectly pool-routed, so cases 1 and 2 see nothing wrong —
+    // yet the agent serves fable while the operator edited the defaults to opus.
+    const findings = auditChainShadowing({
+      agents: {
+        defaults: { model: { primary: "clawd/claude-opus-5", fallbacks: ["clawd/claude-fable-5"] } },
+        list: [{ id: "main", model: { primary: "clawd/claude-fable-5", fallbacks: [] } }],
+      },
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("warn");
+    expect(findings[0].agent).toBe("main");
+    expect(findings[0].defaultPrimary).toBe("clawd/claude-opus-5");
+    expect(findings[0].agentPrimary).toBe("clawd/claude-fable-5");
+    expect(findings[0].surface).toBe("agents.list[main].model");
+    expect(findings[0].reason).toMatch(/will not\s+change this agent/);
+  });
+
+  test("an agent block that merely repeats the defaults is a note, not a warn", () => {
+    const findings = auditChainShadowing({
+      agents: {
+        defaults: { model: { primary: "clawd/claude-opus-5" } },
+        list: [{ id: "main", model: { primary: "clawd/claude-opus-5" } }],
+      },
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].severity).toBe("note");
+    expect(findings[0].reason).toMatch(/stop tracking/);
+  });
+
+  test("the object-keyed agent form is covered too", () => {
+    const findings = auditChainShadowing({
+      agents: {
+        defaults: { model: { primary: "clawd/claude-opus-5" } },
+        research: { model: "clawd/claude-sonnet-5" },
+      },
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0].agent).toBe("research");
+    expect(findings[0].surface).toBe("agents.research.model");
+    expect(findings[0].agentPrimary).toBe("clawd/claude-sonnet-5");
+  });
+
+  test("shadowing is detected even when the defaults have no chain at all", () => {
+    const findings = auditChainShadowing({
+      agents: { list: [{ id: "main", model: { primary: "clawd/claude-opus-5" } }] },
+    });
+    expect(findings[0].severity).toBe("warn");
+    expect(findings[0].defaultPrimary).toBeUndefined();
+    expect(findings[0].reason).toContain("(unset)");
+  });
+
+  test("empty or malformed config never throws", () => {
+    expect(auditChainShadowing(undefined)).toEqual([]);
+    expect(auditChainShadowing({})).toEqual([]);
+    expect(auditChainShadowing({ agents: { list: "nonsense" } })).toEqual([]);
   });
 });

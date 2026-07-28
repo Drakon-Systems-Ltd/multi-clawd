@@ -73,6 +73,11 @@ import {
   validateAccountTokenSources,
 } from "./account-env.js";
 import {
+  diffCatalogModels,
+  formatNewModelNotice,
+  type KnownModelsState,
+} from "./model-currency.js";
+import {
   checkAccountCredential,
   createRefProbeTracker,
   type CredentialIo,
@@ -397,6 +402,74 @@ const SHIM_PATH = fileURLToPath(new URL("./shim.js", import.meta.url));
 /** Per-account health state written by the shim, read by the steering hook. */
 export function healthStateFile(accountId: string): string {
   return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.json`);
+}
+
+/** Catalog ids observed on previous runs — the baseline for "this model is new". */
+function knownModelsFile(): string {
+  return join(homedir(), ".openclaw", "state", "multi-clawd", "known-models.json");
+}
+
+/**
+ * Model refs in the operator's default chain, read from disk. Read here rather
+ * than threaded through registration: this is a courtesy check off the hot
+ * path, and it must not add a parameter to the launch-critical signatures.
+ */
+function readChainRefs(): string[] {
+  try {
+    const cfg = JSON.parse(
+      readFileSync(join(homedir(), ".openclaw", "openclaw.json"), "utf8"),
+    ) as { agents?: { defaults?: { model?: { primary?: unknown; fallbacks?: unknown } } } };
+    const m = cfg?.agents?.defaults?.model;
+    const refs: string[] = [];
+    if (typeof m?.primary === "string") refs.push(m.primary);
+    if (Array.isArray(m?.fallbacks)) {
+      for (const f of m.fallbacks) if (typeof f === "string") refs.push(f);
+    }
+    return refs;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Notice the operator when the provider ships a Claude model their chain does
+ * not mention — and do nothing else about it. Which model belongs where is a
+ * cost/quality decision that is theirs, so this offers and stops. Rides the
+ * existing alert path, so it surfaces in their normal channel at the next
+ * heartbeat rather than dying in the journal.
+ *
+ * Fully best-effort: any failure here must never affect registration.
+ */
+function checkModelCurrency(catalogIds: readonly string[], chainRefs: readonly string[], poolId: string): void {
+  try {
+    const file = knownModelsFile();
+    let stored: KnownModelsState | undefined;
+    try {
+      stored = JSON.parse(readFileSync(file, "utf8")) as KnownModelsState;
+    } catch {
+      /* first run, or unreadable — diff treats both as "no baseline" */
+    }
+    const result = diffCatalogModels(stored, catalogIds, chainRefs, Date.now());
+
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(result.nextState, null, 2), { mode: 0o600 });
+    renameSync(tmp, file);
+
+    const notice = formatNewModelNotice(result.unusedNewIds, poolId);
+    if (notice) {
+      // `key` is stable per model set, so re-registration during one gateway
+      // lifetime cannot spam the same notice repeatedly.
+      raiseAlert({
+        key: `new-models:${result.unusedNewIds.join(",")}`,
+        severity: "info",
+        text: notice,
+        ttlMs: 24 * 60 * 60 * 1000,
+      });
+    }
+  } catch {
+    /* never let a courtesy notice break a launch */
+  }
 }
 
 export function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
@@ -880,5 +953,16 @@ function registerPoolBackend(
       options.utilizationThreshold ?? 0.85
     }`,
   );
+
+  // Courtesy check, fire-and-forget: has the provider shipped a Claude model
+  // this chain has never heard of? Detached from the registration path so a
+  // slow catalog read can never delay backends coming up.
+  void (async () => {
+    try {
+      checkModelCurrency(await resolveBaseModelIds(), readChainRefs(), poolId);
+    } catch {
+      /* best-effort only */
+    }
+  })();
 }
 

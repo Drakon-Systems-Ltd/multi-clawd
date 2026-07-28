@@ -4,6 +4,44 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.7.0] — 2026-07-28
+
+**Routing that audits itself.** Every fault this project has hit in production
+was configuration that no longer matched intent — never a wrong model choice.
+Four in one week, across two machines: a per-agent chain silently shadowing the
+defaults, sessions pinned off-pool, single-account pins that defeat
+cross-account failover. Each was individually invisible, and each disabled the
+one thing multi-clawd exists to do.
+
+- **New `multi-clawd chain`** — one place that answers "what actually serves my
+  turns, and does it match what I meant?". Prints the effective chain marking
+  which rungs are pooled, then every routing fault with its fix underneath:
+  agents carrying their own chain, off-pool references, and session `/model`
+  pins across all agents. Session ids are masked by default (`--raw` to show
+  them in full), because this output gets pasted into issues.
+- **New audit: per-agent chains that shadow the defaults** (`auditChainShadowing`).
+  This is the trap that cost a morning on 25 Jul: `agents.list[main].model`
+  carried its own chain, so editing `agents.defaults.model` changed nothing for
+  the main agent — and because the shadowing chain was itself perfectly
+  pool-routed, no existing check said a word. Reported as a warning when it
+  changes the primary, and as a note when it merely repeats the defaults (still
+  worth deleting: it will silently stop tracking the defaults the next time
+  they change).
+- **New: notice when the provider ships a Claude model your chain doesn't
+  mention** — and nothing more. multi-clawd does **not** auto-adopt new models.
+  Which model belongs at the top of a chain is a cost, quality and behaviour
+  decision that only the operator can make; a credential-handling plugin that
+  silently rewired routing would be surprising in precisely the wrong way. So
+  it detects, tells you through the existing alert path, offers `multi-clawd
+  chain`, and stops.
+  - "New" means **new to this machine** — an id in the catalog now that was
+    absent last time. Model ids don't sort into a meaningful recency order
+    across families (`claude-opus-5` vs `claude-fable-5`), so any "newer than
+    yours" claim would be invention. The first run only records a baseline, so
+    the feature never opens by dumping the whole catalog into your chat.
+  - Best-effort and off the hot path: it runs detached after the pool
+    registers, and any failure is swallowed rather than delaying a launch.
+
 ## [1.6.0] — 2026-07-27
 
 **CLI/plugin version skew is no longer silent.**

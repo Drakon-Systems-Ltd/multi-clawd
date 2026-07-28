@@ -35,6 +35,7 @@ ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
   ${BOLD}setup${RESET}     guided setup wizard (accounts, pool, watchdog)
   ${BOLD}login${RESET}     log a configured account in (or re-auth it) — right dir, right env
   ${BOLD}explain${RESET}   your setup in plain English — accounts, pool, fallback chain
+  ${BOLD}chain${RESET}     audit your model routing — what actually serves each turn
   ${BOLD}update${RESET}    update the plugin to the latest version
   ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
   ${BOLD}version${RESET}   show CLI + installed plugin versions
@@ -109,6 +110,114 @@ async function cliSkewNote(cli = cliVersion(), plugin = installedVersion()) {
     });
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * `chain` — one place that answers "what actually serves my turns, and does it
+ * match what I meant?".
+ *
+ * Every routing fault this project has hit was config that no longer matched
+ * intent: a per-agent chain shadowing the defaults, sessions pinned off-pool,
+ * allowlist rungs naming retired providers. Each was individually invisible and
+ * each defeated cross-account failover — the entire point of the product. The
+ * audits already existed for doctor; this gives them a home where the fix is
+ * printed next to the finding.
+ */
+async function chain(args = []) {
+  const { readFileSync: rf, existsSync, readdirSync } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  const raw = args.includes("--raw");
+
+  let ca;
+  try {
+    ca = await import(resolve(__dirname, "..", "dist", "chain-audit.js"));
+  } catch {
+    console.error("chain: built dist/ is missing — reinstall the package.");
+    process.exit(1);
+  }
+
+  let config;
+  try {
+    config = JSON.parse(rf(join(homedir(), ".openclaw", "openclaw.json"), "utf8"));
+  } catch {
+    console.error("chain: could not read ~/.openclaw/openclaw.json");
+    process.exit(1);
+  }
+
+  const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
+  const poolId = pc.pool?.id?.trim() || (pc.pool ? "clawd" : undefined);
+  const chainCfg = config?.agents?.defaults?.model;
+
+  console.log(`\n${BOLD}🦞 multi-clawd — model routing${RESET}\n`);
+
+  console.log(`${BOLD}DEFAULT CHAIN${RESET}  ${DIM}(agents.defaults.model)${RESET}`);
+  const rungs = [chainCfg?.primary, ...(chainCfg?.fallbacks ?? [])].filter(
+    (r) => typeof r === "string",
+  );
+  if (rungs.length === 0) console.log("  (none configured)");
+  rungs.forEach((r, i) => {
+    const pooled = poolId && r.startsWith(`${poolId}/`);
+    console.log(`  ${i + 1}. ${r}${pooled ? `  ${DIM}→ pooled${RESET}` : ""}`);
+  });
+  console.log("");
+
+  let problems = 0;
+  const section = (title, findings, renderRef) => {
+    if (findings.length === 0) return;
+    console.log(`${BOLD}${title}${RESET}`);
+    for (const f of findings) {
+      const icon = f.severity === "warn" ? "⚠️ " : "ℹ️ ";
+      if (f.severity === "warn") problems++;
+      console.log(`  ${icon} ${renderRef(f)}`);
+      console.log(`      ${DIM}${f.reason}${RESET}`);
+    }
+    console.log("");
+  };
+
+  section("AGENTS WITH THEIR OWN CHAIN", ca.auditChainShadowing(config), (f) =>
+    `${f.surface} → ${f.ref}`,
+  );
+
+  const configFindings = ca.auditEffectiveChain(config, poolId);
+  section(
+    "OFF-POOL REFERENCES",
+    configFindings.filter((f) => f.severity === "warn"),
+    (f) => `${f.surface}: ${f.ref}`,
+  );
+  const notes = configFindings.filter((f) => f.severity === "note");
+  if (notes.length > 0) {
+    console.log(
+      `${DIM}  (${notes.length} allowlist entr${notes.length === 1 ? "y" : "ies"} name a non-pool Claude ref — registered, not a live tier)${RESET}\n`,
+    );
+  }
+
+  // Session pins, across every agent's session store.
+  const sessionFindings = [];
+  const agentsDir = join(homedir(), ".openclaw", "agents");
+  try {
+    for (const agent of readdirSync(agentsDir)) {
+      const p = join(agentsDir, agent, "sessions", "sessions.json");
+      if (!existsSync(p)) continue;
+      try {
+        sessionFindings.push(...ca.auditSessionOverrides(JSON.parse(rf(p, "utf8")), Boolean(poolId)));
+      } catch {
+        /* unreadable store — skip, doctor reports install health */
+      }
+    }
+  } catch {
+    /* no agents dir */
+  }
+  section("SESSION PINS", sessionFindings, (f) =>
+    raw ? f.surface : f.surface.replace(/^session (.*)$/, (_, k) => `session ${ca.maskSessionKey(k)}`),
+  );
+
+  if (problems === 0) {
+    console.log(`✅ routing is consistent — every live Claude tier goes through the pool.\n`);
+  } else {
+    console.log(
+      `${problems} thing${problems === 1 ? "" : "s"} to look at. ${DIM}Session ids are masked; --raw shows them in full.${RESET}\n`,
+    );
   }
 }
 
@@ -438,6 +547,9 @@ switch (cmd) {
     break;
   case "explain":
     await explain();
+    break;
+  case "chain":
+    await chain(rest);
     break;
   case "doctor":
     runSibling("doctor.mjs", rest);
