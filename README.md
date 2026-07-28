@@ -30,6 +30,7 @@ multi-clawd update    # install (or update) the OpenClaw plugin — right flags,
 multi-clawd setup     # guided wizard: accounts, isolated second login, pool, watchdog
 multi-clawd login claw2   # launch the right Claude sign-in for an account (or re-auth it)
 multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
+multi-clawd chain     # audit your model routing — what actually serves each turn
 multi-clawd doctor    # health check (add --probe for a live end-to-end turn)
 ```
 
@@ -188,7 +189,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v1.6.0/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v1.7.0/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
