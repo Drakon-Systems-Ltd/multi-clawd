@@ -54,6 +54,136 @@ install anything? Every command also runs as
 
 Then `multi-clawd explain` shows you exactly what you built.
 
+## Hermes Agent integration
+
+multi-clawd can also import the configured Claude subscriptions into Hermes
+Agent's native Anthropic credential pool. Install and set up
+[Hermes Agent](https://hermes-agent.nousresearch.com/docs/) first, keep
+`hermes` on `PATH`, then preview and apply the import:
+
+```bash
+multi-clawd hermes sync --dry-run
+multi-clawd hermes sync --strategy round_robin
+multi-clawd hermes doctor
+
+# An existing Hermes profile (create it first: hermes profile create work):
+multi-clawd hermes sync --profile work --strategy least_used
+
+# Read a non-default OpenClaw configuration:
+multi-clawd hermes doctor --config ~/configs/openclaw.json
+```
+
+Validated against Hermes Agent **0.19.1**.
+
+### Only stable setup tokens are imported
+
+The one credential this adapter will copy is an account's `oauthTokenFile` — a
+plain `claude setup-token` value, the same string multi-clawd already passes to
+Claude Code as `CLAUDE_CODE_OAUTH_TOKEN`. It carries no refresh token and
+nothing rotates it, so a second copy in Hermes stays valid.
+
+Everything else is refused, on purpose:
+
+- **`native` logins are not importable, but need nothing imported.** A native
+  login is a `.credentials.json` file holding a *rotating* OAuth grant whose
+  refresh token is single-use, so copying it into Hermes and the next refresh —
+  by Claude Code, or by Hermes itself — would invalidate the other copy, which
+  Hermes then marks dead and drops from rotation. It doesn't need copying
+  anyway: Hermes' own `claude_code` credential source already reads that exact
+  same native `~/.claude/.credentials.json` directly, so leave a native account
+  on that source instead of duplicating the grant.
+- **`configDir` logins are not importable, and Hermes cannot be pointed at
+  them either.** The same single-use-refresh-token problem applies, and unlike
+  a native login there is no Hermes-side fallback: as of Hermes Agent 0.19.1,
+  its `claude_code` credential source reads only the native path above, never
+  an arbitrary `configDir`. A `configDir` account can only reach Hermes' pool
+  by getting its own `oauthTokenFile` (a `claude setup-token`, same as above),
+  or it stays OpenClaw-only.
+- **`oauthTokenRef` is never resolved.** Reading a gateway secret reference
+  here would turn a reference into a copied plaintext secret in a second store;
+  the adapter fails closed and says so. An account may carry a `configDir`
+  alongside its `oauthTokenFile` — it is simply ignored for Hermes.
+
+`doctor` names every account it cannot import and why; `sync` refuses to write
+anything until they are fixed or removed. **Re-run `sync` whenever a
+setup-token file changes** — nothing propagates a new token automatically.
+
+### What sync does
+
+Accounts are read from `plugins.entries["multi-clawd"].config.accounts` in
+`~/.openclaw/openclaw.json` by default. Every account is validated and every
+token file read and parsed before Hermes is asked to write anything.
+
+- Only deterministic rows labelled `multi-clawd:<account-id>` are added or
+  updated, and only those rows are sent to Hermes — it merges them into the
+  pool under its own lock, so unrelated credentials are never read, copied, or
+  rewritten. The operation is idempotent.
+- Row priority follows your `pool.accounts` preference order (home account
+  first), which is the order Hermes' `fill_first` drains in. Accounts absent
+  from `pool.accounts` follow in `accounts[]` order.
+- `--strategy` sets Hermes' Anthropic pool strategy to one of `fill_first`,
+  `round_robin`, `random`, `least_used`. **Omit it and your configured strategy
+  is left alone** (`fill_first` only when nothing is set at all).
+- `--dry-run` runs the same validation and planning and writes nothing.
+- Planning always reads the target home's *own* pool. A Hermes profile with no
+  Anthropic rows yet falls back to reading the global pool — `doctor` labels
+  that as an effective-only view, and sync never copies those rows into the
+  profile.
+- Named profiles must already exist; the adapter never creates one, so a
+  deleted profile is not resurrected as an empty skeleton. Run
+  `hermes profile create <name>` first. The target home is whatever Hermes
+  itself reports as its root (via its own `hermes_constants` module) — never
+  reimplemented here — which is `~/.hermes` on POSIX, `%LOCALAPPDATA%\hermes`
+  on native Windows, or a Docker/custom `HERMES_HOME` root; a named profile is
+  `<root>/profiles/<name>`. `--profile default` always targets that root, even
+  when the active `HERMES_HOME` currently points at another profile.
+- Only multi-clawd's own broken state (duplicate or malformed managed rows)
+  blocks a sync. Several `claude_code` rows, or another tool's malformed row,
+  are reported as warnings — they are legitimate states and not this plugin's
+  to fix.
+
+The pool and the config are two separate Hermes files. Each write is atomic on
+its own and both are verified by re-reading afterwards; the pair is not atomic,
+so the pool is written first and both are idempotent — an interruption between
+them leaves a state that re-running `sync` repairs, rather than one needing a
+rollback.
+
+### What this integration is (and is not)
+
+Hermes talks to the **native Anthropic Messages API** with Hermes' own tool
+system. It does not run the OpenClaw plugin backend or the Claude Code harness,
+so OpenClaw skills/MCP wiring and Claude Code's built-in harness are not copied
+across. multi-clawd supplies the account credentials and the configured Hermes
+pool distribution only. Hermes then provides native reactive failover and the
+selected distribution strategy. Proactive near-limit telemetry/rotation from
+multi-clawd's OpenClaw pool is **not implemented for Hermes yet**.
+
+### Security model
+
+Tokens are read from real files with strict size limits, parsed locally, and
+sent to the bundled Python bridge only as one JSON document on **stdin**. They
+are never placed in argv, exported as environment variables, or printed to
+stdout/stderr — no token, no prefix, no fingerprint — and command errors use
+fixed safe messages. On POSIX, a token source file must be private —
+group/other-readable or -writable (any `chmod` bits beyond `600`) is refused
+outright, not just warned about, checked via `fstat` on the already-open file
+descriptor so there is no gap between the check and the read (Windows has no
+equivalent bit layout, so the check is a no-op there; the config JSON is read
+through the same code path but never needs to be private). The bridge uses
+Hermes' installed Python APIs directly (no shell-string execution), writes
+only inside the selected `HERMES_HOME`, and never echoes identifiers or other
+fields belonging to a row it doesn't manage — an unrelated row is reported by
+position only, even when its own source/label/status fields are stuffed with
+a token-like string. Paths reject NUL bytes, expand only a leading `~/`, and
+profile names cannot contain traversal or separators.
+
+`doctor` validates files, account configuration, and the shape of Hermes' pool
+and config on disk — it makes **no live request to Anthropic** and cannot
+prove a setup token is still accepted. A token can pass every doctor check and
+still be expired or revoked; that is discovered at runtime, where Hermes' own
+native 401/429 handling takes over exactly as it does for any other credential
+in its pool.
+
 ## Why
 
 OpenClaw's bundled `claude-cli` backend runs Claude Code on a **single**
@@ -310,9 +440,8 @@ dir* — a separate Claude "app" — so the logins can never clobber each other.
 
    ```bash
    mkdir -p ~/.claw2 && chmod 700 ~/.claw2
-   CLAUDE_CONFIG_DIR=~/.claw2 claude setup-token   # log in as the 2nd account
-   # store the token where the plugin can read it (0600):
-   #   ~/.claw2/oauth-token
+   CLAUDE_CONFIG_DIR=~/.claw2 claude setup-token > ~/.claw2/oauth-token   # log in as the 2nd account
+   chmod 600 ~/.claw2/oauth-token
    ```
 
    **Windows (native, PowerShell):**

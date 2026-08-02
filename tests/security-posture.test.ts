@@ -6,7 +6,8 @@
  * the manifest version and the README's release tag.
  */
 import { describe, expect, test } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tokenFileModeWarning } from "../src/account-env";
 
@@ -70,10 +71,54 @@ describe("SECURITY.md claims stay true", () => {
   });
 
   test("no shell-string exec anywhere in shipped scripts or src", () => {
-    for (const file of ["scripts/setup.mjs", "scripts/cli.mjs", "src/shim.ts"]) {
+    const shippedScripts = readdirSync(join(ROOT, "scripts"))
+      .filter((name) => name.endsWith(".mjs") || name.endsWith(".py"))
+      .map((name) => `scripts/${name}`);
+    for (const file of [...shippedScripts, "src/shim.ts"]) {
       const src = read(file);
-      expect(src, `${file} must not spawn through a shell`).not.toMatch(/"\/bin\/sh"|shell:\s*true/);
+      expect(src, `${file} must not spawn through a shell`).not.toMatch(/"\/bin\/sh"|shell\s*[:=]\s*(?:true|True)/);
     }
+  });
+
+  test("Hermes adapter keeps credential values off argv, environment, and rendered output", () => {
+    const cli = read("scripts/hermes.mjs");
+    const bridge = read("scripts/hermes_bridge.py");
+    // The token reaches the bridge on stdin only — never as an argument.
+    expect(cli).toMatch(/input:\s*JSON\.stringify\(/);
+    expect(cli).not.toMatch(/spawnSync\(\s*hermes\.python\s*,\s*\[\s*BRIDGE\s*,/);
+    expect(cli).not.toMatch(/process\.env\.(?:ACCESS|REFRESH|OAUTH|ANTHROPIC).*=/i);
+    expect(cli).not.toMatch(/console\.(?:log|error)\([^\n]*(?:accessToken|refreshToken|Fingerprint)/);
+    expect(bridge).toMatch(/if len\(sys\.argv\) != 1/);
+    expect(bridge).not.toMatch(/subprocess\.|os\.system|shell\s*=\s*True/);
+  });
+
+  test("the published tarball carries no Python bytecode", () => {
+    // A .pyc embeds the full source, comments included — the same leak path
+    // `removeComments` closes for dist/. `files` includes scripts/ wholesale,
+    // and an allowlisted directory is NOT filtered by .gitignore, so the
+    // exclusion has to live in `files` itself.
+    const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const packed: string[] = JSON.parse(result.stdout)[0].files.map((file: { path: string }) => file.path);
+    expect(packed.length).toBeGreaterThan(0);
+    expect(packed.filter((path) => path.includes("__pycache__") || /\.py[cod]$/.test(path))).toEqual([]);
+    expect(packed).toContain("scripts/hermes_bridge.py");
+    // Spawning npm is slow, and slower still alongside the other suites.
+  }, 120_000);
+
+  test("only stable setup tokens can be imported into Hermes", () => {
+    // Rotating grants are single-use on refresh; duplicating one guarantees a
+    // dead credential. The refusal must exist on both sides of the bridge.
+    const core = read("src/hermes-core.ts");
+    const bridge = read("scripts/hermes_bridge.py");
+    expect(core).toMatch(/rotating_grant_not_supported/);
+    expect(core).not.toMatch(/claudeAiOauth/);
+    expect(bridge).toMatch(/rotating_grant_not_supported/);
+    expect(bridge).toMatch(/"refreshToken",\s*"expiresAtMs"/);
   });
 });
 

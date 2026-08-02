@@ -5,6 +5,7 @@
  *   npx @drakon-systems/multi-clawd setup     guided setup wizard
  *   npx @drakon-systems/multi-clawd update    update to the latest version
  *   npx @drakon-systems/multi-clawd doctor    health check
+ *   npx @drakon-systems/multi-clawd hermes    sync/diagnose Hermes credentials
  *   npx @drakon-systems/multi-clawd version   versions (CLI + installed plugin)
  *
  * (Installed globally via `npm i -g @drakon-systems/multi-clawd`, the same
@@ -38,6 +39,7 @@ ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
   ${BOLD}chain${RESET}     audit your model routing — what actually serves each turn
   ${BOLD}update${RESET}    update the plugin to the latest version
   ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
+  ${BOLD}hermes${RESET}    sync or diagnose Hermes Agent's Anthropic credential pool
   ${BOLD}version${RESET}   show CLI + installed plugin versions
 
 Run via npx (${DIM}npx ${PKG} <command>${RESET}) or install globally
@@ -553,6 +555,9 @@ switch (cmd) {
     break;
   case "doctor":
     runSibling("doctor.mjs", rest);
+    break;
+  case "hermes":
+    runSibling("hermes.mjs", rest);
     break;
   case "update":
     await update();
