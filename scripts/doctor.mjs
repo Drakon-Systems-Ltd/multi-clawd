@@ -20,7 +20,7 @@
  * Exit code: 0 all good, 1 any ❌.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,6 +138,42 @@ else ok(`installed at ${EXT_DIR}`);
       : undefined;
   if (note) warn(note);
   else if (cliVer && pluginVer) ok(`CLI and plugin both v${cliVer}`);
+
+  // Is the installed plugin behind what npm publishes? Nothing else asks:
+  // `openclaw plugins update --all` compares against the PINNED spec and so
+  // always reports a pinned plugin up to date (found 1 Aug 2026), and doctor
+  // did no registry lookup at all. Cached, short-timeout, and silent when the
+  // registry cannot be reached — an offline box has no finding to report.
+  if (uc && pluginVer && typeof uc.formatRegistryLag === "function") {
+    const cacheFile = join(STATE_DIR, "registry-check.json");
+    const cached = readJson(cacheFile);
+    let latest = uc.registryCacheIsFresh(cached?.checkedAt, Date.now())
+      ? cached?.latest
+      : undefined;
+    if (!latest) {
+      try {
+        latest = execFileSync("npm", ["view", "@drakon-systems/multi-clawd", "version"], {
+          encoding: "utf8",
+          timeout: 8000,
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
+        try {
+          mkdirSync(STATE_DIR, { recursive: true });
+          writeFileSync(
+            cacheFile,
+            JSON.stringify({ latest, checkedAt: Date.now() }, null, 2) + "\n",
+          );
+        } catch {
+          /* cache is an optimisation, never a requirement */
+        }
+      } catch {
+        latest = undefined; // offline / registry down — stay silent
+      }
+    }
+    const lag = uc.formatRegistryLag({ installed: pluginVer, latest });
+    if (lag?.level === "warn") warn(lag.text);
+    else if (lag?.level === "ok") ok(lag.text);
+  }
 }
 if (!entry) bad("no plugins.entries[\"multi-clawd\"] in openclaw.json");
 else if (entry.enabled !== true) bad("plugin entry present but not enabled");

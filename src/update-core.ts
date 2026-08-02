@@ -105,6 +105,60 @@ export function formatCliSkew(opts: {
   }
 }
 
+/**
+ * How long a registry answer is reused before doctor asks npm again. Doctor is
+ * run interactively and must stay fast; the question ("has a newer version
+ * been published?") does not change minute to minute.
+ */
+export const REGISTRY_CHECK_TTL_MS = 6 * 60 * 60 * 1000;
+
+export function registryCacheIsFresh(
+  checkedAt: number | undefined,
+  nowMs: number,
+  ttlMs: number = REGISTRY_CHECK_TTL_MS,
+): boolean {
+  if (typeof checkedAt !== "number") return false;
+  // A cache stamped in the future is a clock change, not a valid answer.
+  return checkedAt <= nowMs && nowMs - checkedAt < ttlMs;
+}
+
+/**
+ * Whether the INSTALLED PLUGIN is behind what npm publishes, and what to say.
+ *
+ * This exists because of a trap found on 1 Aug 2026: our installer pins the
+ * plugin (`plugins install --pin --force`, correctly — OpenClaw's own security
+ * audit raises a HIGH finding for unpinned install specs), and OpenClaw then
+ * resolves registry metadata FOR THE PINNED SPEC. `openclaw plugins update
+ * --all` therefore compares 1.6.0 against 1.6.0, reports "multi-clawd is up to
+ * date (1.6.0)" and returns — while 1.7.1 sat on npm. OpenClaw has an honest
+ * "pinned to X; registry default resolves to Y" message, but it is built
+ * inside the `dryRun` branch, so it never fires on a real update run.
+ *
+ * Net effect: neither command a person actually runs would ever surface a new
+ * version — `plugins update --all` reassures them wrongly, and doctor did no
+ * registry lookup at all. Doctor is the honest place to close that.
+ *
+ * Returns undefined when the registry could not be reached: an unreachable
+ * network is not a finding, and doctor must stay quiet offline.
+ */
+export function formatRegistryLag(opts: {
+  installed: string | undefined;
+  latest: string | undefined;
+  pkg?: string;
+}): { level: "ok" | "warn"; text: string } | undefined {
+  if (!opts.installed || !opts.latest) return undefined;
+  if (compareVersions(opts.installed, opts.latest) >= 0) {
+    return { level: "ok", text: `plugin v${opts.installed} is the latest published version` };
+  }
+  return {
+    level: "warn",
+    text:
+      `plugin v${opts.installed} — npm publishes v${opts.latest}. The install is pinned, so ` +
+      `\`openclaw plugins update --all\` reports it up to date and will not move it. ` +
+      `Fix: multi-clawd update`,
+  };
+}
+
 export function formatUpdateBanner(opts: {
   installed: string | undefined;
   latest: string | undefined;

@@ -7,6 +7,9 @@ import {
   detectCliInstallKind,
   cliUpdateCommand,
   formatCliSkew,
+  formatRegistryLag,
+  registryCacheIsFresh,
+  REGISTRY_CHECK_TTL_MS,
 } from "../src/update-core";
 
 describe("compareVersions", () => {
@@ -135,5 +138,45 @@ describe("CLI/plugin version skew", () => {
     });
     expect(msg).toContain("multi-clawd update");
     expect(msg).not.toContain("npm i -g");
+  });
+});
+
+describe("registry lag (1.7.2)", () => {
+  // The trap this closes: `openclaw plugins update --all` resolves registry
+  // metadata for the PINNED spec, so it compares 1.6.0 against 1.6.0 and
+  // reports "up to date" while a newer version sits on npm.
+  test("behind the registry warns, and names the command that actually works", () => {
+    const lag = formatRegistryLag({ installed: "1.6.0", latest: "1.7.1" });
+    expect(lag?.level).toBe("warn");
+    expect(lag?.text).toContain("1.7.1");
+    expect(lag?.text).toContain("multi-clawd update");
+    // The reason matters as much as the numbers — pinning is why the other
+    // command lies, and a user who does not know that will retry it.
+    expect(lag?.text).toContain("pinned");
+  });
+
+  test("current is a quiet ok, not a warning", () => {
+    expect(formatRegistryLag({ installed: "1.7.2", latest: "1.7.2" })?.level).toBe("ok");
+  });
+
+  test("a local build ahead of npm is not a finding", () => {
+    expect(formatRegistryLag({ installed: "1.8.0", latest: "1.7.2" })?.level).toBe("ok");
+  });
+
+  test("an unreachable registry says nothing at all", () => {
+    expect(formatRegistryLag({ installed: "1.7.2", latest: undefined })).toBeUndefined();
+    expect(formatRegistryLag({ installed: undefined, latest: "1.7.2" })).toBeUndefined();
+  });
+
+  test("cache freshness: within TTL reuses, beyond TTL re-asks", () => {
+    const now = 1_785_000_000_000;
+    expect(registryCacheIsFresh(now - 60_000, now)).toBe(true);
+    expect(registryCacheIsFresh(now - REGISTRY_CHECK_TTL_MS - 1, now)).toBe(false);
+    expect(registryCacheIsFresh(undefined, now)).toBe(false);
+  });
+
+  test("a future-stamped cache is treated as invalid (clock change)", () => {
+    const now = 1_785_000_000_000;
+    expect(registryCacheIsFresh(now + 60_000, now)).toBe(false);
   });
 });

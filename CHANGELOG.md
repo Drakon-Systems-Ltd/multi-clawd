@@ -4,6 +4,46 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.7.2] — 2026-08-02
+
+**Rotating on the signal the provider actually sends.** Proactive rotation was
+built around one number — utilization ≥ threshold — and Anthropic does not
+send that number for the 5-hour session window. Across every observation held
+on two accounts since 21 July it arrives as a bare status and a reset time,
+while the weekly windows carry percentages. So the pool could never pre-empt a
+session limit; it took the hit and rotated afterwards. Three fixes, all
+narrow.
+
+- **A numberless warning on a short (hour-scoped) window now counts as
+  near-limit.** Deliberately not a blanket "warnings rotate" rule: the weekly
+  window warns from ~30% utilization and would flap. A reported number still
+  wins over the status, so a warning at 50% does not rotate, and a warning
+  from a window that has since reset is void — the same passed-reset rule the
+  utilization path already applied.
+
+- **A rejection carrying no reset time is no longer ignored.** The one record
+  that says "this account just refused a turn" fell through every branch when
+  the field it was keyed on was absent. It now binds for an hour and re-probes,
+  matching the model-scoped path. Named period windows only: `unknown:rejected`
+  stays non-binding, because that is where a single-model limit lands (a live
+  Fable-only 429 did exactly this) and exhausting the account on it would
+  strand every other model.
+
+- **`doctor` now checks the registry.** `openclaw plugins update --all` reports
+  a pinned plugin as up to date even when npm publishes a newer version — it
+  resolves metadata for the pinned spec, and OpenClaw's honest "pinned to X;
+  registry resolves to Y" message is built inside its `--dry-run` branch, so a
+  real run never prints it. Nothing a user runs would surface a new version.
+  Doctor now says so, cached for six hours and silent when the registry is
+  unreachable. Documented in the README rather than left as folklore.
+
+- **New wiring test.** Selection was covered only at the helper level —
+  classify, choose, sticky — with nothing testing the wire between a verdict
+  and the account a launch actually runs on. `tests/pool-selection.test.ts`
+  drives `registerPoolBackend` against real state files and asserts on the
+  credential env the child process would receive. Verified by deleting each
+  fix and confirming it fails.
+
 ## [1.7.1] — 2026-07-28
 
 Documentation only — no code change.

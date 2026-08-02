@@ -4,6 +4,9 @@ import {
   choosePoolAccount,
   pickPoolAccountForLaunch,
   summarizeWindowUsage,
+  isShortWindow,
+  isPeriodWindow,
+  MODEL_REJECTED_TTL_MS,
 } from "../src/health";
 import { modelWindowKey, type AccountHealthState } from "../src/shim-core";
 
@@ -388,5 +391,129 @@ describe("summarizeWindowUsage", () => {
       },
     });
     expect(summarizeWindowUsage(s, {}, NOW)).toEqual([]);
+  });
+});
+
+describe("short-window warnings (1.7.2)", () => {
+  // Anthropic ships the 5-hour window as a bare status: every observation held
+  // across both accounts since 21 Jul 2026 carries a status and a reset time
+  // and no utilization. A rule that waits for a percentage never fires on the
+  // session limit, so the warning itself has to count.
+  test("numberless warning on a short window means near_limit", () => {
+    const s = state({
+      five_hour: { status: "allowed_warning", resetsAt: NOW_S + 1800, seenAt: NOW - 1000 },
+    });
+    const h = classifyAccountHealth(s, {}, NOW);
+    expect(h.verdict).toBe("near_limit");
+    expect(h.reason).toContain("five_hour");
+  });
+
+  test("numberless warning on a LONG window does not rotate", () => {
+    // The weekly window warns from ~0.3 utilization — acting on that status
+    // alone would rotate almost permanently.
+    const s = state({
+      seven_day: { status: "allowed_warning", resetsAt: NOW_S + 86_400, seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("when a number IS reported, the number wins over the warning", () => {
+    const s = state({
+      five_hour: {
+        status: "allowed_warning",
+        utilization: 0.5,
+        resetsAt: NOW_S + 1800,
+        seenAt: NOW - 1000,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("a warning whose window has already reset is voided", () => {
+    const s = state({
+      five_hour: { status: "allowed_warning", resetsAt: NOW_S - 60, seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("a reset-less warning counts on freshness alone, and ages out", () => {
+    const fresh = state({ five_hour: { status: "allowed_warning", seenAt: NOW - 1000 } });
+    expect(classifyAccountHealth(fresh, {}, NOW).verdict).toBe("near_limit");
+    const old = state({ five_hour: { status: "allowed_warning", seenAt: NOW - 3_600_000 * 7 } });
+    expect(classifyAccountHealth(old, {}, NOW).verdict).toBe("no_data");
+  });
+
+  test("unknown *_warning statuses count too (tolerant parsing)", () => {
+    const s = state({
+      five_hour: { status: "throttled_warning", resetsAt: NOW_S + 600, seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("near_limit");
+  });
+
+  test("isShortWindow separates hour-scoped keys from day-scoped ones", () => {
+    expect(isShortWindow("five_hour")).toBe(true);
+    expect(isShortWindow("one_hour")).toBe(true);
+    expect(isShortWindow("hourly_burst")).toBe(false);
+    expect(isShortWindow("seven_day")).toBe(false);
+    expect(isShortWindow("seven_day_overage_included")).toBe(false);
+    expect(isShortWindow("unknown")).toBe(false);
+  });
+
+  test("the pool rotates off an account held only by a numberless warning", () => {
+    const hot = classifyAccountHealth(
+      state({ five_hour: { status: "allowed_warning", resetsAt: NOW_S + 1800, seenAt: NOW - 1000 } }),
+      {},
+      NOW,
+    );
+    const spare = classifyAccountHealth(undefined, {}, NOW);
+    expect(
+      choosePoolAccount([
+        { id: "claw1", verdict: hot.verdict },
+        { id: "claw2", verdict: spare.verdict },
+      ]),
+    ).toBe("claw2");
+  });
+});
+
+describe("rejections with no reset time (1.7.2)", () => {
+  // The one record that says "this account just refused a turn" used to fall
+  // through every branch when the reset field was absent.
+  test("a fresh reset-less rejection exhausts for the TTL", () => {
+    const s = state({ five_hour: { status: "rejected", seenAt: NOW - 60_000 } });
+    const h = classifyAccountHealth(s, {}, NOW);
+    expect(h.verdict).toBe("exhausted");
+    expect(h.resumeAt).toBe(NOW - 60_000 + MODEL_REJECTED_TTL_MS);
+  });
+
+  test("it ages out rather than blocking the account forever", () => {
+    const s = state({ five_hour: { status: "rejected", seenAt: NOW - 3_600_000 * 7 } });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("no_data");
+  });
+
+  test("a weekly rejection with no reset binds the same way", () => {
+    const s = state({ seven_day: { status: "rejected", seenAt: NOW - 60_000 } });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
+  });
+});
+
+describe("unknown-window rejections stay non-binding (1.7.2 guard)", () => {
+  // Regression guard for the narrowing that the existing `unknown:rejected`
+  // test forced: reset-less rejections bind only on NAMED period windows.
+  test("a fresh reset-less `unknown` rejection does not exhaust the account", () => {
+    const s = state({ unknown: { status: "rejected", seenAt: NOW - 1000 } });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).not.toBe("exhausted");
+  });
+
+  test("the same record on a named window does exhaust", () => {
+    const s = state({ five_hour: { status: "rejected", seenAt: NOW - 1000 } });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
+  });
+
+  test("isPeriodWindow names the real provider periods only", () => {
+    expect(isPeriodWindow("five_hour")).toBe(true);
+    expect(isPeriodWindow("seven_day")).toBe(true);
+    expect(isPeriodWindow("seven_day_overage_included")).toBe(true);
+    expect(isPeriodWindow("unknown")).toBe(false);
+    expect(isPeriodWindow("")).toBe(false);
   });
 });

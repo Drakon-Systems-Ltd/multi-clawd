@@ -6,9 +6,13 @@
  *   rotate on positive evidence, never on absence of it.
  * - `rejected` with a future reset is `exhausted`; a passed reset un-binds it.
  * - utilization ≥ threshold is `near_limit` — the "nearly maxed out" trigger.
- * - `allowed_warning` alone does NOT rotate: weekly windows warn at low
- *   utilization (observed at 0.3), so status warnings only matter when the
- *   utilization number agrees.
+ * - `allowed_warning` alone does NOT rotate on a LONG window: weekly windows
+ *   warn at low utilization (observed at 0.3), so there the status only
+ *   matters when the utilization number agrees.
+ * - On a SHORT (hour-scoped) window a warning DOES rotate when it arrives with
+ *   no utilization number — see `isShortWindow`. Anthropic ships the 5-hour
+ *   window as a bare status, so waiting for a percentage there means waiting
+ *   for a percentage that never comes.
  * - A fully exhausted pool returns no choice: the hook then stays silent and
  *   OpenClaw's reactive chain drops to the next provider (OpenAI → xAI).
  */
@@ -41,6 +45,53 @@ const DEFAULT_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
 
 const MODEL_WINDOW_PREFIX = "model:";
+
+/**
+ * Hour-scoped windows (`five_hour`) versus day-scoped ones (`seven_day`,
+ * `seven_day_overage_included`). Matched on the key's own unit segment because
+ * the counts are spelled as words, not digits.
+ *
+ * The distinction earns its keep in one place only: whether a bare
+ * `allowed_warning` is worth rotating on. Observed telemetry (both accounts,
+ * every observation held since 21 Jul 2026) shows the 5-hour window arriving
+ * with a status and a reset time and NEVER a utilization number, while the
+ * weekly windows carry a percentage — so a rule that waits for a number can
+ * never fire on the session limit. A warning on an hour-scoped window is also
+ * a genuine cliff (it resets in hours, not days), whereas the weekly window
+ * warns from ~0.3 and would flap.
+ */
+const SHORT_WINDOW_PATTERN = /(^|_)hours?(_|$)/;
+
+export function isShortWindow(window: string): boolean {
+  return SHORT_WINDOW_PATTERN.test(window);
+}
+
+/**
+ * Whether a window key names a real provider period (`five_hour`,
+ * `seven_day`, `seven_day_overage_included`) as opposed to `unknown` — the
+ * catch-all the shim writes when a limit event arrives with no recognisable
+ * rateLimitType.
+ *
+ * The distinction matters for reset-less rejections. A live case: a
+ * Fable-only 429 landed as `unknown:rejected` with no reset stamp. Treating
+ * that as an account-level exhaustion would strand the whole account for a
+ * limit that only applied to one model. A named period window carries no such
+ * ambiguity — it says which account-level window refused.
+ */
+const PERIOD_WINDOW_PATTERN = /(^|_)(minutes?|hours?|days?|weeks?|months?)(_|$)/;
+
+export function isPeriodWindow(window: string): boolean {
+  return PERIOD_WINDOW_PATTERN.test(window);
+}
+
+/**
+ * Tolerant warning test. `status` is CLI-internal and undocumented, so match
+ * the family (`allowed_warning`, and any future `*_warning`) rather than one
+ * exact string — same philosophy as the shim's parsing.
+ */
+export function isWarningStatus(status: string): boolean {
+  return /warning/i.test(status);
+}
 
 /**
  * Trust ceiling for a reset-bearing window (one carrying a future `resetsAt`).
@@ -144,6 +195,24 @@ export function classifyAccountHealth(
         reason: `${window} rejected until ${new Date(resetMs!).toISOString()}`,
       };
     }
+    // A rejection carrying NO reset time used to be ignored entirely — the one
+    // record that says "this account just refused a turn" fell through every
+    // branch because the field we keyed on was absent. Bind it for the same TTL
+    // the model-scoped path uses: long enough to stop hammering a limited
+    // account, short enough to re-probe within the hour. Freshness is already
+    // established above, so this cannot resurrect an ancient rejection.
+    //
+    // Named period windows only. `unknown:rejected` stays non-binding: it is
+    // where a limit event with no recognisable type lands, and a real one of
+    // those was a Fable-only 429 — exhausting the account on it would strand
+    // every other model behind a one-model limit.
+    if (w.status === "rejected" && resetMs === undefined && isPeriodWindow(window)) {
+      return {
+        verdict: "exhausted",
+        resumeAt: w.seenAt + MODEL_REJECTED_TTL_MS,
+        reason: `${window} rejected ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; TTL block)`,
+      };
+    }
     if (
       worst.verdict === "ok" &&
       typeof w.utilization === "number" &&
@@ -156,6 +225,25 @@ export function classifyAccountHealth(
       worst = {
         verdict: "near_limit",
         reason: `${window} utilization ${w.utilization} >= ${threshold}`,
+      };
+    }
+    // Numberless warning on a short window: the only signal the 5-hour session
+    // limit ever gives before it bites. Deliberately narrow —
+    // - short windows only: the weekly warns from ~0.3 and would flap;
+    // - no utilization: when a number IS reported, trust the number, so a
+    //   warning at 50% does not rotate just because it is a warning;
+    // - same passed-reset void as the utilization branch above: a warning from
+    //   a window that has since reset describes the previous cycle.
+    if (
+      worst.verdict === "ok" &&
+      typeof w.utilization !== "number" &&
+      isShortWindow(window) &&
+      isWarningStatus(w.status) &&
+      (resetBearing || resetMs === undefined)
+    ) {
+      worst = {
+        verdict: "near_limit",
+        reason: `${window} reported ${w.status} with no utilization — short window, treated as near-limit`,
       };
     }
   }

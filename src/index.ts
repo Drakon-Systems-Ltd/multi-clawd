@@ -833,7 +833,7 @@ function writeStickyEntry(
  * fresh-session retry recovers the turn. Rotation only happens at limit
  * boundaries, so this is rare by construction.
  */
-function registerPoolBackend(
+export function registerPoolBackend(
   api: Parameters<Parameters<typeof definePluginEntry>[0]["register"]>[0],
   pool: PoolConfig | undefined,
   accounts: AccountConfig[],

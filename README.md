@@ -182,6 +182,21 @@ restart, and finishes with a doctor health check.
 > plugin*, which is a confusing way to be told nothing is wrong. `multi-clawd
 > version` shows both halves, and since v1.6.0 says plainly whether the pair
 > is a problem.
+>
+> ### ⚠️ `openclaw plugins update --all` cannot move this plugin
+>
+> It will tell you the plugin is up to date when it is not. We install with
+> `--pin` (OpenClaw's own security audit raises a HIGH finding for unpinned
+> install specs, so pinning is the right side of that trade), and OpenClaw
+> resolves registry metadata *for the pinned spec* — comparing 1.6.0 against
+> 1.6.0 and returning "up to date" while a newer version sits on npm. The
+> honest "pinned to X; registry default resolves to Y" message exists in
+> OpenClaw but is built inside its `--dry-run` branch, so a real update run
+> never prints it.
+>
+> **Use `multi-clawd update`.** Since v1.7.2 `doctor` also checks the registry
+> itself (cached, and silent when offline), so a lagging plugin is reported
+> rather than left to a command that reassures you wrongly.
 
 Prefer the raw form?
 
@@ -219,7 +234,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v1.7.1/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v1.7.2/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -405,10 +420,24 @@ How it decides, per launch (all data from each account's live
 | Account state | Effect |
 |---|---|
 | `rejected` + reset in the future | skipped until `resetsAt` passes |
+| `rejected` with no reset, on a named window | skipped for an hour, then re-probed (v1.7.2) |
+| `rejected` on the `unknown` window | still used — that is where a single-model limit lands, and it must not strand the account |
 | any window utilization ≥ threshold | skipped (nearly maxed — the point of the pool) |
-| `allowed_warning` alone | still used — weekly windows warn early; only the utilization number rotates |
+| `allowed_warning` with a number below threshold | still used — trust the number |
+| `allowed_warning` and **no** number, on a short window | skipped (v1.7.2) — see below |
+| `allowed_warning` and no number, on the weekly window | still used — weekly warns from ~30% and would flap |
 | no data / stale data | used — never rotate on missing evidence |
 | whole pool exhausted | home account anyway → real limit error → your chain drops provider |
+
+**Why the short-window rule exists (v1.7.2).** The threshold rule needs a
+utilization number, and Anthropic does not send one for the 5-hour session
+window — across every observation we hold from two accounts it arrives as a
+bare status plus a reset time, while the weekly windows carry percentages. A
+rule that waits for a number therefore could never pre-empt the session
+limit: the pool would take the hit and rotate afterwards. So on hour-scoped
+windows the warning counts on its own. It stays narrow deliberately — a
+reported number always wins over the status, and a warning from a window that
+has since reset is void, exactly like a stale percentage.
 
 Notes:
 
