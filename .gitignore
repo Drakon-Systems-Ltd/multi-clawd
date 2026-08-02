@@ -40,3 +40,8 @@ npm-debug.log*
 
 # Plugin Inspector output
 reports/
+
+# Python bytecode from the bundled Hermes bridge — never commit, never publish
+# (a .pyc embeds the source, defeating the no-comments-in-dist rule)
+__pycache__/
+*.py[cod]
