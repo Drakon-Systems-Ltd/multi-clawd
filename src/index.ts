@@ -795,7 +795,9 @@ function readHealthState(accountId: string): AccountHealthState | undefined {
  * credential SOURCES (keychain item present, token file well-formed, ref
  * resolves), and the whole point of #8 is that a present credential can still
  * be a rejected session. Clearing on presence would un-bench the dead account
- * on the next probe tick and restore the bug.
+ * on the next probe tick and restore the bug. A LIVE probe (`multi-clawd
+ * doctor --probe`) needs no wiring here: it spends a real turn, which runs
+ * through the shim, which clears on success like any other successful turn.
  *
  * Returns whether anything was cleared. Best-effort: a failure to write is
  * reported by the return value, never thrown — no state file is worth a turn.

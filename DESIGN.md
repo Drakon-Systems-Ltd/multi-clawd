@@ -433,6 +433,49 @@ hit the 429 itself still escapes to the chain (OpenClaw offers no in-turn
 retry of the same chain entry) — one degraded turn per limit event is the
 accepted cost; every subsequent turn account-flips.
 
+## Credential health: runtime auth failures feed selection
+
+Quota was the pool's entire vocabulary, so it could only answer "how much of
+this account is left" — never "can this account authenticate at all". When the
+Claude CLI rejects an account's OAuth session (HTTP 410 `session_expired`),
+every quota window still reads `allowed`, selection sees nothing wrong, and the
+same dead login wins every `clawd/*` fallback rung of a run in seconds. The
+outer chain eventually leaves the pool for another provider, so agents survive
+— but cross-account failover, the entire point of the pool, never happens.
+
+The shape mirrors the v0.3.6 fix (an error IS telemetry), on a second
+dimension:
+
+- **Auth failures are a distinct event class.** The shim recognises definitive
+  CLI auth errors on genuine error records — `parseAuthFailure`, matching
+  auth-specific wording only. A bare "session expired" deliberately does NOT
+  match: a rotation that resumes a CLI session living in the previous account's
+  config dir fails that way, and benching the account just rotated *to* would
+  be exactly backwards.
+- **Credential health persists beside the windows**, in the same per-account
+  state file, with the same newer-`seenAt`-wins merge. Clearing writes an
+  explicit `ok` record rather than deleting the field — a deletion would lose
+  the read-merge-write race against the stale `failed` still on disk and
+  resurrect the exclusion it was meant to end.
+- **Classification checks credentials before quota.** A rejected login cannot
+  serve any model at any utilization, so `credential_failed` outranks every
+  window rule. It is also unusable in a stronger sense than `exhausted`: an
+  exhausted account still authenticates, so it can serve a degraded tier or
+  produce a real quota error; a rejected one can do neither. When nothing is
+  usable, selection therefore prefers a member that can at least authenticate.
+- **Bounded at 15 minutes.** Long enough that one dead login cannot consume a
+  run's fallback rungs, short enough that a login fixed out-of-band re-probes
+  on roughly the login-probe cadence rather than staying benched. Explicit
+  clears end it immediately: a successful turn through the shim, or
+  `multi-clawd login <account>`. The periodic login probe is deliberately NOT
+  a clear — it checks credential *sources*, and a present credential being a
+  rejected session is the whole failure mode.
+- **All members broken is a hard error, once.** There is no account to rotate
+  to and no tier to degrade into, so the pool fails the launch with a single
+  error naming re-authentication instead of relaunching the same rejected
+  session per rung. Quota exhaustion and credential failure stay separate
+  alerts throughout, because the operator's action differs: wait vs log back in.
+
 ## Config (user-facing)
 
 ```jsonc
