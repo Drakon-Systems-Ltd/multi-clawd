@@ -18,7 +18,12 @@
  */
 import { modelWindowKey, type AccountHealthState } from "./shim-core.js";
 
-export type HealthVerdict = "ok" | "near_limit" | "exhausted" | "no_data";
+export type HealthVerdict =
+  | "ok"
+  | "near_limit"
+  | "exhausted"
+  | "credential_failed"
+  | "no_data";
 
 export interface AccountHealth {
   verdict: HealthVerdict;
@@ -43,6 +48,20 @@ const DEFAULT_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
  * stop hammering a limited model, short enough to re-probe within the hour.
  */
 export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * How long a runtime credential failure (session_expired / invalid login,
+ * captured reactively by the shim — see parseAuthFailure) keeps an account out
+ * of pool selection. The bound matters in both directions: long enough that a
+ * single dead login cannot consume every clawd/* fallback rung of a run (the
+ * #8 trace burned four rungs in seconds), short enough that a login fixed
+ * OUT-OF-BAND (`claude auth login` run directly, a token rotated behind a
+ * secret ref) is re-probed within the same cadence as the 15-minute login
+ * probe instead of staying benched indefinitely. Explicit clears — a
+ * successful launch through the shim, or `multi-clawd login <id>` — end the
+ * exclusion immediately; this TTL is only the backstop.
+ */
+export const CREDENTIAL_FAILED_TTL_MS = 15 * 60 * 1000;
 
 const MODEL_WINDOW_PREFIX = "model:";
 
