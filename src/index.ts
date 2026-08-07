@@ -57,9 +57,14 @@ import {
 import { decideDegradation, matchesPin } from "./degrade.js";
 import { resolveExecMode, permissionModeArgs } from "./exec-policy.js";
 import { resolveBaseModelIds } from "./catalog-source.js";
-import { classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
+import { allCredentialFailed, classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
-import type { AccountHealthState } from "./shim-core.js";
+import {
+  clearCredentialFailure,
+  mergeHealthStates,
+  parseStoredState,
+  type AccountHealthState,
+} from "./shim-core.js";
 import {
   createTokenRefResolver,
   isSecretRefShape,
@@ -779,6 +784,46 @@ function readHealthState(accountId: string): AccountHealthState | undefined {
   }
 }
 
+/**
+ * End a recorded credential failure for one account (#8) — the explicit
+ * re-authentication path (`multi-clawd login <id>`) and any surface that has
+ * PROVEN the login works again. Exported so those out-of-band flows can
+ * un-bench an account immediately instead of waiting out
+ * CREDENTIAL_FAILED_TTL_MS.
+ *
+ * Deliberately NOT wired to the periodic login probe: that probe checks
+ * credential SOURCES (keychain item present, token file well-formed, ref
+ * resolves), and the whole point of #8 is that a present credential can still
+ * be a rejected session. Clearing on presence would un-bench the dead account
+ * on the next probe tick and restore the bug.
+ *
+ * Returns whether anything was cleared. Best-effort: a failure to write is
+ * reported by the return value, never thrown — no state file is worth a turn.
+ */
+export function clearAccountCredentialFailure(accountId: string): boolean {
+  const file = healthStateFile(accountId);
+  let state: AccountHealthState;
+  try {
+    state = parseStoredState(readFileSync(file, "utf8")) ?? {
+      accountId,
+      windows: {},
+    };
+  } catch {
+    return false; // nothing recorded → nothing to clear
+  }
+  if (state.credential?.status !== "failed") return false;
+  const cleared = mergeHealthStates(state, clearCredentialFailure(state, Date.now()), Date.now());
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(cleared, null, 2), { mode: 0o600 });
+    renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function readStickyEntry(file: string): StickyEntry | undefined {
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as StickyEntry;
@@ -891,6 +936,25 @@ export function registerPoolBackend(
       id: a.id,
       health: classifyAccountHealth(readHealthState(a.id), options, now, requestedModel),
     }));
+    // Every member's login is known-broken (#8): a dead native account used to
+    // win all four clawd/* fallback rungs of a run because quota still said
+    // `allowed`. There is no account to rotate to and no tier to degrade into
+    // — an auth failure is not a quota failure — so fail ONCE, loudly, naming
+    // the fix, instead of relaunching the same rejected session per rung.
+    if (allCredentialFailed(verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })))) {
+      const detail = verdicts
+        .map((v) => `${v.id} (${v.health.reason ?? "credential rejected"})`)
+        .join("; ");
+      const text =
+        `pool ${poolId}: every account's login is rejected by the Claude CLI — ` +
+        `re-authenticate with \`multi-clawd login <account>\`. ${detail}`;
+      logger.error(`[multi-clawd] ${text}`);
+      raiseAlert({ key: `pool-credentials:${poolId}`, severity: "error", text });
+      // Sticky state describes quota rotation; a credential outage must not
+      // leave a stale pin behind for whichever account recovers first.
+      writeStickyEntry(stickyFile, undefined, logger);
+      throw new Error(`[multi-clawd] ${text}`);
+    }
     const previousSticky = readStickyEntry(stickyFile);
     const decision = decideStickySelection({
       verdicts: verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })),
@@ -909,6 +973,9 @@ export function registerPoolBackend(
       logger.info(`[multi-clawd] ${line}`);
       raiseAlert({ key: `rotation:${poolId}`, severity: "info", text: line });
     }
+    // Quota exhaustion and credential failure are different operator problems
+    // with different fixes (wait / re-authenticate), so they stay separate
+    // alerts with separate keys — never collapsed into one "pool is unhappy".
     if (verdicts.every((v) => v.health.verdict === "exhausted")) {
       raiseAlert({
         key: `pool-exhausted:${poolId}:${requestedModel}`,
@@ -916,6 +983,25 @@ export function registerPoolBackend(
         text: `pool ${poolId}: every account is exhausted for ${requestedModel} — turns are degrading or falling through the chain`,
       });
     }
+    // A member benched for a rejected login is invisible otherwise: the pool
+    // quietly succeeds on the remaining account until that one runs out too.
+    for (const v of verdicts) {
+      const key = `credential:${poolId}:${v.id}`;
+      if (v.health.verdict === "credential_failed") {
+        raiseAlert({
+          key,
+          severity: "error",
+          text: `pool ${poolId}: account "${v.id}" is excluded — ${
+            v.health.reason ?? "its login was rejected by the Claude CLI"
+          }. Fix with \`multi-clawd login ${v.id}\`.`,
+        });
+      } else {
+        alertState = clearAlert(alertState, key);
+      }
+    }
+    // Reaching here at all means at least one login still works, so the
+    // pool-wide auth outage (if one was raised) is over.
+    alertState = clearAlert(alertState, `pool-credentials:${poolId}`);
     writeStickyEntry(stickyFile, decision.sticky, logger);
     const env = await buildAccountEnv(chosen);
     // Tier degradation: only when the whole pool is exhausted and the launch

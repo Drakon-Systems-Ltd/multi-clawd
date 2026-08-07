@@ -461,10 +461,11 @@ async function login() {
   const { readFileSync: rf, existsSync, mkdirSync, chmodSync, statSync, mkdtempSync, rmSync } =
     await import("node:fs");
   const { homedir, tmpdir } = await import("node:os");
-  let lp, ec;
+  let lp, ec, idx;
   try {
     lp = await import(resolve(__dirname, "..", "dist", "login-plan.js"));
     ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
+    idx = await import(resolve(__dirname, "..", "dist", "index.js"));
   } catch {
     console.error("login: built dist/ is missing — reinstall the package.");
     process.exit(1);
@@ -512,6 +513,17 @@ async function login() {
   if (r.status !== 0) {
     console.error(`\n  ❌ ${plan.command.join(" ")} exited with ${r.status ?? "an error"}.`);
     process.exit(1);
+  }
+  // Explicit re-authentication ends any recorded runtime credential failure
+  // immediately (#8) — without this the freshly re-authed account stays
+  // benched until the 15-minute TTL expires, which reads to the operator as
+  // "logging back in did nothing".
+  try {
+    if (idx.clearAccountCredentialFailure?.(acc.id)) {
+      console.log(`\n  ↻ cleared ${acc.id}'s recorded login failure — the pool can use it again.`);
+    }
+  } catch {
+    /* clearing is a courtesy; never fail a login over it */
   }
   if (plan.verify === "auth-status") {
     try {
