@@ -35,9 +35,20 @@ process.stdin.on("end", () => {
   process.stdout.write(lines[1] + "\n");
   const modelIdx = process.argv.indexOf("--model");
   const emitLimit = process.env.FAKE_CLAUDE_EMIT_LIMIT === "1";
+  // The live #8 shape: HTTP 410 session_expired as the CLI reports it.
+  const emitAuthFail = process.env.FAKE_CLAUDE_EMIT_AUTH_FAIL === "1";
   process.stdout.write(
     JSON.stringify(
-      emitLimit
+      emitAuthFail
+        ? {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            result: "Failed to authenticate: OAuth session expired and could not be refreshed",
+            received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
+            session_id: "s1",
+          }
+        : emitLimit
         ? {
             type: "result",
             subtype: "error_during_execution",

@@ -14,6 +14,7 @@ function runShim(opts: {
   rateLimitInfo?: Record<string, unknown>;
   modelOverride?: string;
   args?: string[];
+  authFail?: boolean;
 }) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -22,6 +23,7 @@ function runShim(opts: {
     MULTI_CLAWD_ACCOUNT_ID: "claw2",
     FAKE_CLAUDE_EXIT: opts.exit ?? "0",
   };
+  if (opts.authFail) env.FAKE_CLAUDE_EMIT_AUTH_FAIL = "1";
   if (opts.rateLimitInfo) {
     env.FAKE_CLAUDE_RATE_LIMIT_INFO = JSON.stringify(opts.rateLimitInfo);
   }
@@ -148,6 +150,79 @@ describe("shim reactive model-limit capture (v0.3.6)", () => {
     const state = JSON.parse(readFileSync(stateFile, "utf8"));
     expect(state.windows["model:claude-opus-4-8"]).toMatchObject({ status: "rejected" });
     expect(state.windows["model:claude-fable-5"]).toBeUndefined();
+  });
+});
+
+describe("shim runtime auth-failure capture (#8)", () => {
+  test("a session_expired turn records a credential failure without touching the stream", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    const res = runShim({ stateFile, authFail: true, exit: "1" });
+
+    expect(res.status).toBe(1); // exit-code passthrough unchanged
+    expect(res.stdout).toContain("OAuth session expired"); // stream untouched
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.credential).toMatchObject({ status: "failed" });
+    expect(state.credential.reason).toContain("OAuth session expired");
+    expect(typeof state.credential.seenAt).toBe("number");
+    expect(res.stderr).toContain("auth failure recorded");
+  });
+
+  test("the quota windows from the same turn are still captured alongside it", () => {
+    // The two dimensions are independent: an auth failure must not cost us the
+    // rate-limit telemetry the turn also carried.
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    runShim({ stateFile, authFail: true, exit: "1" });
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows.five_hour).toMatchObject({ status: "allowed_warning" });
+    expect(state.credential.status).toBe("failed");
+  });
+
+  test("a later successful turn clears the recorded failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    runShim({ stateFile, authFail: true, exit: "1" });
+    expect(JSON.parse(readFileSync(stateFile, "utf8")).credential.status).toBe("failed");
+
+    const res = runShim({ stateFile });
+    expect(res.status).toBe(0);
+    expect(JSON.parse(readFileSync(stateFile, "utf8")).credential.status).toBe("ok");
+    expect(res.stderr).toContain("credential exclusion cleared");
+  });
+
+  test("a normal turn on a healthy account writes no credential record at all", () => {
+    // No failure recorded → nothing to clear → no needless write, and no
+    // "ok" record inventing evidence the pool never asked for.
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw2.json");
+    runShim({ stateFile });
+    expect(JSON.parse(readFileSync(stateFile, "utf8")).credential).toBeUndefined();
+  });
+
+  test("a quota-limit turn is not recorded as a credential failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    const res = spawnSync(
+      process.execPath,
+      [SHIM, "-p", "--model", "claude-fable-5", "--output-format", "stream-json"],
+      {
+        input: "x\n",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
+          MULTI_CLAWD_STATE_FILE: stateFile,
+          MULTI_CLAWD_ACCOUNT_ID: "claw1",
+          FAKE_CLAUDE_EXIT: "1",
+          FAKE_CLAUDE_EMIT_LIMIT: "1",
+        },
+      },
+    );
+    expect(res.status).toBe(1);
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows["model:claude-fable-5"]).toMatchObject({ status: "rejected" });
+    expect(state.credential).toBeUndefined(); // quota ≠ credentials
   });
 });
 
