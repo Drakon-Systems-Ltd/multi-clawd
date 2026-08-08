@@ -279,6 +279,37 @@ is abandoned immediately. Sticky state persists at
   clears the alert from either degraded or broken. The tracker
   (`createRefProbeTracker`) is pure and tested; gate-2 redaction is preserved
   end-to-end (only error *class* names ever reach a log line).
+- **Probe verdicts reach selection — but only the credential ones.** A broken
+  verdict now names its evidence (`RefProbeStatus.cause`), and the two kinds
+  are acted on differently, because conflating them is how a probe can make an
+  outage worse:
+  - `credential` (the resolver ran and came back empty) is positive evidence
+    against that ACCOUNT. It writes the same credential-failure record the
+    shim writes reactively, so the next pooled launch excludes the account.
+    Written on every broken observation, not only the transition into it: the
+    record is TTL-bounded (15 min) and the probe runs on the same cadence, so
+    a transition-only write would let the exclusion lapse under a login that
+    is still dead. Before this, a probe could declare an account dead and
+    selection would never hear about it — the verdict was inert, and turns
+    kept launching on the condemned account.
+  - `provider` (the resolver never answered) is evidence about the HOST, and
+    is deliberately **selection-neutral**: it alerts, naming connectivity, and
+    changes nothing else. A host-level network fault fails every account's
+    probe at once, so benching on it would rotate away from a healthy login —
+    or, with every member equally unreachable, refuse the launch outright with
+    an auth error naming a re-authentication that would fix nothing.
+  - A probe `ok` still clears nothing. A credential *source* that resolves is
+    not proof the session is accepted; clearing on presence would un-bench a
+    dead login on the next tick.
+  - The source check (file shape / keychain / credentials.json) stays
+    alert-only for the same reason: it reports on the source, and a present
+    credential being a rejected session is the whole failure class.
+- **Probe history survives `register()`.** The failure streak and last-status
+  maps are per-account module state, not per-registration closures. `register()`
+  re-runs on every config rebuild, and when those maps were rebuilt with it, a
+  rebuild landing mid-outage reset the streak to zero — a resolver failing
+  continuously never reached its 3-consecutive threshold. History is pruned
+  only when an account leaves the config.
 - Pool rotations, return-home events, and whole-pool exhaustion raise alerts
   too; the out-of-process watchdog appends to
   `state/multi-clawd/alerts-spool.jsonl`, ingested at each heartbeat.
