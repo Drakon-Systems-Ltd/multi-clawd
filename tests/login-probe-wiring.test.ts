@@ -1,9 +1,20 @@
 /**
  * Wiring test for the login-health probe (#8, second production case).
  *
- * A probe verdict is only worth as much as the history behind it, and that
- * history used to be thrown away by an unrelated event — every register()
- * pass. These drive real probe passes across a re-registration.
+ * The probe already decided, correctly, that an account's login was dead — and
+ * then did nothing with it but log. Selection read quota files only, so the
+ * verdict was inert: five hours of turns kept launching on the account the
+ * probe had already condemned.
+ *
+ * The same case also proved the opposite hazard. Its real cause was a host-wide
+ * network outage, so EVERY probe failed at once; a fix that let any probe
+ * failure bench an account would have rotated away from a healthy login and
+ * fixed nothing. So these tests pin both directions: credential evidence must
+ * reach selection, host evidence must not.
+ *
+ * Driven through the real wire — real state files, real prepareExecution —
+ * for the same reason pool-selection.test.ts is: the bug was never in a
+ * classifier, it was in what selection was allowed to see.
  */
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -114,6 +125,81 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(home.dir, { recursive: true, force: true });
   vi.restoreAllMocks();
+});
+
+describe("probe verdicts reach pool selection (#8 case 2, gap a)", () => {
+  test("a credential-broken probe takes the account out of the pool", async () => {
+    // Control: with quota identical on both, the launch stays home on claw1.
+    expect(await chosenAccount()).toBe("claw1");
+
+    await runLoginHealthProbe([ACCOUNTS[0]], logs().logger, {
+      resolver: resolverThat({ failure: "empty_result" }),
+      nowMs: Date.now(),
+    });
+
+    expect(await chosenAccount()).toBe("claw2");
+  });
+
+  test("the exclusion is refreshed while the probe keeps finding it broken", async () => {
+    // The record is TTL-bounded (15m) and the probe runs every 15m. Writing it
+    // only on the broken TRANSITION would let the exclusion lapse under a
+    // login that is still dead, and the account would come back mid-outage.
+    const start = Date.now();
+    const { logger } = logs();
+    await runLoginHealthProbe([ACCOUNTS[0]], logger, {
+      resolver: resolverThat({ failure: "empty_result" }),
+      nowMs: start,
+    });
+    const first = storedCredential("claw1")?.seenAt;
+    await runLoginHealthProbe([ACCOUNTS[0]], logger, {
+      resolver: resolverThat({ failure: "empty_result" }),
+      nowMs: start + 15 * MIN,
+    });
+    const second = storedCredential("claw1")?.seenAt;
+    expect(second).toBeGreaterThan(first!);
+  });
+
+  test("a healthy probe writes no credential record at all", async () => {
+    // Presence of a credential is not proof the session works — clearing on a
+    // probe success would un-bench a dead login on the next tick and restore
+    // the original bug. The probe may only ever bench, never absolve.
+    await runLoginHealthProbe([ACCOUNTS[0]], logs().logger, {
+      resolver: resolverThat({ value: "sk-ant-oat01-x" }),
+      nowMs: Date.now(),
+    });
+    expect(storedCredential("claw1")).toBeUndefined();
+    expect(await chosenAccount()).toBe("claw1");
+  });
+});
+
+describe("a host outage is not a broken account (#8 case 2, gap c)", () => {
+  /** Drive one account's tracker to a matured provider-error streak. */
+  async function outage(logger: ReturnType<typeof logs>["logger"], start: number): Promise<void> {
+    const resolver = resolverThat({ failure: "provider_error" });
+    for (const at of [start, start + 5 * MIN, start + 11 * MIN]) {
+      await runLoginHealthProbe([ACCOUNTS[0]], logger, { resolver, nowMs: at });
+    }
+  }
+
+  test("a sustained resolver outage never benches the account", async () => {
+    const { logger } = logs();
+    await outage(logger, Date.now());
+    expect(storedCredential("claw1")).toBeUndefined();
+    expect(await chosenAccount()).toBe("claw1");
+  });
+
+  test("it still alerts — and says host, not login", async () => {
+    // The operator wording is the fix's whole point of contact with a human at
+    // 3am: "login looks dead" sends them to re-authenticate an account that was
+    // never broken. This must name the resolver and say selection is unchanged.
+    const { out, logger } = logs();
+    await outage(logger, Date.now());
+    const alert = out.error.join("\n");
+    expect(alert).toContain("claw1");
+    expect(alert).toMatch(/resolver|network|host/i);
+    expect(alert).not.toMatch(/login looks dead/i);
+    expect(alert).toMatch(/selection is unchanged/i);
+  });
 });
 
 describe("probe state survives re-registration (#8 case 2, gap b)", () => {

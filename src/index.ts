@@ -63,6 +63,7 @@ import {
   clearCredentialFailure,
   mergeHealthStates,
   parseStoredState,
+  recordCredentialFailure,
   type AccountHealthState,
 } from "./shim-core.js";
 import {
@@ -276,6 +277,46 @@ const refProbeTrackers = new Map<string, RefProbeTracker>();
 const lastProbeStatus = new Map<string, string>();
 
 /**
+ * Record a probe-observed credential failure so the NEXT pooled launch excludes
+ * this account (#8 case 2, gap a). The probe used to log and alert and stop
+ * there: selection read quota files only, so a login the probe had already
+ * declared dead kept winning every rung for hours.
+ *
+ * Written on EVERY credential-broken observation, not just the transition into
+ * it: the record is TTL-bounded (CREDENTIAL_FAILED_TTL_MS, 15m) and the probe
+ * runs on the same 15m cadence, so a transition-only write would let the
+ * exclusion lapse under a login that is still dead.
+ *
+ * Best-effort, like every other health write: no state file is worth a turn.
+ */
+function recordAccountCredentialFailure(
+  accountId: string,
+  reason: string,
+  nowMs: number,
+): void {
+  const file = healthStateFile(accountId);
+  let state: AccountHealthState;
+  try {
+    state = parseStoredState(readFileSync(file, "utf8")) ?? { accountId, windows: {} };
+  } catch {
+    state = { accountId, windows: {} };
+  }
+  const next = mergeHealthStates(
+    state,
+    recordCredentialFailure(state, reason, nowMs),
+    nowMs,
+  );
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch {
+    // A health write that fails must never break the probe loop.
+  }
+}
+
+/**
  * One probe pass over the given accounts. Exported (and dependency-injected)
  * so the wiring between a verdict and account selection is testable without
  * waiting out a 15-minute timer.
@@ -295,6 +336,9 @@ export async function runLoginHealthProbe(
   for (const account of accounts) {
     let status: string;
     let reason: string | undefined;
+    // Which evidence broke it — only `credential` may move selection. See
+    // RefProbeStatus.cause; the sync source check leaves this unset.
+    let cause: "credential" | "provider" | undefined;
     if (isSecretRefShape(account.oauthTokenRef) && !account.oauthTokenFile && !account.native) {
       let tracker = refProbeTrackers.get(account.id);
       if (!tracker) {
@@ -309,6 +353,7 @@ export async function runLoginHealthProbe(
       const outcome = tracker.observe(result, now);
       status = outcome.status;
       reason = outcome.reason;
+      cause = outcome.cause;
     } else {
       const check = checkAccountCredential(account, io);
       status = check.status;
@@ -316,7 +361,36 @@ export async function runLoginHealthProbe(
     }
     const previous = lastProbeStatus.get(account.id);
     lastProbeStatus.set(account.id, status);
-    if (status === "broken" && previous !== "broken") {
+    if (status === "broken" && cause === "credential") {
+      // Positive evidence against this account: the resolver ran and the
+      // credential itself is wrong. Bench it.
+      recordAccountCredentialFailure(account.id, reason ?? "login probe found no credential", now);
+      if (previous !== "broken") {
+        const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — excluded from pool selection until it is fixed`;
+        logger.error(`[multi-clawd] ${text}`);
+        raiseAlert({ key: `login:${account.id}`, severity: "error", text });
+      }
+    } else if (status === "broken" && cause === "provider") {
+      // Evidence about the HOST, not the account (#8 case 2, gap c). The 8 Aug
+      // outage failed every account's resolver at once: benching on this would
+      // have rotated away from a healthy login, or — with every member equally
+      // "broken" — refused the launch outright with an auth error naming a
+      // re-authentication that would have fixed nothing. Alert, and leave
+      // selection alone; the network is the thing to fix.
+      if (previous !== "broken") {
+        const text =
+          `account "${account.id}" credential resolver is unreachable (${reason ?? "unknown"}) — ` +
+          `this looks like a host or network problem rather than a broken login, so account ` +
+          `selection is unchanged. Check connectivity to the secret provider.`;
+        logger.error(`[multi-clawd] ${text}`);
+        raiseAlert({ key: `login-resolver:${account.id}`, severity: "error", text });
+      }
+    } else if (status === "broken" && previous !== "broken") {
+      // Source check (file shape / keychain / credentials.json). Operator-
+      // visible, but selection-neutral: it reports on the credential SOURCE,
+      // and #8 is precisely the case where a present source is still a rejected
+      // session. Only the reactive in-stream auth failure and a resolver that
+      // came back empty are treated as proof against the account.
       const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — turns on it will fail until fixed`;
       logger.error(`[multi-clawd] ${text}`);
       raiseAlert({ key: `login:${account.id}`, severity: "error", text });
@@ -326,6 +400,12 @@ export async function runLoginHealthProbe(
     } else if (status === "ok" && (previous === "broken" || previous === "degraded")) {
       logger.info(`[multi-clawd] account "${account.id}" login recovered`);
       alertState = clearAlert(alertState, `login:${account.id}`);
+      alertState = clearAlert(alertState, `login-resolver:${account.id}`);
+      // NOT cleared here: any credential record this account carries. A probe
+      // "ok" means the credential SOURCE resolves, which is not proof the
+      // session is accepted — clearing on presence would un-bench a dead login
+      // on the next tick and restore #8. The TTL, a successful turn through the
+      // shim, or `multi-clawd login <id>` end the exclusion.
     }
   }
 }
