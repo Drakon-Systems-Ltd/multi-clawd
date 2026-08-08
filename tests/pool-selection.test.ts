@@ -27,20 +27,33 @@ const { registerPoolBackend, healthStateFile } = await import("../src/index.js")
 
 const NOW_S = () => Math.floor(Date.now() / 1000);
 
-function writeState(accountId: string, windows: Record<string, unknown>): void {
+function writeState(
+  accountId: string,
+  windows: Record<string, unknown>,
+  credential?: Record<string, unknown>,
+): void {
   const file = healthStateFile(accountId);
   mkdirSync(join(file, ".."), { recursive: true });
-  writeFileSync(file, JSON.stringify({ accountId, updatedAt: Date.now(), windows }));
+  writeFileSync(
+    file,
+    JSON.stringify({ accountId, updatedAt: Date.now(), windows, credential }),
+  );
 }
 
 interface Registered {
   prepare: (ctx: Record<string, unknown>) => Promise<{ env: Record<string, string> }>;
+  logs: { info: string[]; warn: string[]; error: string[] };
 }
 
-function registerPool(): Registered {
+function registerPool(poolOverrides: Record<string, unknown> = {}): Registered {
   let backend: { id?: string; prepareExecution?: unknown } | undefined;
+  const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] };
   const api = {
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    logger: {
+      info: (m: string) => logs.info.push(m),
+      warn: (m: string) => logs.warn.push(m),
+      error: (m: string) => logs.error.push(m),
+    },
     registerCliBackend: (b: { id?: string; prepareExecution?: unknown }) => {
       if (b.id === "clawd" || b.prepareExecution) backend = b;
     },
@@ -48,7 +61,7 @@ function registerPool(): Registered {
   } as never;
   registerPoolBackend(
     api,
-    { id: "clawd", accounts: ["claw1", "claw2"] },
+    { id: "clawd", accounts: ["claw1", "claw2"], ...poolOverrides },
     [
       { id: "claw1", configDir: "/tmp/claw1-login" },
       { id: "claw2", configDir: "/tmp/claw2-login" },
@@ -56,15 +69,27 @@ function registerPool(): Registered {
     new Set(["claw1", "claw2"]),
   );
   if (!backend?.prepareExecution) throw new Error("pool backend did not register");
-  return { prepare: backend.prepareExecution as Registered["prepare"] };
+  return { prepare: backend.prepareExecution as Registered["prepare"], logs };
 }
 
 /** The account a launch would actually run on, read off the prepared env. */
-async function chosenAccount(): Promise<string> {
-  const { prepare } = registerPool();
-  const { env } = await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
+async function chosenAccount(
+  modelId = "clawd/claude-opus-5",
+  poolOverrides: Record<string, unknown> = {},
+): Promise<string> {
+  const { prepare } = registerPool(poolOverrides);
+  const { env } = await prepare({ modelId, workspaceDir: "/tmp/ws" });
   return env.MULTI_CLAWD_ACCOUNT_ID ?? env.CLAUDE_CONFIG_DIR ?? "(none)";
 }
+
+/** The exact quota shape from #8: both accounts report five_hour `allowed`. */
+function writeAllowedQuota(accountId: string): void {
+  writeState(accountId, {
+    five_hour: { status: "allowed", utilization: 0.1, resetsAt: NOW_S() + 3600, seenAt: Date.now() },
+  });
+}
+
+const SESSION_EXPIRED = "Failed to authenticate: OAuth session expired and could not be refreshed";
 
 beforeEach(() => {
   home.dir = mkdtempSync(join(tmpdir(), "mc-pool-"));
@@ -113,5 +138,122 @@ describe("pool selection wiring", () => {
     writeState("claw1", { five_hour: w });
     writeState("claw2", { five_hour: w });
     expect(await chosenAccount()).toContain("claw1");
+  });
+});
+
+/**
+ * Issue #8: the selected native account returns HTTP 410 session_expired, the
+ * pool never learns, and every clawd/* rung re-selects the same dead login.
+ * These drive the SAME wire as the suite above — real state files, real
+ * prepareExecution — because the bug was never in the classifier, it was in
+ * what selection was allowed to see.
+ */
+describe("credential-health failover wiring (#8)", () => {
+  test("quota says allowed but the login is dead: the launch goes to the spare", async () => {
+    // The exact #8 control: both quota files report five_hour `allowed`, so
+    // nothing in the quota dimension can distinguish these accounts. Only the
+    // credential record can, and before this fix it did not exist.
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", utilization: 0.1, seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() },
+    );
+    writeAllowedQuota("claw2");
+    expect(await chosenAccount()).toContain("claw2");
+  });
+
+  test("four consecutive pooled rungs do not all land on the dead account", async () => {
+    // The observed trace: clawd/claude-fable-5, opus-4-8, opus-4-7, sonnet-5,
+    // four identical session_expired 410s in one run. Each rung is a fresh
+    // prepareExecution against unchanged state, which is why re-running the
+    // selection has to keep excluding claw1 rather than returning home.
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() },
+    );
+    writeAllowedQuota("claw2");
+    const rungs = [
+      "clawd/claude-fable-5",
+      "clawd/claude-opus-4-8",
+      "clawd/claude-opus-4-7",
+      "clawd/claude-sonnet-5",
+    ];
+    const chosen: string[] = [];
+    for (const rung of rungs) chosen.push(await chosenAccount(rung));
+    expect(chosen).toHaveLength(4);
+    expect(chosen.every((c) => c.includes("claw2"))).toBe(true);
+    expect(chosen.some((c) => c.includes("claw1"))).toBe(false);
+  });
+
+  test("a cleared credential (successful run / re-auth) returns the pool home", async () => {
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() },
+    );
+    writeAllowedQuota("claw2");
+    // minDwellMs 0: this asserts the CREDENTIAL exclusion lifted, not that
+    // sticky dwell elapsed (dwell is covered in sticky.test.ts).
+    expect(await chosenAccount("clawd/claude-fable-5", { minDwellMs: 0 })).toContain("claw2");
+
+    // What a successful execution through the shim, or `multi-clawd login
+    // claw1`, writes: an "ok" record that outranks the stale failure.
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "ok", seenAt: Date.now() },
+    );
+    expect(await chosenAccount("clawd/claude-fable-5", { minDwellMs: 0 })).toContain("claw1");
+  });
+
+  test("the exclusion ages out on its own, so a login fixed out-of-band recovers", async () => {
+    // 16 minutes old: past CREDENTIAL_FAILED_TTL_MS. Nothing cleared it
+    // explicitly, so the account is re-tried (and if still dead, the very next
+    // launch records it again).
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() - 16 * 60 * 1000 },
+    );
+    writeAllowedQuota("claw2");
+    expect(await chosenAccount()).toContain("claw1");
+  });
+
+  test("every login dead: one hard auth error naming re-authentication, not a launch", async () => {
+    const dead = { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() };
+    writeState("claw1", { five_hour: { status: "allowed", seenAt: Date.now() } }, dead);
+    writeState("claw2", { five_hour: { status: "allowed", seenAt: Date.now() } }, dead);
+    const { prepare, logs } = registerPool();
+    await expect(
+      prepare({ modelId: "clawd/claude-fable-5", workspaceDir: "/tmp/ws" }),
+    ).rejects.toThrow(/re-authenticate/i);
+    // Exactly one operator-facing error for the whole pool, and it names the fix.
+    expect(logs.error).toHaveLength(1);
+    expect(logs.error[0]).toMatch(/multi-clawd login/);
+  });
+
+  test("credential failure and quota exhaustion are reported as different problems", async () => {
+    // Both are "this account cannot serve you", but the operator's action is
+    // different — wait vs log back in — so the surfaced reasons must not blur.
+    const deadState = {
+      accountId: "claw1",
+      windows: { five_hour: { status: "allowed", seenAt: Date.now() } },
+      credential: { status: "failed" as const, reason: SESSION_EXPIRED, seenAt: Date.now() },
+    };
+    const exhaustedState = {
+      accountId: "claw1",
+      windows: {
+        five_hour: { status: "rejected", resetsAt: NOW_S() + 1800, seenAt: Date.now() },
+      },
+    };
+    const { classifyAccountHealth } = await import("../src/health.js");
+    const dead = classifyAccountHealth(deadState, {}, Date.now());
+    const exhausted = classifyAccountHealth(exhaustedState, {}, Date.now());
+    expect(dead.verdict).toBe("credential_failed");
+    expect(exhausted.verdict).toBe("exhausted");
+    expect(dead.reason).toMatch(/re-authenticate/i);
+    expect(dead.reason).not.toMatch(/utilization|rejected until/);
+    expect(exhausted.reason).not.toMatch(/re-authenticate/i);
   });
 });

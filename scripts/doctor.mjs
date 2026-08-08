@@ -263,6 +263,20 @@ const io = {
 const accounts = pluginConfig.accounts ?? [];
 if (accounts.length === 0) warn("no accounts configured");
 for (const account of accounts) {
+  // RUNTIME credential health first: the source check below only proves a
+  // credential EXISTS, and #8 is exactly the case where a present credential
+  // is a session the Claude CLI has already rejected. A recorded runtime
+  // failure is the stronger evidence, so it is reported as such.
+  const recorded = readJson(join(STATE_DIR, `${account.id}.json`))?.credential;
+  if (recorded?.status === "failed") {
+    const ageMin = Math.round((Date.now() - recorded.seenAt) / 60000);
+    bad(
+      `${account.id}: the Claude CLI rejected this login ${ageMin}m ago${
+        recorded.reason ? ` (${recorded.reason})` : ""
+      } — excluded from the pool; fix with \`multi-clawd login ${account.id}\``,
+    );
+    continue;
+  }
   if (account.oauthTokenRef) {
     warn(`${account.id}: oauthTokenRef — validated by the gateway's async probe, not doctor`);
     continue;

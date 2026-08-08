@@ -20,10 +20,13 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   classifyStateReadFailure,
+  clearCredentialFailure,
   createLineScanner,
   mergeHealthStates,
+  parseAuthFailure,
   parseRateLimitEvent,
   parseStoredState,
+  recordCredentialFailure,
   updateHealthState,
   type AccountHealthState,
 } from "./shim-core.js";
@@ -172,6 +175,12 @@ function guessLimitResetsAt(): number | undefined {
   return undefined;
 }
 
+/**
+ * Whether this launch produced a definitive auth failure (#8). Drives both the
+ * recorded exclusion and the decision NOT to write a success-clear at exit.
+ */
+let sawAuthFailure = false;
+
 const scanner = createLineScanner((line) => {
   try {
     const event = parseRateLimitEvent(line);
@@ -193,6 +202,19 @@ const scanner = createLineScanner((line) => {
         );
       }
     }
+    // #8: a definitive auth failure (session_expired / rejected credential) is
+    // telemetry too, and of a DIFFERENT kind from a quota event — record it on
+    // the credential dimension so the next pooled launch excludes this account
+    // instead of burning every fallback rung on the same dead login.
+    const authFailure = parseAuthFailure(line);
+    if (authFailure && !sawAuthFailure) {
+      sawAuthFailure = true;
+      state = recordCredentialFailure(state, authFailure.reason, Date.now());
+      persistState();
+      process.stderr.write(
+        `[multi-clawd shim] auth failure recorded for ${accountId}: ${authFailure.reason}\n`,
+      );
+    }
   } catch {
     // capture must never interfere with the stream
   }
@@ -210,11 +232,36 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   });
 }
 
+/**
+ * A clean exit with no auth failure in the stream proves this account's login
+ * works right now, so any recorded credential failure is stale and must be
+ * cleared — otherwise an account that has since been re-authenticated stays
+ * benched until CREDENTIAL_FAILED_TTL_MS runs out (#8, "clear on a successful
+ * execution"). Conditional on a failure actually being on disk so the common
+ * path adds no write at all.
+ */
+function clearRecordedAuthFailureOnSuccess(): void {
+  if (!stateFile || sawAuthFailure) return;
+  try {
+    if (readPersistedState()?.credential?.status !== "failed") return;
+    state = clearCredentialFailure(state, Date.now());
+    persistState();
+    process.stderr.write(
+      `[multi-clawd shim] auth recovered for ${accountId} — credential exclusion cleared\n`,
+    );
+  } catch {
+    // clearing is best-effort; the TTL is the backstop
+  }
+}
+
 child.on("close", (code, signal) => {
   if (signal) {
     process.kill(process.pid, signal);
     return;
   }
+  // flush() on stdout 'end' already ran for a normal close; this only covers
+  // the state write, which must happen before we hand over the exit code.
+  if ((code ?? 0) === 0) clearRecordedAuthFailureOnSuccess();
   process.exit(code ?? 0);
 });
 

@@ -144,6 +144,31 @@ describe("createRefProbeTracker", () => {
     expect(tracker.observe({ value: "sk-ant-oat01-x" }, 12 * MIN).status).toBe("ok");
   });
 
+  /**
+   * A broken verdict is not one thing. The 8 Aug case was a box-wide network
+   * outage: every probe threw, the streak matured, and the account was declared
+   * dead — but its credential was fine and rotating away from it would have
+   * helped nothing. So the verdict has to say WHICH evidence broke it, because
+   * only credential evidence may change account selection.
+   */
+  test("empty_result breaks with cause `credential`", () => {
+    const tracker = createRefProbeTracker();
+    expect(tracker.observe({ failure: "empty_result" }, 0)).toMatchObject({
+      status: "broken",
+      cause: "credential",
+    });
+  });
+
+  test("a matured provider-error streak breaks with cause `provider`, not `credential`", () => {
+    const tracker = createRefProbeTracker();
+    tracker.observe({ failure: "provider_error" }, 0);
+    tracker.observe({ failure: "provider_error" }, 5 * MIN);
+    expect(tracker.observe({ failure: "provider_error" }, 11 * MIN)).toMatchObject({
+      status: "broken",
+      cause: "provider",
+    });
+  });
+
   test("an empty_result after provider errors still breaks immediately (credential problem)", () => {
     const tracker = createRefProbeTracker();
     tracker.observe({ failure: "provider_error" }, 0);

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 // Stand-in for the claude CLI in shim integration tests.
 // Emits stream-json lines (one split across two writes), echoes one stdin
 // line into an assistant record, and exits with FAKE_CLAUDE_EXIT.
@@ -35,9 +37,29 @@ process.stdin.on("end", () => {
   process.stdout.write(lines[1] + "\n");
   const modelIdx = process.argv.indexOf("--model");
   const emitLimit = process.env.FAKE_CLAUDE_EMIT_LIMIT === "1";
+  // The live #8 shape: HTTP 410 session_expired as the CLI reports it.
+  const emitAuthFail = process.env.FAKE_CLAUDE_EMIT_AUTH_FAIL === "1";
+  // "not_logged_in" replays cli-not-logged-in.jsonl instead — records captured
+  // from the real CLI (2.1.224) against an empty config dir, so the reactive
+  // auth path is exercised against bytes nobody hand-wrote.
+  if (process.env.FAKE_CLAUDE_EMIT_AUTH_FAIL === "not_logged_in") {
+    const fixture = new URL("./cli-not-logged-in.jsonl", import.meta.url);
+    process.stdout.write(readFileSync(fixture, "utf8"));
+    process.stderr.write("fake-claude stderr noise\n");
+    process.exit(Number(process.env.FAKE_CLAUDE_EXIT ?? "0"));
+  }
   process.stdout.write(
     JSON.stringify(
-      emitLimit
+      emitAuthFail
+        ? {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            result: "Failed to authenticate: OAuth session expired and could not be refreshed",
+            received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
+            session_id: "s1",
+          }
+        : emitLimit
         ? {
             type: "result",
             subtype: "error_during_execution",

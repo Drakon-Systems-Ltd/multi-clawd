@@ -40,6 +40,16 @@ export interface RefProbeResult {
 
 export interface RefProbeStatus {
   status: "ok" | "degraded" | "broken";
+  /**
+   * Which evidence produced a `broken` verdict. The distinction is the whole
+   * point: `credential` means the resolver ran and the credential itself is
+   * wrong, which is positive evidence against this ACCOUNT; `provider` means
+   * the resolver never got an answer, which is evidence about the BOX and says
+   * nothing about the account. Only the former may influence account
+   * selection — a box-wide outage breaks every probe at once, so acting on it
+   * would rotate away from a perfectly good login and fix nothing.
+   */
+  cause?: "credential" | "provider";
   reason?: string;
 }
 
@@ -79,6 +89,7 @@ export function createRefProbeTracker(
         firstFailureAt = undefined;
         return {
           status: "broken",
+          cause: "credential",
           reason: "oauthTokenRef resolved to nothing (credential problem)",
         };
       }
@@ -89,6 +100,7 @@ export function createRefProbeTracker(
       if (consecutive >= deadAfterConsecutive && elapsed >= deadAfterMs) {
         return {
           status: "broken",
+          cause: "provider",
           reason: `resolver failing ${deadAfterConsecutive}+ consecutive probes over ${Math.round(
             deadAfterMs / 60000,
           )}m`,

@@ -116,6 +116,10 @@ const VERDICT_WORDS: Record<string, string> = {
   no_data: "no recent telemetry — treated as healthy",
   near_limit: "NEAR ITS LIMIT — the pool will hand over before it hard-fails",
   exhausted: "EXHAUSTED",
+  // Distinct from EXHAUSTED on purpose: exhausted is "wait for the window",
+  // credential_failed is "go and log this account back in". Same-looking
+  // wording would send the operator to the wrong fix.
+  credential_failed: "LOGIN REJECTED — excluded from the pool until it is re-authenticated",
 };
 
 export function renderExplanation(model: ExplainModel): string {
