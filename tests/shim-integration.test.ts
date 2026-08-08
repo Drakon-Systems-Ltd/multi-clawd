@@ -14,7 +14,7 @@ function runShim(opts: {
   rateLimitInfo?: Record<string, unknown>;
   modelOverride?: string;
   args?: string[];
-  authFail?: boolean;
+  authFail?: boolean | "not_logged_in";
 }) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -23,7 +23,7 @@ function runShim(opts: {
     MULTI_CLAWD_ACCOUNT_ID: "claw2",
     FAKE_CLAUDE_EXIT: opts.exit ?? "0",
   };
-  if (opts.authFail) env.FAKE_CLAUDE_EMIT_AUTH_FAIL = "1";
+  if (opts.authFail) env.FAKE_CLAUDE_EMIT_AUTH_FAIL = opts.authFail === true ? "1" : opts.authFail;
   if (opts.rateLimitInfo) {
     env.FAKE_CLAUDE_RATE_LIMIT_INFO = JSON.stringify(opts.rateLimitInfo);
   }
@@ -166,6 +166,22 @@ describe("shim runtime auth-failure capture (#8)", () => {
     expect(state.credential.reason).toContain("OAuth session expired");
     expect(typeof state.credential.seenAt).toBe("number");
     expect(res.stderr).toContain("auth failure recorded");
+  });
+
+  test("the CLI's own not-logged-in record is captured end to end", () => {
+    // Replays tests/fixtures/cli-not-logged-in.jsonl — records captured from
+    // Claude CLI 2.1.224 itself, not hand-written. Until now the reactive path
+    // had only ever been proven against a session_expired shape reconstructed
+    // from a trace; this drives the real bytes the CLI emits when a login is
+    // simply absent, which is the state a pool member decays into.
+    const dir = mkdtempSync(join(tmpdir(), "mc-shim-"));
+    const stateFile = join(dir, "claw1.json");
+    const res = runShim({ stateFile, authFail: "not_logged_in", exit: "1" });
+
+    expect(res.stdout).toContain("Not logged in"); // stream untouched
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.credential).toMatchObject({ status: "failed" });
+    expect(state.credential.reason).toContain("Not logged in");
   });
 
   test("the quota windows from the same turn are still captured alongside it", () => {

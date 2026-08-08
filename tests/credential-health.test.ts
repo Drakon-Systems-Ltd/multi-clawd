@@ -7,6 +7,8 @@
  * The pool WIRING for the same fix lives in pool-selection.test.ts; this file
  * is the vocabulary those wires carry.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   clearCredentialFailure,
@@ -37,6 +39,50 @@ const SESSION_EXPIRED_LINE = JSON.stringify({
   is_error: true,
   result: "Failed to authenticate: OAuth session expired and could not be refreshed",
   session_id: "s1",
+});
+
+/**
+ * A SECOND real record, captured from the Claude CLI itself (2.1.224) by
+ * running it against an empty config dir — see tests/fixtures/
+ * cli-not-logged-in.jsonl for provenance. Every wording in
+ * AUTH_FAILURE_PATTERNS was inferred from traces until now; this one is the
+ * article, and it is not shaped the way you would guess: the envelope says
+ * `subtype: "success"` and the separator is a middle dot, not a hyphen.
+ */
+const NOT_LOGGED_IN_FIXTURE = readFileSync(
+  join(__dirname, "fixtures", "cli-not-logged-in.jsonl"),
+  "utf8",
+)
+  .split("\n")
+  .filter((l) => l.trim());
+
+describe("the real not-logged-in record (CLI 2.1.224)", () => {
+  test("the result record is recognised as an auth failure", () => {
+    const result = NOT_LOGGED_IN_FIXTURE.map(parseAuthFailure).filter(Boolean);
+    expect(result).toContainEqual({ reason: "Not logged in · Please run /login" });
+  });
+
+  test("`subtype: success` does not stop it — is_error is what counts", () => {
+    // The trap in the real shape: the CLI reports a failed turn under a
+    // "success" subtype. A parser keyed on subtype alone reads this as a clean
+    // turn and the account is never benched.
+    const record = NOT_LOGGED_IN_FIXTURE.map((l) => JSON.parse(l)).find(
+      (r) => r.type === "result",
+    );
+    expect(record.subtype).toBe("success");
+    expect(record.is_error).toBe(true);
+    expect(parseAuthFailure(JSON.stringify(record))).toBeTruthy();
+  });
+
+  test("it records as a credential failure, not a quota one", () => {
+    const line = NOT_LOGGED_IN_FIXTURE.find((l) => parseAuthFailure(l))!;
+    const state = recordCredentialFailure(
+      { accountId: "claw2", windows: {} },
+      parseAuthFailure(line)!.reason,
+      NOW,
+    );
+    expect(classifyAccountHealth(state, {}, NOW).verdict).toBe("credential_failed");
+  });
 });
 
 describe("parseAuthFailure", () => {
