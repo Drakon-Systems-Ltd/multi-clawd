@@ -364,7 +364,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v1.7.2/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v1.7.3/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -662,6 +662,14 @@ Housekeeping:
 - Prefer a secret reference (`oauthTokenRef`, v0.3) over a plaintext
   file; when a file is used, keep it `0600` (POSIX) or locked to your user
   with `icacls` (Windows).
+- **Credential resolution fails closed (v1.7.3).** An account that declares
+  `oauthTokenRef` or `oauthTokenFile` is authenticated by that token. If it
+  resolves to nothing — provider briefly unavailable, empty secret, truncated
+  file — and the account has no `configDir` to fall back on, the launch is
+  refused with `declares a token source but none resolved` rather than
+  allowed to proceed on the machine's default login and spend a different
+  account's quota under this account's name. Native accounts are exempt: the
+  default login *is* their credential.
 - Migrating a token file into a vault? `op read` (and most secret CLIs)
   append a trailing newline on output — resolution trims the resolved
   value (guaranteed in `token-resolution.ts`), so a file-vs-vault diff
