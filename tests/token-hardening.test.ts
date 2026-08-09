@@ -104,3 +104,48 @@ describe("child env injection", () => {
     expect(env.CLAUDE_CONFIG_DIR).toBe("/isolated/claw3");
   });
 });
+
+/**
+ * Adversarial finding (9 Aug 2026, HIGH): an account that declares a token
+ * source is authenticated by that token and nothing else. When the resolver
+ * hiccups — provider briefly down, empty secret, half-written token file —
+ * `buildAccountChildEnv` emitted an env carrying NEITHER a token NOR a config
+ * dir, so the child fell through to the box's own default login and spent a
+ * DIFFERENT account's quota while telemetry still said this one. Credential
+ * resolution must fail closed: no credential, no launch.
+ */
+describe("child env fails closed on an unresolved credential", () => {
+  test("a ref account with no resolved token throws instead of falling through", () => {
+    expect(() =>
+      buildAccountChildEnv({ id: "claw2", oauthTokenRef: REF }, undefined, "/state/claw2.json"),
+    ).toThrow(/claw2/);
+  });
+
+  test("a blank secret counts as unresolved, not as a token", () => {
+    expect(() =>
+      buildAccountChildEnv({ id: "claw2", oauthTokenRef: REF }, "   ", "/state/claw2.json"),
+    ).toThrow(/claw2/);
+  });
+
+  test("a token-file account with nothing read back throws too", () => {
+    expect(() =>
+      buildAccountChildEnv({ id: "claw4", oauthTokenFile: "~/.t" }, "", "/state/claw4.json"),
+    ).toThrow(/claw4/);
+  });
+
+  test("a declared configDir is that account's own login, so it stays a valid fallback", () => {
+    const env = buildAccountChildEnv(
+      { id: "claw2", oauthTokenRef: REF, configDir: "/isolated/claw2" },
+      undefined,
+      "/state/claw2.json",
+    );
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/isolated/claw2");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  test("native accounts are unaffected — they are meant to carry no credential", () => {
+    expect(() =>
+      buildAccountChildEnv({ id: "claw1", native: true }, undefined, "/state/claw1.json"),
+    ).not.toThrow();
+  });
+});

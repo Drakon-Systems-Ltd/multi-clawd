@@ -7,6 +7,7 @@ import {
   type ChainFinding,
   type SessionOverrideEntry,
   auditChainShadowing,
+  offPoolClaudeRef,
 } from "../src/chain-audit";
 
 const POOL = "clawd";
@@ -421,5 +422,46 @@ describe("auditChainShadowing (case 3 — per-agent chains that shadow defaults)
     expect(auditChainShadowing(undefined)).toEqual([]);
     expect(auditChainShadowing({})).toEqual([]);
     expect(auditChainShadowing({ agents: { list: "nonsense" } })).toEqual([]);
+  });
+});
+
+/**
+ * Adversarial finding (9 Aug 2026, HIGH): the whole point of this module is to
+ * catch a Claude rung that bypasses the pool — and it compared provider ids
+ * byte-for-byte while OpenClaw's router lowercases them before use. So
+ * `Anthropic/claude-fable-5` routed straight to the API and doctor still
+ * printed "all live Claude tiers route through the clawd pool". The one
+ * regression this audit exists to find, defeated by a capital letter.
+ */
+describe("provider ids compare the way the router reads them", () => {
+  test("`Anthropic/` bypasses the pool exactly as `anthropic/` does", () => {
+    expect(offPoolClaudeRef("Anthropic/claude-fable-5", POOL)).toBe("strong");
+    expect(offPoolClaudeRef("CLAUDE-CLI/claude-opus-5", POOL)).toBe("strong");
+  });
+
+  test("a capitalised or padded pool ref is still correct pool routing", () => {
+    expect(offPoolClaudeRef("Clawd/claude-opus-5", POOL)).toBeNull();
+    expect(offPoolClaudeRef(" clawd/claude-opus-5 ", POOL)).toBeNull();
+  });
+
+  test("`CLAW2/` is still a single-account pin", () => {
+    expect(offPoolClaudeRef("CLAW2/claude-opus-5", POOL)).toBe("warn");
+  });
+
+  test("the effective-chain audit sees a capitalised off-pool fallback", () => {
+    const findings = auditEffectiveChain(
+      {
+        agents: {
+          defaults: {
+            model: {
+              primary: "clawd/claude-opus-4-8",
+              fallbacks: ["clawd/claude-fable-5", "Anthropic/claude-fable-5"],
+            },
+          },
+        },
+      },
+      POOL,
+    );
+    expect(findings.some((f) => f.severity === "warn")).toBe(true);
   });
 });

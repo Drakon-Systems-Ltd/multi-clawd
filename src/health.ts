@@ -187,8 +187,14 @@ export function classifyAccountHealth(
     if (!fresh) continue;
     hasLiveEvidence = true;
 
-    // Account-level windows gate every model.
-    if (w.status === "rejected" && resetBearing) {
+    // Account-level windows gate every model — but only NAMED period windows
+    // are account-level. `unknown` is where a limit event with no recognisable
+    // type lands, and a real one of those was a Fable-only 429; exhausting the
+    // account on it strands every other model behind a one-model limit. The
+    // reset-less branch below has said so since 1.7.2 — carrying a reset stamp
+    // does not make the same event mean something different, so the two
+    // branches share the guard.
+    if (w.status === "rejected" && resetBearing && isPeriodWindow(window)) {
       return {
         verdict: "exhausted",
         resumeAt: resetMs,

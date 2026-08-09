@@ -35,9 +35,26 @@ export function buildAccountChildEnv(
     MULTI_CLAWD_ACCOUNT_ID: account.id,
     MULTI_CLAWD_STATE_FILE: stateFile,
   };
-  if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  const usableToken = token?.trim() ? token : undefined;
+  if (usableToken) env.CLAUDE_CODE_OAUTH_TOKEN = usableToken;
   if (!account.native && account.configDir) {
     env.CLAUDE_CONFIG_DIR = expandHomePath(account.configDir);
+  }
+  // Fail closed. An account that declares a token source is authenticated by
+  // that token; when resolution yields nothing usable — provider briefly down,
+  // empty secret, half-written file — and there is no configDir to fall back
+  // on, this env carries no credential at all and the child would quietly use
+  // the box's DEFAULT login: a different account's quota, spent under this
+  // account's name in telemetry. Refusing the launch surfaces a resolver
+  // problem as a resolver problem. Native accounts are exempt by definition
+  // (their credential IS the default login), and a configDir is this same
+  // account's own file-based login, so it remains a legitimate fallback.
+  const declaresToken = Boolean(account.oauthTokenFile) || Boolean(account.oauthTokenRef);
+  if (!account.native && declaresToken && !usableToken && !account.configDir) {
+    throw new Error(
+      `[multi-clawd] account "${account.id}" declares a token source but none resolved — ` +
+        `refusing to launch on the default login`,
+    );
   }
   return env;
 }

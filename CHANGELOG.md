@@ -4,6 +4,49 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.7.3] — 2026-08-09
+
+**Three fixes from an adversarial pass on our own source.** Four agents were
+pointed at this codebase with instructions to break it and to verify every
+claim in code before reporting it. Two of the findings were in checks that
+exist precisely to catch the thing they missed.
+
+- **The pool-bypass audit compared provider ids byte-for-byte** while
+  OpenClaw's router lower-cases them before resolving. So a chain rung written
+  `Anthropic/claude-fable-5` went straight to the API with no cross-account
+  failover, and `doctor` still printed *"all live Claude tiers route through
+  the clawd pool"*. The one regression this module exists to find, defeated by
+  a capital letter. Provider ids are now trimmed and lower-cased on both sides
+  of every comparison — off-pool detection, pool-match and single-account pins
+  alike.
+
+- **Credential resolution now fails closed.** An account that declares a token
+  source is authenticated by that token and nothing else. When resolution
+  yielded nothing usable — provider briefly unavailable, empty secret,
+  half-written token file — the child env carried neither a token nor a config
+  dir, so the Claude CLI quietly fell back to the box's default login: a
+  different account's quota, spent under this account's name in telemetry. A
+  launch in that state is now refused with a named error. Native accounts are
+  exempt (the default login *is* their credential), and a declared `configDir`
+  remains a valid fallback because it is the same account's own file-based
+  login.
+
+- **Account-level rejections now bind symmetrically.** 1.7.2 stopped a
+  reset-less `unknown:rejected` window from benching a whole account, because
+  that is where a single-model limit lands — a live Fable-only 429 did exactly
+  this. The reset-bearing branch above it never got the same guard, so the
+  identical event carrying a reset stamp still stranded every other model on
+  that account. Both branches share the check now.
+
+Each fix landed test-first: the three regression tests were written against
+1.7.2, watched to fail (seven failures), and only then made to pass. 415 tests
+green.
+
+Scope note: a refused launch is deliberately loud — it fails that one turn and
+falls through the model chain rather than silently spending the wrong account.
+Excluding a credential-broken account from pool selection so the pool rotates
+instead is separate work, in progress on `fix/credential-health-failover`.
+
 ## [1.7.2] — 2026-08-02
 
 **Rotating on the signal the provider actually sends.** Proactive rotation was

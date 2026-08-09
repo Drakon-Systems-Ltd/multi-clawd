@@ -517,3 +517,26 @@ describe("unknown-window rejections stay non-binding (1.7.2 guard)", () => {
     expect(isPeriodWindow("")).toBe(false);
   });
 });
+
+/**
+ * Adversarial finding (9 Aug 2026, MEDIUM): 1.7.2 narrowed the RESET-LESS
+ * rejection branch to named period windows so a Fable-only 429 (which lands on
+ * `unknown`) could not bench an entire account. The reset-BEARING branch above
+ * it never got the same guard, so the identical event carrying a reset stamp
+ * still stranded every other model on that account. Same event, same rule.
+ */
+describe("account-level rejections bind symmetrically, reset or no reset", () => {
+  test("a reset-bearing `unknown` rejection does not exhaust the account", () => {
+    const s = state({ unknown: { status: "rejected", resetsAt: NOW_S + 1800, seenAt: NOW - 1000 } });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).not.toBe("exhausted");
+  });
+
+  test("a reset-bearing rejection on a named period window still exhausts", () => {
+    const s = state({
+      seven_day: { status: "rejected", resetsAt: NOW_S + 1800, seenAt: NOW - 1000 },
+    });
+    const h = classifyAccountHealth(s, {}, NOW);
+    expect(h.verdict).toBe("exhausted");
+    expect(h.resumeAt).toBe((NOW_S + 1800) * 1000);
+  });
+});

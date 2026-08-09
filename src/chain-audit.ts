@@ -81,11 +81,21 @@ export function isClaudeModelId(modelId: string): boolean {
   return isModernClaudeModelId(id);
 }
 
-/** Split `provider/model-id` into its parts; a bare id has no provider. */
+/**
+ * Split `provider/model-id` into its parts; a bare id has no provider.
+ *
+ * The provider half is lower-cased and trimmed because that is what OpenClaw's
+ * router does before it resolves a ref — so `Anthropic/…` and `anthropic/…`
+ * reach the same backend. An audit that compared them byte-for-byte reported
+ * "all live Claude tiers route through the pool" while a capital A sent a rung
+ * straight to the API. The model id is left alone: it is only ever passed to
+ * `isClaudeModelId`, which trims for itself, and Claude ids are lower-case by
+ * construction.
+ */
 function parseRef(ref: string): { provider?: string; modelId: string } {
   const idx = ref.indexOf("/");
   if (idx < 0) return { modelId: ref };
-  return { provider: ref.slice(0, idx), modelId: ref.slice(idx + 1) };
+  return { provider: ref.slice(0, idx).trim().toLowerCase(), modelId: ref.slice(idx + 1) };
 }
 
 /**
@@ -106,7 +116,7 @@ export function offPoolClaudeRef(ref: string, poolId: string): "strong" | "warn"
   const { provider, modelId } = parseRef(ref);
   if (!isClaudeModelId(modelId)) return null; // not a Claude tier → nothing to fail over
   if (provider === undefined) return null; // bare id: routing is ambiguous, don't cry wolf
-  if (provider === poolId) return null; // correct pool routing
+  if (provider === poolId.trim().toLowerCase()) return null; // correct pool routing
   if (provider === "anthropic" || provider === "claude-cli") return "strong";
   if (ACCOUNT_PIN_RE.test(provider)) return "warn";
   // Some other provider prefix on a Claude id (e.g. a custom gateway): out of
