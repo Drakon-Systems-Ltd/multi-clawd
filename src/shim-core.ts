@@ -63,10 +63,30 @@ export const EXPIRED_REJECTED_GRACE_MS = 5 * 60 * 1000;
 /** Longest compact-JSON snapshot of an unknown window we retain. */
 const RAW_INFO_MAX_CHARS = 512;
 
+/**
+ * Runtime credential health (#8): whether the Claude CLI itself last accepted
+ * or definitively rejected this account's login. A separate dimension from the
+ * quota windows because it answers a different question — the windows say "how
+ * much of this account is left", this says "can this account authenticate at
+ * all". Quota `allowed` tells you nothing when the OAuth session is dead.
+ *
+ * `status: "ok"` records exist (rather than clearing by deleting the field)
+ * because persistence is read-merge-write: a cleared field would lose the merge
+ * to the stale `failed` record still on disk, resurrecting the exclusion the
+ * clear was meant to end. Newer `seenAt` wins, same as the windows.
+ */
+export interface CredentialHealth {
+  status: "failed" | "ok";
+  /** Short human-readable failure detail (e.g. the CLI's auth error text). */
+  reason?: string;
+  seenAt: number;
+}
+
 export interface AccountHealthState {
   accountId: string;
   updatedAt?: number;
   windows: Record<string, WindowHealth>;
+  credential?: CredentialHealth;
 }
 
 export interface LineScanner {
@@ -159,7 +179,12 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
     return undefined;
   }
   if (typeof parsed !== "object" || parsed === null) return undefined;
-  const p = parsed as { accountId?: unknown; updatedAt?: unknown; windows?: unknown };
+  const p = parsed as {
+    accountId?: unknown;
+    updatedAt?: unknown;
+    windows?: unknown;
+    credential?: unknown;
+  };
   if (typeof p.windows !== "object" || p.windows === null) return undefined;
   const windows: Record<string, WindowHealth> = {};
   for (const [key, value] of Object.entries(p.windows as Record<string, unknown>)) {
@@ -176,10 +201,24 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
       rawInfo: typeof w.rawInfo === "string" ? w.rawInfo : undefined,
     };
   }
+  // Tolerant round-trip of the credential record: a malformed one is dropped,
+  // never fatal — same philosophy as individually malformed windows.
+  let credential: CredentialHealth | undefined;
+  if (typeof p.credential === "object" && p.credential !== null) {
+    const c = p.credential as Record<string, unknown>;
+    if ((c.status === "failed" || c.status === "ok") && typeof c.seenAt === "number") {
+      credential = {
+        status: c.status,
+        reason: typeof c.reason === "string" ? c.reason : undefined,
+        seenAt: c.seenAt,
+      };
+    }
+  }
   return {
     accountId: typeof p.accountId === "string" ? p.accountId : "unknown",
     updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
     windows,
+    credential,
   };
 }
 
@@ -232,11 +271,22 @@ export function mergeHealthStates(
       }
     }
   }
+  // Credential record: newer `seenAt` wins, exactly like the windows — so a
+  // clear ("ok") written by a later successful launch beats the stale "failed"
+  // still on disk, and vice versa. Pruned by the same retention horizon.
+  let credential = disk.credential;
+  if (live.credential && (!credential || live.credential.seenAt >= credential.seenAt)) {
+    credential = live.credential;
+  }
+  if (now !== undefined && credential && now - credential.seenAt > pruneAfterMs) {
+    credential = undefined;
+  }
   const updatedAt = Math.max(disk.updatedAt ?? 0, live.updatedAt ?? 0);
   return {
     accountId: live.accountId,
     updatedAt: updatedAt > 0 ? updatedAt : undefined,
     windows,
+    credential,
   };
 }
 
@@ -371,6 +421,119 @@ export function recordModelLimit(
         seenAt: now,
       },
     },
+  };
+}
+
+/**
+ * Wordings the Claude CLI uses for DEFINITIVE authentication failures — the
+ * login itself is dead, not throttled. Observed live (#8): HTTP 410
+ * session_expired surfaces as "Failed to authenticate: OAuth session expired
+ * and could not be refreshed". Deliberately auth-specific: a bare
+ * "session expired" is NOT matched, because a pool rotation resuming a CLI
+ * session that lives in the PREVIOUS account's config dir also fails with a
+ * session-expiry — that is a lost conversation, not a dead credential, and
+ * recording it would wrongly exclude the freshly rotated-to account.
+ */
+const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
+  /oauth (session|token) (has )?(expired|been revoked)/i,
+  /failed to authenticate/i,
+  /invalid (api key|bearer token|access token)/i,
+  /authentication[_ ]?error/i,
+  /please run \/login/i,
+  /not logged in/i,
+  /unauthori[sz]ed/i,
+];
+
+/** Longest failure-reason snippet persisted to the state file. */
+const AUTH_REASON_MAX_CHARS = 200;
+
+/**
+ * Recognise a definitive Claude CLI auth failure in the stream, as a distinct
+ * event class from quota/rate-limit events (#8). Same tolerance rules as
+ * parseModelLimitError: only genuine error records count — a successful result
+ * QUOTING auth text must not trigger. Returns the failing message text so the
+ * exclusion is diagnosable later.
+ */
+export function parseAuthFailure(line: string): { reason: string } | undefined {
+  // Cheap pre-filter before JSON.parse, mirroring the other line parsers.
+  // Performance-only: it must cover every AUTH_FAILURE_PATTERNS wording.
+  if (
+    !/(authenticat|oauth|logged in|\/login|unauthori|api key|access token|bearer token)/i.test(
+      line,
+    )
+  ) {
+    return undefined;
+  }
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  const r = record as {
+    type?: unknown;
+    is_error?: unknown;
+    subtype?: unknown;
+    result?: unknown;
+    error?: unknown;
+  };
+  const isErrorRecord =
+    r.type === "error" ||
+    r.is_error === true ||
+    (typeof r.subtype === "string" && r.subtype.startsWith("error"));
+  if (!isErrorRecord) return undefined;
+  const texts: string[] = [];
+  if (typeof r.result === "string") texts.push(r.result);
+  if (typeof r.error === "string") texts.push(r.error);
+  if (typeof r.error === "object" && r.error !== null) {
+    const msg = (r.error as { message?: unknown }).message;
+    if (typeof msg === "string") texts.push(msg);
+  }
+  for (const text of texts) {
+    if (AUTH_FAILURE_PATTERNS.some((p) => p.test(text))) {
+      return { reason: text.trim().slice(0, AUTH_REASON_MAX_CHARS) };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Record a definitive runtime auth failure against this account, so the NEXT
+ * pooled launch excludes it instead of re-selecting the same dead login on
+ * every fallback rung. The reader (health.ts) bounds this with
+ * CREDENTIAL_FAILED_TTL_MS.
+ */
+export function recordCredentialFailure(
+  state: AccountHealthState,
+  reason: string,
+  now: number,
+): AccountHealthState {
+  return {
+    ...state,
+    updatedAt: now,
+    credential: {
+      status: "failed",
+      reason: reason.slice(0, AUTH_REASON_MAX_CHARS),
+      seenAt: now,
+    },
+  };
+}
+
+/**
+ * End a recorded credential failure (successful execution, successful live
+ * probe, or explicit re-authentication). Writes an "ok" record rather than
+ * deleting the field so the read-merge-write persistence cannot resurrect the
+ * stale "failed" record from disk — see CredentialHealth.
+ */
+export function clearCredentialFailure(
+  state: AccountHealthState,
+  now: number,
+): AccountHealthState {
+  return {
+    ...state,
+    updatedAt: now,
+    credential: { status: "ok", seenAt: now },
   };
 }
 

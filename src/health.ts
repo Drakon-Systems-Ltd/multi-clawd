@@ -18,7 +18,12 @@
  */
 import { modelWindowKey, type AccountHealthState } from "./shim-core.js";
 
-export type HealthVerdict = "ok" | "near_limit" | "exhausted" | "no_data";
+export type HealthVerdict =
+  | "ok"
+  | "near_limit"
+  | "exhausted"
+  | "credential_failed"
+  | "no_data";
 
 export interface AccountHealth {
   verdict: HealthVerdict;
@@ -43,6 +48,20 @@ const DEFAULT_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
  * stop hammering a limited model, short enough to re-probe within the hour.
  */
 export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * How long a runtime credential failure (session_expired / invalid login,
+ * captured reactively by the shim — see parseAuthFailure) keeps an account out
+ * of pool selection. The bound matters in both directions: long enough that a
+ * single dead login cannot consume every clawd/* fallback rung of a run (the
+ * #8 trace burned four rungs in seconds), short enough that a login fixed
+ * OUT-OF-BAND (`claude auth login` run directly, a token rotated behind a
+ * secret ref) is re-probed within the same cadence as the 15-minute login
+ * probe instead of staying benched indefinitely. Explicit clears — a
+ * successful launch through the shim, or `multi-clawd login <id>` — end the
+ * exclusion immediately; this TTL is only the backstop.
+ */
+export const CREDENTIAL_FAILED_TTL_MS = 15 * 60 * 1000;
 
 const MODEL_WINDOW_PREFIX = "model:";
 
@@ -103,6 +122,33 @@ export function isWarningStatus(status: string): boolean {
  */
 export const MAX_RESET_HORIZON_MS = 8 * 24 * 60 * 60 * 1000;
 
+/**
+ * The credential verdict for an account, or undefined when its login is not
+ * known-broken (never observed, explicitly cleared, or aged past the TTL).
+ *
+ * Split out so the pool's "is EVERY member credential-broken?" check can ask
+ * the same question the classifier asks, rather than re-deriving it from a
+ * verdict that quota rules may have already overwritten.
+ */
+export function credentialFailureFor(
+  state: AccountHealthState | undefined,
+  nowMs: number,
+): AccountHealth | undefined {
+  const credential = state?.credential;
+  if (!credential || credential.status !== "failed") return undefined;
+  // Positive evidence only, and only while it is fresh: past the TTL the
+  // failure stops binding so a fixed login is retried (and, if it is still
+  // dead, the very next launch re-records it).
+  if (nowMs - credential.seenAt > CREDENTIAL_FAILED_TTL_MS) return undefined;
+  return {
+    verdict: "credential_failed",
+    resumeAt: credential.seenAt + CREDENTIAL_FAILED_TTL_MS,
+    reason: `login rejected by the Claude CLI ${Math.round(
+      (nowMs - credential.seenAt) / 60000,
+    )}m ago${credential.reason ? `: ${credential.reason}` : ""} — re-authenticate this account`,
+  };
+}
+
 export function classifyAccountHealth(
   state: AccountHealthState | undefined,
   options: HealthOptions,
@@ -113,6 +159,16 @@ export function classifyAccountHealth(
   const threshold = options.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
 
   if (!state) return { verdict: "no_data" };
+
+  // Credential health outranks every quota rule (#8). An account whose OAuth
+  // session the CLI has definitively rejected cannot serve ANY model at ANY
+  // utilization, so this is checked before the windows are even read — the bug
+  // was precisely that quota `allowed` kept re-electing a dead login. Bounded
+  // by CREDENTIAL_FAILED_TTL_MS so a login fixed out-of-band re-probes instead
+  // of staying benched forever; an explicit clear (successful launch, live
+  // probe, re-auth) writes an "ok" record and ends it immediately.
+  const credentialFailure = credentialFailureFor(state, nowMs);
+  if (credentialFailure) return credentialFailure;
 
   // Canonicalised so a window written under `clawd/claude-fable-5` still gates
   // a read requested as `anthropic/claude-fable-5` or bare `claude-fable-5`.
@@ -302,8 +358,14 @@ export function summarizeWindowUsage(
 
 /**
  * Pick the account that should serve the next turn, in pool order:
- * healthy/no-data first, then near-limit, never exhausted. Undefined when
- * every account is exhausted — the caller must not override anything then.
+ * healthy/no-data first, then near-limit, never exhausted and never
+ * credential-broken. Undefined when nothing is usable — the caller must not
+ * override anything then.
+ *
+ * `credential_failed` is unusable in the strongest sense: an exhausted account
+ * would at least authenticate, so it stays behind near-limit as a last resort,
+ * whereas a rejected login cannot serve a single token. It is therefore in
+ * neither pass here.
  */
 export function choosePoolAccount(
   pool: Array<{ id: string; verdict: HealthVerdict }>,
@@ -311,6 +373,32 @@ export function choosePoolAccount(
   const usable = pool.find((a) => a.verdict === "ok" || a.verdict === "no_data");
   if (usable) return usable.id;
   return pool.find((a) => a.verdict === "near_limit")?.id;
+}
+
+/**
+ * Whether EVERY member's login is known-broken. The one state where a pooled
+ * launch has nothing to fall back to and must surface a hard auth error naming
+ * re-authentication (#8) instead of relaunching a dead account down every rung.
+ * Empty pools are never "all broken".
+ */
+export function allCredentialFailed(
+  pool: Array<{ id: string; verdict: HealthVerdict }>,
+): boolean {
+  return pool.length > 0 && pool.every((a) => a.verdict === "credential_failed");
+}
+
+/**
+ * Last-resort account when nothing is usable: the first member that can at
+ * least AUTHENTICATE, so an unusable-pool launch fails with the real quota
+ * error (which the chain and the degrade ladder both understand) rather than
+ * with an auth error from a dead login that a healthier-credentialled member
+ * would not have produced. Falls back to the home account when every member is
+ * credential-broken — the caller raises the hard auth error in that case.
+ */
+export function fallbackPoolAccount(
+  pool: Array<{ id: string; verdict: HealthVerdict }>,
+): string {
+  return (pool.find((a) => a.verdict !== "credential_failed") ?? pool[0]).id;
 }
 
 /**
@@ -322,5 +410,5 @@ export function choosePoolAccount(
 export function pickPoolAccountForLaunch(
   pool: Array<{ id: string; verdict: HealthVerdict }>,
 ): string {
-  return choosePoolAccount(pool) ?? pool[0].id;
+  return choosePoolAccount(pool) ?? fallbackPoolAccount(pool);
 }

@@ -279,6 +279,37 @@ is abandoned immediately. Sticky state persists at
   clears the alert from either degraded or broken. The tracker
   (`createRefProbeTracker`) is pure and tested; gate-2 redaction is preserved
   end-to-end (only error *class* names ever reach a log line).
+- **Probe verdicts reach selection — but only the credential ones.** A broken
+  verdict now names its evidence (`RefProbeStatus.cause`), and the two kinds
+  are acted on differently, because conflating them is how a probe can make an
+  outage worse:
+  - `credential` (the resolver ran and came back empty) is positive evidence
+    against that ACCOUNT. It writes the same credential-failure record the
+    shim writes reactively, so the next pooled launch excludes the account.
+    Written on every broken observation, not only the transition into it: the
+    record is TTL-bounded (15 min) and the probe runs on the same cadence, so
+    a transition-only write would let the exclusion lapse under a login that
+    is still dead. Before this, a probe could declare an account dead and
+    selection would never hear about it — the verdict was inert, and turns
+    kept launching on the condemned account.
+  - `provider` (the resolver never answered) is evidence about the HOST, and
+    is deliberately **selection-neutral**: it alerts, naming connectivity, and
+    changes nothing else. A host-level network fault fails every account's
+    probe at once, so benching on it would rotate away from a healthy login —
+    or, with every member equally unreachable, refuse the launch outright with
+    an auth error naming a re-authentication that would fix nothing.
+  - A probe `ok` still clears nothing. A credential *source* that resolves is
+    not proof the session is accepted; clearing on presence would un-bench a
+    dead login on the next tick.
+  - The source check (file shape / keychain / credentials.json) stays
+    alert-only for the same reason: it reports on the source, and a present
+    credential being a rejected session is the whole failure class.
+- **Probe history survives `register()`.** The failure streak and last-status
+  maps are per-account module state, not per-registration closures. `register()`
+  re-runs on every config rebuild, and when those maps were rebuilt with it, a
+  rebuild landing mid-outage reset the streak to zero — a resolver failing
+  continuously never reached its 3-consecutive threshold. History is pruned
+  only when an account leaves the config.
 - Pool rotations, return-home events, and whole-pool exhaustion raise alerts
   too; the out-of-process watchdog appends to
   `state/multi-clawd/alerts-spool.jsonl`, ingested at each heartbeat.
@@ -432,6 +463,49 @@ the next launch for that model rotates to the other account. The turn that
 hit the 429 itself still escapes to the chain (OpenClaw offers no in-turn
 retry of the same chain entry) — one degraded turn per limit event is the
 accepted cost; every subsequent turn account-flips.
+
+## Credential health: runtime auth failures feed selection
+
+Quota was the pool's entire vocabulary, so it could only answer "how much of
+this account is left" — never "can this account authenticate at all". When the
+Claude CLI rejects an account's OAuth session (HTTP 410 `session_expired`),
+every quota window still reads `allowed`, selection sees nothing wrong, and the
+same dead login wins every `clawd/*` fallback rung of a run in seconds. The
+outer chain eventually leaves the pool for another provider, so agents survive
+— but cross-account failover, the entire point of the pool, never happens.
+
+The shape mirrors the v0.3.6 fix (an error IS telemetry), on a second
+dimension:
+
+- **Auth failures are a distinct event class.** The shim recognises definitive
+  CLI auth errors on genuine error records — `parseAuthFailure`, matching
+  auth-specific wording only. A bare "session expired" deliberately does NOT
+  match: a rotation that resumes a CLI session living in the previous account's
+  config dir fails that way, and benching the account just rotated *to* would
+  be exactly backwards.
+- **Credential health persists beside the windows**, in the same per-account
+  state file, with the same newer-`seenAt`-wins merge. Clearing writes an
+  explicit `ok` record rather than deleting the field — a deletion would lose
+  the read-merge-write race against the stale `failed` still on disk and
+  resurrect the exclusion it was meant to end.
+- **Classification checks credentials before quota.** A rejected login cannot
+  serve any model at any utilization, so `credential_failed` outranks every
+  window rule. It is also unusable in a stronger sense than `exhausted`: an
+  exhausted account still authenticates, so it can serve a degraded tier or
+  produce a real quota error; a rejected one can do neither. When nothing is
+  usable, selection therefore prefers a member that can at least authenticate.
+- **Bounded at 15 minutes.** Long enough that one dead login cannot consume a
+  run's fallback rungs, short enough that a login fixed out-of-band re-probes
+  on roughly the login-probe cadence rather than staying benched. Explicit
+  clears end it immediately: a successful turn through the shim, or
+  `multi-clawd login <account>`. The periodic login probe is deliberately NOT
+  a clear — it checks credential *sources*, and a present credential being a
+  rejected session is the whole failure mode.
+- **All members broken is a hard error, once.** There is no account to rotate
+  to and no tier to degrade into, so the pool fails the launch with a single
+  error naming re-authentication instead of relaunching the same rejected
+  session per rung. Quota exhaustion and credential failure stay separate
+  alerts throughout, because the operator's action differs: wait vs log back in.
 
 ## Config (user-facing)
 

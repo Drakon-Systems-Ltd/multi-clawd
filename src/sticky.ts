@@ -10,7 +10,7 @@
  * a launch on an account that is near-limit or exhausted while a healthier
  * account exists.
  */
-import { choosePoolAccount, type HealthVerdict } from "./health.js";
+import { choosePoolAccount, fallbackPoolAccount, type HealthVerdict } from "./health.js";
 
 export interface StickyEntry {
   account: string;
@@ -36,8 +36,12 @@ export function decideStickySelection(params: {
   const home = verdicts[0];
   const healthChoice = choosePoolAccount(verdicts);
 
-  // Whole pool exhausted: home account so the failure is real; nothing to stick to.
-  if (!healthChoice) return { account: home.id };
+  // Nothing usable: run on an account that can at least authenticate so the
+  // failure is the REAL one (a quota error the chain and the degrade ladder
+  // understand), not an auth error borrowed from a dead login. With every
+  // member credential-broken this is still home, and the pool raises the hard
+  // auth error instead of launching. Nothing to stick to either way.
+  if (!healthChoice) return { account: fallbackPoolAccount(verdicts) };
 
   const stickyVerdict = sticky
     ? verdicts.find((v) => v.id === sticky.account)?.verdict
