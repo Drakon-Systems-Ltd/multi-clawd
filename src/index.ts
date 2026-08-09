@@ -468,9 +468,12 @@ function peekToken(account: AccountConfig): string | undefined {
 }
 
 /** Launch-path token access: resolves refs via the gateway's secret providers. */
-async function resolveTokenAsync(account: AccountConfig): Promise<string | undefined> {
+async function resolveTokenAsync(
+  account: AccountConfig,
+  resolver?: TokenRefResolver,
+): Promise<string | undefined> {
   if (isSecretRefShape(account.oauthTokenRef) && !account.native && !account.oauthTokenFile) {
-    return activeTokenResolver?.resolve(account.oauthTokenRef);
+    return (resolver ?? activeTokenResolver)?.resolve(account.oauthTokenRef);
   }
   return peekToken(account);
 }
@@ -677,8 +680,11 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
 }
 
 /** Child env for one account: tested contract lives in account-env.ts. */
-async function buildAccountEnv(account: AccountConfig): Promise<Record<string, string>> {
-  const token = await resolveTokenAsync(account);
+async function buildAccountEnv(
+  account: AccountConfig,
+  resolver?: TokenRefResolver,
+): Promise<Record<string, string>> {
+  const token = await resolveTokenAsync(account, resolver);
   return buildAccountChildEnv(account, token, healthStateFile(account.id));
 }
 
@@ -1003,6 +1009,7 @@ export function registerPoolBackend(
   accounts: AccountConfig[],
   registeredIds: Set<string>,
   execMode?: string,
+  deps?: { resolver?: TokenRefResolver },
 ): void {
   const logger = api.logger;
   if (!pool) return;
@@ -1122,7 +1129,42 @@ export function registerPoolBackend(
     // pool-wide auth outage (if one was raised) is over.
     alertState = clearAlert(alertState, `pool-credentials:${poolId}`);
     writeStickyEntry(stickyFile, decision.sticky, logger);
-    const env = await buildAccountEnv(chosen);
+    // An account whose credential will not resolve is skipped, not benched and
+    // not launched. Two rules meet here and neither may be dropped: a resolver
+    // outage is a HOST problem, so it must never mark the account's login
+    // broken (#8); and an unresolvable credential must never launch, because
+    // the child would fall through to the box's default login and spend a
+    // different account's quota under this one's name (1.7.3). Skipping
+    // satisfies both — the pool routes around the gap and the account comes
+    // straight back the moment the secret provider does. Only when NO member
+    // resolves does the launch fail, and then loudly, so OpenClaw's chain
+    // drops to the next provider rather than a wrong Claude account.
+    const order = [chosen, ...members.filter((m) => m.id !== chosen.id)];
+    let env: Record<string, string> | undefined;
+    const unresolved: string[] = [];
+    for (const candidate of order) {
+      try {
+        env = await buildAccountEnv(candidate, deps?.resolver);
+        if (candidate.id !== chosen.id) {
+          logger.warn(
+            `[multi-clawd] pool ${poolId}: ${chosen.id}'s credential did not resolve — ` +
+              `launching on ${candidate.id} instead (account not benched; secret provider may be down)`,
+          );
+        }
+        break;
+      } catch (err) {
+        unresolved.push(`${candidate.id} (${(err as Error).message})`);
+      }
+    }
+    if (!env) {
+      const text =
+        `pool ${poolId}: no account's credential could be resolved — ` +
+        `the secret provider is unreachable or every reference is empty. ${unresolved.join("; ")}`;
+      logger.error(`[multi-clawd] ${text}`);
+      raiseAlert({ key: `pool-unresolvable:${poolId}`, severity: "error", text });
+      throw new Error(`[multi-clawd] ${text}`);
+    }
+    alertState = clearAlert(alertState, `pool-unresolvable:${poolId}`);
     // Tier degradation: only when the whole pool is exhausted and the launch
     // is not a pinned (contractual) lane. The shim enforces the swap.
     if (ladder.length > 0) {

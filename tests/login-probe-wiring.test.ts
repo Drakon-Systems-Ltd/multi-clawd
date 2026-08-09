@@ -36,9 +36,15 @@ const { parseStoredState } = await import("../src/shim-core.js");
 const MIN = 60 * 1000;
 const REF = { source: "exec", provider: "onepassword", id: "op://Vault/Item/field" };
 
+/** Distinct refs: a resolver must be able to tell the two accounts apart. */
+const REF_BY_ACCOUNT: Record<string, typeof REF> = {
+  claw1: { ...REF, id: "op://Vault/claw1/field" },
+  claw2: { ...REF, id: "op://Vault/claw2/field" },
+};
+
 const ACCOUNTS = [
-  { id: "claw1", oauthTokenRef: REF },
-  { id: "claw2", oauthTokenRef: REF },
+  { id: "claw1", oauthTokenRef: REF_BY_ACCOUNT.claw1 },
+  { id: "claw2", oauthTokenRef: REF_BY_ACCOUNT.claw2 },
 ];
 
 function logs() {
@@ -116,6 +122,56 @@ async function chosenAccount(): Promise<string> {
   return env.MULTI_CLAWD_ACCOUNT_ID ?? "(none)";
 }
 
+/**
+ * Same registration as `chosenAccount()`, but with a launch-path resolver
+ * wired: `tokens[id]` is what that account's secret ref resolves to, and
+ * `undefined` models a provider that returns nothing for it. Resolves to the
+ * account id the launch actually ran on.
+ */
+async function chosenAccountWith(tokens: Record<string, string | undefined>): Promise<string> {
+  let backend: { prepareExecution?: unknown } | undefined;
+  const { logger } = logs();
+  const api = {
+    logger,
+    registerCliBackend: (b: { prepareExecution?: unknown }) => {
+      if (b.prepareExecution) backend = b;
+    },
+    registerProvider: () => {},
+  } as never;
+  const resolver = {
+    resolve: async (ref: { id?: string }) => {
+      const id = Object.keys(REF_BY_ACCOUNT).find((k) => REF_BY_ACCOUNT[k].id === ref?.id);
+      return id ? tokens[id] : undefined;
+    },
+    resolveDetailed: async () => ({ value: undefined, failure: "empty_result" as const }),
+    peek: () => undefined,
+  } as never;
+  registerPoolBackend(
+    api,
+    { id: "clawd", accounts: ["claw1", "claw2"] },
+    ACCOUNTS,
+    new Set(["claw1", "claw2"]),
+    undefined,
+    { resolver },
+  );
+  if (!backend?.prepareExecution) throw new Error("pool backend did not register");
+  const prepare = backend.prepareExecution as (
+    ctx: Record<string, unknown>,
+  ) => Promise<{ env: Record<string, string> }>;
+  const { env } = await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
+  return env.MULTI_CLAWD_ACCOUNT_ID ?? "(none)";
+}
+
+/**
+ * Selection shorthand: both credentials resolve, so the account that comes
+ * back is the one the POOL chose — the question these tests are asking. They
+ * used to reach selection through a launch that resolved nothing at all, which
+ * only worked while an unresolved credential silently produced a credential-free
+ * env; since 1.7.3 that state refuses to launch, so the resolver is wired.
+ */
+const bothResolve = () =>
+  chosenAccountWith({ claw1: "sk-ant-oat01-one", claw2: "sk-ant-oat01-two" });
+
 beforeEach(() => {
   home.dir = mkdtempSync(join(tmpdir(), "mc-probe-"));
   writeAllowedQuota("claw1");
@@ -130,14 +186,14 @@ afterEach(() => {
 describe("probe verdicts reach pool selection (#8 case 2, gap a)", () => {
   test("a credential-broken probe takes the account out of the pool", async () => {
     // Control: with quota identical on both, the launch stays home on claw1.
-    expect(await chosenAccount()).toBe("claw1");
+    expect(await bothResolve()).toBe("claw1");
 
     await runLoginHealthProbe([ACCOUNTS[0]], logs().logger, {
       resolver: resolverThat({ failure: "empty_result" }),
       nowMs: Date.now(),
     });
 
-    expect(await chosenAccount()).toBe("claw2");
+    expect(await bothResolve()).toBe("claw2");
   });
 
   test("the exclusion is refreshed while the probe keeps finding it broken", async () => {
@@ -168,7 +224,7 @@ describe("probe verdicts reach pool selection (#8 case 2, gap a)", () => {
       nowMs: Date.now(),
     });
     expect(storedCredential("claw1")).toBeUndefined();
-    expect(await chosenAccount()).toBe("claw1");
+    expect(await bothResolve()).toBe("claw1");
   });
 });
 
@@ -185,7 +241,7 @@ describe("a host outage is not a broken account (#8 case 2, gap c)", () => {
     const { logger } = logs();
     await outage(logger, Date.now());
     expect(storedCredential("claw1")).toBeUndefined();
-    expect(await chosenAccount()).toBe("claw1");
+    expect(await bothResolve()).toBe("claw1");
   });
 
   test("it still alerts — and says host, not login", async () => {
@@ -222,5 +278,35 @@ describe("probe state survives re-registration (#8 case 2, gap b)", () => {
     // Third consecutive failure, 11 minutes into the streak: broken.
     expect(out.error.join("\n")).toMatch(/claw1/);
     expect(out.error.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The merge conflict between #8 (a resolver outage is a HOST problem, so the
+ * account must not be benched) and 1.7.3 (an unresolvable credential must
+ * never launch on the box's default login). Held apart, each is right; held
+ * together they deadlock — the pool keeps electing an account whose every
+ * launch then throws.
+ *
+ * The resolution is neither: an account whose credential will not resolve is
+ * skipped at LAUNCH time and the next pool member is tried. Nothing is
+ * benched, nothing runs on the wrong login, and the turn only fails when the
+ * whole pool is unresolvable — at which point OpenClaw's chain takes over.
+ */
+describe("an unresolvable credential rotates rather than throwing (1.7.3 × #8)", () => {
+  test("the launch skips past an account whose token will not resolve", async () => {
+    const account = await chosenAccountWith({ claw1: undefined, claw2: "sk-ant-oat01-two" });
+    expect(account).toBe("claw2");
+  });
+
+  test("a resolvable home account is still preferred", async () => {
+    const account = await chosenAccountWith({ claw1: "sk-ant-oat01-one", claw2: "sk-ant-oat01-two" });
+    expect(account).toBe("claw1");
+  });
+
+  test("when no account resolves the launch fails loudly, naming the pool", async () => {
+    await expect(chosenAccountWith({ claw1: undefined, claw2: undefined })).rejects.toThrow(
+      /clawd/,
+    );
   });
 });
