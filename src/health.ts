@@ -63,6 +63,50 @@ export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
  */
 export const CREDENTIAL_FAILED_TTL_MS = 15 * 60 * 1000;
 
+/**
+ * How long a REJECTION is honoured on the strength of one observation, even
+ * when it carries a future `resetsAt` (#11).
+ *
+ * Reset-bearing windows are trusted until their own reset for freshness — an
+ * account idle 6 hours must not lose a weekly window with days left to run.
+ * Applying that same trust to a *rejection* was the bug: a single observation
+ * benched a whole account for as long as the provider cared to quote. Live case,
+ * 9-10 Aug 2026 — claw1 held one `seven_day_overage_included: rejected` seen at
+ * 07:32Z with a reset stamp 60 hours out; direct probes returned opus-5
+ * successfully throughout, and the pool alarmed "every account is exhausted"
+ * with both accounts serving.
+ *
+ * A quoted reset is the provider's plan, not a contract: limits lift early,
+ * overage is granted, plans change. So a rejection ages by its own observation
+ * like every other piece of negative evidence here — the same rule
+ * CREDENTIAL_FAILED_TTL_MS applies to a dead login, and for the same reason: we
+ * do not need to prove the block has lifted, we only need to stop asserting it
+ * has not. The next real launch is the probe, and costs nothing when it works.
+ *
+ * One hour, matching MODEL_REJECTED_TTL_MS: a genuinely exhausted account
+ * re-records on its next failed launch (mergeHealthStates keeps the newer
+ * `seenAt`), so the ceiling on a real limit is one wasted launch per hour, and
+ * the ceiling on a phantom one drops from ~60 hours to one.
+ *
+ * Scope: ACCOUNT-level windows only. Model-scoped rejections keep their
+ * existing rule — the evidence for #11 is account-level (claw1 and claw2, both
+ * `seven_day_overage_included`), a model-scoped bench degrades to the next rung
+ * of the failover chain rather than costing the account, and shortening it here
+ * would reverse fix A on speculation. Widen when a model-scoped phantom is
+ * actually observed, not before.
+ */
+export const REJECTION_REVALIDATE_AFTER_MS = 60 * 60 * 1000;
+
+/**
+ * Whether a rejection may still be asserted from the observation we hold, or
+ * whether it is old enough that the next launch should find out for itself.
+ * Reset-LESS rejections are already bounded by their own TTL at the call sites;
+ * this is the bound that reset-bearing ones never had.
+ */
+function rejectionStillAssertable(seenAt: number, nowMs: number): boolean {
+  return nowMs - seenAt <= REJECTION_REVALIDATE_AFTER_MS;
+}
+
 const MODEL_WINDOW_PREFIX = "model:";
 
 /**
@@ -220,6 +264,13 @@ export function classifyAccountHealth(
       if (!requestedWindowKey || canonicalWindow !== requestedWindowKey) continue;
       if (w.status !== "rejected") continue;
       if (resetMs !== undefined) {
+        // NOT bounded by REJECTION_REVALIDATE_AFTER_MS, deliberately — see the
+        // constant's note. #11 is evidenced on account-level windows only, and
+        // a model-scoped bench degrades to the next rung of the failover chain
+        // rather than costing the whole account. Re-validating here would also
+        // reverse fix A's earned behaviour (a model cap resetting in 2 days must
+        // survive an idle account) on no evidence. The 8-day horizon cap above
+        // remains the bound.
         if (resetMs > nowMs) {
           return {
             verdict: "exhausted",
@@ -250,7 +301,15 @@ export function classifyAccountHealth(
     // reset-less branch below has said so since 1.7.2 — carrying a reset stamp
     // does not make the same event mean something different, so the two
     // branches share the guard.
-    if (w.status === "rejected" && resetBearing && isPeriodWindow(window)) {
+    // ... and only while the observation is recent enough to still be asserting
+    // something about now (#11). Without this bound one rejection benched a
+    // healthy account for the whole 60 hours its `resetsAt` claimed.
+    if (
+      w.status === "rejected" &&
+      resetBearing &&
+      isPeriodWindow(window) &&
+      rejectionStillAssertable(w.seenAt, nowMs)
+    ) {
       return {
         verdict: "exhausted",
         resumeAt: resetMs,
