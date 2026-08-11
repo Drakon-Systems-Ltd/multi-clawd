@@ -4,6 +4,52 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.7.4] — 2026-08-11
+
+**Two accounts, three ways a healthy one could be taken out of service.** This
+release is about the pool electing an account it should not have, and refusing
+one it should have kept.
+
+- **A dead login is now a pool-selection dimension, not a quota afterthought
+  (#8).** The Claude CLI's `session_expired` / invalid-login records are parsed
+  and persisted, and an account whose login the CLI has definitively rejected
+  is excluded from selection — checked *before* the windows are read, because
+  the bug was precisely that quota `allowed` kept re-electing a dead login and
+  burning four fallback rungs in seconds. Bounded by a 15-minute TTL so a login
+  fixed out-of-band re-probes instead of staying benched. The 15-minute login
+  probe's verdicts now feed selection rather than only deciding whether to log
+  a transition — but only the *credential* ones: a resolver outage is a host
+  problem and says nothing about the account.
+
+- **An unresolvable credential rotates instead of deadlocking.** 1.7.3 made
+  credential resolution fail closed; #8 requires that a resolver outage never
+  bench an account. Held together those two rules deadlock — the pool keeps
+  electing an account whose every launch then throws. An account whose
+  credential will not resolve is now *skipped* at launch and the next member
+  tried: nothing benched, nothing running on the wrong login, and the turn
+  fails only when no member resolves, with its own alert so the model chain
+  drops to another provider rather than a wrong Claude account.
+
+- **A rejection is a claim with a shelf life, not a fact until its reset
+  (#11).** Reset-bearing windows are trusted until their own reset so an idle
+  account cannot discard a weekly allowance — correct for allowances, wrong for
+  rejections. One `seven_day_overage_included: rejected` observation, quoting a
+  reset 60 hours out, benched a healthy account for over 30 hours while direct
+  probes served `claude-opus-5` throughout and the standby climbed to 99%. An
+  account-level rejection now ages by its own observation (1 hour), the same
+  rule a dead login already followed: we do not need to prove the block has
+  lifted, only stop asserting it has not. A genuine limit re-records on its
+  next failed launch. Model-scoped rejections deliberately keep the old rule,
+  and the asymmetry is pinned by a test.
+
+480 tests green (up from 415), typecheck clean. Every fix in this release was
+verified by deleting it and confirming the regression tests fail.
+
+Known and open: #11's underlying contradiction — a newer observation of the
+same period does not displace an older rejection — is bounded here, not
+resolved. #12 (named period windows carry no model dimension) is untouched.
+#10 is superseded by the #11 work and should be re-read before acting on it.
+
 ## [1.7.3] — 2026-08-09
 
 **Three fixes from an adversarial pass on our own source.** Four agents were
