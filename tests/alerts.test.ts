@@ -40,6 +40,18 @@ describe("alert store", () => {
     expect(pendingAlertText(state, NOW)).toBeUndefined();
   });
 
+  test("alertKeysWithPrefix returns the family, not the neighbours", async () => {
+    const { alertKeysWithPrefix } = await import("../src/alerts");
+    let state: AlertState = { alerts: [] };
+    state = addAlert(state, { key: "pool-exhausted:clawd:opus-5", severity: "error", text: "a" }, NOW);
+    state = addAlert(state, { key: "pool-exhausted:clawd:sonnet-5", severity: "error", text: "b" }, NOW);
+    state = addAlert(state, { key: "pool-credentials:clawd", severity: "error", text: "c" }, NOW);
+    expect(alertKeysWithPrefix(state, "pool-exhausted:clawd:").sort()).toEqual([
+      "pool-exhausted:clawd:opus-5",
+      "pool-exhausted:clawd:sonnet-5",
+    ]);
+  });
+
   test("multiple alerts render on separate lines, errors first", () => {
     let state: AlertState = { alerts: [] };
     state = addAlert(state, { key: "a", severity: "info", text: "info thing" }, NOW);

@@ -40,6 +40,19 @@ export function clearAlert(state: AlertState, key: string): AlertState {
   return { alerts: state.alerts.filter((a) => a.key !== key) };
 }
 
+/**
+ * Keys currently held under a prefix.
+ *
+ * Some alerts are a FAMILY rather than a single fact — `pool-exhausted:<pool>:<model>`
+ * is one key per model, so a chain that walked four rungs during an outage leaves
+ * four of them. A caller that only clears the key for the model in front of it
+ * leaves the other three to sit out their TTL as gravestones (#15). This lets the
+ * caller re-check the whole family against current state.
+ */
+export function alertKeysWithPrefix(state: AlertState, prefix: string): string[] {
+  return state.alerts.filter((a) => a.key.startsWith(prefix)).map((a) => a.key);
+}
+
 function isLive(alert: StoredAlert, nowMs: number): boolean {
   const ttl = alert.ttlMs ?? DEFAULT_TTL_MS[alert.severity];
   return nowMs - alert.at <= ttl;

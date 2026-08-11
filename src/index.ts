@@ -72,7 +72,13 @@ import {
   type TokenRefResolver,
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
-import { addAlert, clearAlert, pendingAlertText, type AlertState } from "./alerts.js";
+import {
+  addAlert,
+  alertKeysWithPrefix,
+  clearAlert,
+  pendingAlertText,
+  type AlertState,
+} from "./alerts.js";
 import {
   buildAccountChildEnv,
   tokenFileModeWarning,
@@ -188,6 +194,17 @@ let loginProbeTimer: ReturnType<typeof setInterval> | undefined;
 
 function raiseAlert(alert: Parameters<typeof addAlert>[1]): void {
   alertState = addAlert(alertState, alert, Date.now());
+}
+
+/**
+ * Exactly what the operator's next heartbeat would carry — the one thing they
+ * actually see of this module's alert state. Exported because a rendered line
+ * that no longer matches reality is itself the bug (#15), so it has to be
+ * assertable from a test rather than only observable in a live Telegram wake.
+ */
+export function pendingOperatorAlerts(nowMs: number): string | undefined {
+  ingestAlertSpool();
+  return pendingAlertText(alertState, nowMs);
 }
 
 /**
@@ -857,8 +874,7 @@ export default definePluginEntry({
       const logger = api.logger;
       try {
         api.on("heartbeat_prompt_contribution", () => {
-          ingestAlertSpool();
-          const text = pendingAlertText(alertState, Date.now());
+          const text = pendingOperatorAlerts(Date.now());
           return text ? { appendContext: text } : undefined;
         });
       } catch (err) {
@@ -1058,9 +1074,13 @@ export function registerPoolBackend(
     // Model-aware (v0.3.6): a model-scoped rejected window (reactive 429
     // capture) exhausts an account only for the model this launch requests.
     const requestedModel = canonicalModelId(ctx.modelId) ?? ctx.modelId;
-    const verdicts = members.map((a) => ({
-      id: a.id,
-      health: classifyAccountHealth(readHealthState(a.id), options, now, requestedModel),
+    // Read each account's state ONCE: the stale-alert sweep below re-classifies
+    // the same state against other models, and two reads at different instants
+    // could disagree with each other.
+    const states = members.map((a) => ({ id: a.id, state: readHealthState(a.id) }));
+    const verdicts = states.map(({ id, state }) => ({
+      id,
+      health: classifyAccountHealth(state, options, now, requestedModel),
     }));
     // Every member's login is known-broken (#8): a dead native account used to
     // win all four clawd/* fallback rungs of a run because quota still said
@@ -1102,9 +1122,30 @@ export function registerPoolBackend(
     // Quota exhaustion and credential failure are different operator problems
     // with different fixes (wait / re-authenticate), so they stay separate
     // alerts with separate keys — never collapsed into one "pool is unhappy".
+    // An exhaustion alert is a claim with the same shelf life as the rejection
+    // under it (#13), and nothing used to end it: the key was raised and never
+    // cleared, so a 6h error TTL kept injecting "every account is exhausted"
+    // into heartbeat prompts long after the windows reset. The alert reaches
+    // the operator ONLY through the heartbeat hook, so interactive turns kept
+    // working normally while every wake reported an outage that was over —
+    // Friday's box declared four models exhausted at 11:20Z off gravestones
+    // written during a real 09:20Z outage (#15).
+    //
+    // Sweep the whole family, not just this launch's model, and re-check each
+    // against the state we just read: an alert survives only while its own
+    // condition still holds.
+    const exhaustionPrefix = `pool-exhausted:${poolId}:`;
+    for (const key of alertKeysWithPrefix(alertState, exhaustionPrefix)) {
+      const alertedModel = key.slice(exhaustionPrefix.length);
+      const stillExhausted = states.every(
+        ({ state }) =>
+          classifyAccountHealth(state, options, now, alertedModel).verdict === "exhausted",
+      );
+      if (!stillExhausted) alertState = clearAlert(alertState, key);
+    }
     if (verdicts.every((v) => v.health.verdict === "exhausted")) {
       raiseAlert({
-        key: `pool-exhausted:${poolId}:${requestedModel}`,
+        key: `${exhaustionPrefix}${requestedModel}`,
         severity: "error",
         text: `pool ${poolId}: every account is exhausted for ${requestedModel} — turns are degrading or falling through the chain`,
       });
