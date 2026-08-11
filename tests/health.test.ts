@@ -7,6 +7,7 @@ import {
   isShortWindow,
   isPeriodWindow,
   MODEL_REJECTED_TTL_MS,
+  REJECTION_REVALIDATE_AFTER_MS,
 } from "../src/health";
 import { modelWindowKey, type AccountHealthState } from "../src/shim-core";
 
@@ -538,5 +539,113 @@ describe("account-level rejections bind symmetrically, reset or no reset", () =>
     const h = classifyAccountHealth(s, {}, NOW);
     expect(h.verdict).toBe("exhausted");
     expect(h.resumeAt).toBe((NOW_S + 1800) * 1000);
+  });
+});
+
+/**
+ * Live incident, 9-10 Aug 2026 (issue #11). claw1 held ONE
+ * `seven_day_overage_included: rejected` observation, seen 09 Aug 07:32Z with a
+ * reset stamp 11 Aug 20:00Z. Reset-bearing windows were trusted until their own
+ * reset regardless of age, so that single record benched a healthy account for
+ * 30+ hours — direct probes outside the shim returned opus-5 successfully
+ * throughout, all fleet traffic piled onto claw2, and the pool alarmed
+ * "every account is exhausted" with both accounts serving.
+ *
+ * The rule the file already applies to credentials (a failure stops binding
+ * past its TTL so a fix made out-of-band is retried, and a still-dead login
+ * re-records itself on the very next launch) is the right rule here too. A
+ * rate limit can lift early — the provider is under no obligation to hold the
+ * reset it quoted — so a rejection is a claim with a shelf life, not a fact
+ * good until its own expiry date.
+ */
+describe("reset-bearing rejections re-validate rather than bench for days (#11)", () => {
+  test("a fresh reset-bearing rejection still exhausts", () => {
+    const s = state({
+      seven_day_overage_included: {
+        status: "rejected",
+        resetsAt: NOW_S + 172_800,
+        seenAt: NOW - 60_000,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
+  });
+
+  test("the same rejection stops binding once its observation passes the revalidate window", () => {
+    const s = state({
+      seven_day_overage_included: {
+        status: "rejected",
+        resetsAt: NOW_S + 172_800,
+        seenAt: NOW - REJECTION_REVALIDATE_AFTER_MS - 1,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).not.toBe("exhausted");
+  });
+
+  test("the live claw1 shape: one 30h-old rejection no longer benches the account", () => {
+    const s = state(
+      {
+        seven_day: {
+          status: "allowed_warning",
+          utilization: 0.84,
+          resetsAt: NOW_S + 172_800,
+          seenAt: NOW - 1000,
+        },
+        seven_day_overage_included: {
+          status: "rejected",
+          resetsAt: NOW_S + 172_800,
+          seenAt: NOW - 30 * 3_600_000,
+        },
+      },
+      NOW - 1000,
+    );
+    // 0.84 is below the 0.85 rotation threshold, so with the stale rejection no
+    // longer binding the account is simply usable — which is what the direct
+    // probes showed it to be.
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("model-scoped reset-bearing rejections are deliberately NOT re-validated", () => {
+    // Asymmetry on purpose, recorded so nobody 'simplifies' it into symmetry.
+    // #11's evidence is account-level only (claw1 and claw2, both on
+    // `seven_day_overage_included`). A model-scoped bench costs one rung of the
+    // failover chain, not the account, and re-validating it here would reverse
+    // fix A's earned rule that a cap resetting in 2 days survives an idle
+    // account. If a model-scoped phantom is ever observed, widen it then.
+    const key = modelWindowKey("clawd/claude-opus-5");
+    const s = state({
+      [key]: {
+        status: "rejected",
+        resetsAt: NOW_S + 172_800,
+        seenAt: NOW - REJECTION_REVALIDATE_AFTER_MS - 1,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW, "clawd/claude-opus-5").verdict).toBe("exhausted");
+  });
+
+  test("re-validation applies to rejections only — a stale warning keeps its reset trust", () => {
+    // Non-rejection windows do not bench an account, they only rotate it, so
+    // ageing them out early buys nothing and would lose the near-limit signal
+    // that reset-aware staleness (fix A) exists to preserve.
+    const s = state(
+      {
+        seven_day: {
+          status: "allowed_warning",
+          utilization: 0.95,
+          resetsAt: NOW_S + 172_800,
+          seenAt: NOW - 30 * 3_600_000,
+        },
+      },
+      NOW - 30 * 3_600_000,
+    );
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("near_limit");
+  });
+
+  test("a rejection that recurs re-records and binds again — the block self-heals loudly", () => {
+    // The freshly re-observed record is what makes a genuinely exhausted
+    // account cost at most one wasted launch per revalidate window.
+    const s = state({
+      seven_day: { status: "rejected", resetsAt: NOW_S + 172_800, seenAt: NOW - 1000 },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
   });
 });
