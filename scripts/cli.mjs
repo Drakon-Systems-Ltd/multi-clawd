@@ -16,7 +16,7 @@
  * has to remember `--pin --force`.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync as existsSyncEarly } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
@@ -92,6 +92,34 @@ async function askYes(question, dflt = true) {
 }
 
 /** This package's own version (the CLI half). */
+/**
+ * Why a `dist/` import failed, in the user's terms.
+ *
+ * The bare "reinstall the package" message was wrong in the one case that
+ * actually happens: this CLI installs globally, `openclaw` is a peerDependency,
+ * and on a box where the peer is not resolvable from this directory a perfectly
+ * complete build still throws ERR_MODULE_NOT_FOUND. Reinstalling cannot fix
+ * that, so "reinstall the package" sends people in circles — it did, on a Mac,
+ * 18 Aug 2026. Check the file exists first, then report the real cause.
+ */
+function distFailure(cmd, mod, err) {
+  const path = resolve(__dirname, "..", "dist", mod);
+  if (!existsSyncEarly(path)) {
+    return `${cmd}: built dist/${mod} is missing — reinstall the package.`;
+  }
+  const missingPeer = /Cannot find package '([^']+)'/.exec(String(err?.message ?? ""));
+  if (missingPeer) {
+    const peer = missingPeer[1];
+    return [
+      `${cmd}: dist/${mod} is present but cannot load — the "${peer}" package is not`,
+      `resolvable from this install (${resolve(__dirname, "..")}).`,
+      `Install "${peer}" globally alongside this CLI, or run the CLI with npx from a`,
+      `directory where "${peer}" resolves.`,
+    ].join("\n  ");
+  }
+  return `${cmd}: dist/${mod} failed to load — ${err?.message ?? err}`;
+}
+
 function cliVersion() {
   return JSON.parse(readFileSync(resolve(__dirname, "..", "package.json"), "utf8")).version;
 }
@@ -134,8 +162,8 @@ async function chain(args = []) {
   let ca;
   try {
     ca = await import(resolve(__dirname, "..", "dist", "chain-audit.js"));
-  } catch {
-    console.error("chain: built dist/ is missing — reinstall the package.");
+  } catch (err) {
+    console.error(distFailure("chain", "chain-audit.js", err));
     process.exit(1);
   }
 
@@ -227,8 +255,8 @@ async function update() {
   let uc;
   try {
     uc = await import(resolve(__dirname, "..", "dist", "update-core.js"));
-  } catch {
-    console.error("update: built dist/ is missing — reinstall the package.");
+  } catch (err) {
+    console.error(distFailure("update", "update-core.js", err));
     process.exit(1);
   }
   console.log(`\n${BOLD}🦞 multi-clawd update${RESET}\n`);
@@ -391,8 +419,8 @@ async function explain() {
     ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
     health = await import(resolve(__dirname, "..", "dist", "health.js"));
     shim = await import(resolve(__dirname, "..", "dist", "shim-core.js"));
-  } catch {
-    console.error("explain: built dist/ is missing — reinstall the package.");
+  } catch (err) {
+    console.error(distFailure("explain", "explain-core.js", err));
     process.exit(1);
   }
   let config = {};
@@ -465,9 +493,12 @@ async function login() {
   try {
     lp = await import(resolve(__dirname, "..", "dist", "login-plan.js"));
     ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
-    idx = await import(resolve(__dirname, "..", "dist", "index.js"));
-  } catch {
-    console.error("login: built dist/ is missing — reinstall the package.");
+    // credential-state.js, NOT index.js: this is the one call login needs from
+    // the plugin side, and index.js drags in the `openclaw` peer, which is not
+    // resolvable from a global CLI install on every machine.
+    idx = await import(resolve(__dirname, "..", "dist", "credential-state.js"));
+  } catch (err) {
+    console.error(distFailure("login", "login-plan.js", err));
     process.exit(1);
   }
   let config = {};

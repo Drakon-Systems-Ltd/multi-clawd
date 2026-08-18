@@ -79,6 +79,8 @@ import {
   pendingAlertText,
   type AlertState,
 } from "./alerts.js";
+import { healthStateFile, clearAccountCredentialFailure } from "./credential-state.js";
+export { healthStateFile, clearAccountCredentialFailure };
 import {
   buildAccountChildEnv,
   tokenFileModeWarning,
@@ -541,10 +543,6 @@ function buildRuntimeModel(
 /** dist/shim.js sits next to dist/index.js in the installed extension. */
 const SHIM_PATH = fileURLToPath(new URL("./shim.js", import.meta.url));
 
-/** Per-account health state written by the shim, read by the steering hook. */
-export function healthStateFile(accountId: string): string {
-  return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.json`);
-}
 
 /** Catalog ids observed on previous runs — the baseline for "this model is new". */
 function knownModelsFile(): string {
@@ -941,29 +939,6 @@ function readHealthState(accountId: string): AccountHealthState | undefined {
  * Returns whether anything was cleared. Best-effort: a failure to write is
  * reported by the return value, never thrown — no state file is worth a turn.
  */
-export function clearAccountCredentialFailure(accountId: string): boolean {
-  const file = healthStateFile(accountId);
-  let state: AccountHealthState;
-  try {
-    state = parseStoredState(readFileSync(file, "utf8")) ?? {
-      accountId,
-      windows: {},
-    };
-  } catch {
-    return false; // nothing recorded → nothing to clear
-  }
-  if (state.credential?.status !== "failed") return false;
-  const cleared = mergeHealthStates(state, clearCredentialFailure(state, Date.now()), Date.now());
-  try {
-    mkdirSync(dirname(file), { recursive: true });
-    const tmp = `${file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(cleared, null, 2), { mode: 0o600 });
-    renameSync(tmp, file);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function readStickyEntry(file: string): StickyEntry | undefined {
   try {
