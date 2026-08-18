@@ -649,3 +649,59 @@ describe("reset-bearing rejections re-validate rather than bench for days (#11)"
     expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
   });
 });
+
+/**
+ * #14: the utilization branch had no window filter, so a number reported on
+ * `seven_day_overage_included` — consumption measured against allowance PLUS
+ * purchased spill-over — crossed the same threshold as `seven_day` and drove
+ * rotation. Live on Case's box, 11 Aug 2026: overage-inclusive 0.96 against
+ * seven_day 0.75, twenty-one points apart, with the overage number steering.
+ *
+ * The two windows are genuinely independent — claw1 held
+ * `seven_day_overage_included: rejected` while `seven_day` read
+ * `allowed_warning` at 84% and direct probes served opus-5 — so "little paid
+ * overage left" is not "little quota left". The base period window is the
+ * quota signal; the overage-inclusive one must not rotate on its own.
+ */
+describe("overage-inclusive utilization does not drive rotation (#14)", () => {
+  test("a high overage-inclusive number alone leaves the account ok", () => {
+    const s = state({
+      seven_day_overage_included: {
+        status: "allowed_warning",
+        utilization: 0.96,
+        resetsAt: NOW_S + 86400,
+        seenAt: NOW - 1000,
+      },
+      seven_day: {
+        status: "allowed_warning",
+        utilization: 0.75,
+        resetsAt: NOW_S + 86400,
+        seenAt: NOW - 1000,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("ok");
+  });
+
+  test("the base weekly window still rotates on its own number", () => {
+    const s = state({
+      seven_day: {
+        status: "allowed_warning",
+        utilization: 0.9,
+        resetsAt: NOW_S + 86400,
+        seenAt: NOW - 1000,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("near_limit");
+  });
+
+  test("a REJECTION on the overage window is untouched by this — it still binds", () => {
+    const s = state({
+      seven_day_overage_included: {
+        status: "rejected",
+        resetsAt: NOW_S + 86400,
+        seenAt: NOW - 1000,
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
+  });
+});

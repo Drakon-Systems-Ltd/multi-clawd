@@ -148,6 +148,30 @@ export function isPeriodWindow(window: string): boolean {
 }
 
 /**
+ * Whether a window measures consumption against allowance PLUS purchased
+ * spill-over (`seven_day_overage_included`) rather than against the included
+ * allowance alone (`seven_day`).
+ *
+ * The distinction decides one thing: whether a utilization NUMBER may trigger
+ * proactive rotation. It may not. The two windows are genuinely independent —
+ * claw1 held `seven_day_overage_included: rejected` while `seven_day` read
+ * `allowed_warning` at 84% and direct probes served opus-5 throughout — so a
+ * high overage-inclusive number means "little paid overage left", not "little
+ * quota left". Rotating on it strands a home account with real headroom
+ * (observed on Case's box, 11 Aug 2026: overage-inclusive 0.96 against
+ * seven_day 0.75, the overage number steering).
+ *
+ * This gates the utilization branch ONLY. A `rejected` status on an overage
+ * window is a refusal that actually happened and still binds — the account
+ * really was turned away — subject to the usual staleness rules.
+ */
+const OVERAGE_WINDOW_PATTERN = /(^|_)overage(_|$)/;
+
+export function isOverageWindow(window: string): boolean {
+  return OVERAGE_WINDOW_PATTERN.test(window);
+}
+
+/**
  * Tolerant warning test. `status` is CLI-internal and undocumented, so match
  * the family (`allowed_warning`, and any future `*_warning`) rather than one
  * exact string — same philosophy as the shim's parsing.
@@ -338,6 +362,10 @@ export function classifyAccountHealth(
       worst.verdict === "ok" &&
       typeof w.utilization === "number" &&
       w.utilization >= threshold &&
+      // Not on an overage-inclusive window (#14) — see isOverageWindow: that
+      // number is spill-over headroom, not quota headroom, and rotating on it
+      // strands a home account that can still serve.
+      !isOverageWindow(window) &&
       // A passed reset voids the observation: that utilization belonged to the
       // previous cycle. Reset-bearing windows are always current; reset-less
       // (resetMs === undefined) windows count on freshness alone.
