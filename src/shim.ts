@@ -185,7 +185,7 @@ const scanner = createLineScanner((line) => {
   try {
     const event = parseRateLimitEvent(line);
     if (event) {
-      state = updateHealthState(state, event, Date.now());
+      state = updateHealthState(state, event, Date.now(), effectiveModelId());
       persistState();
     }
     // v0.3.6: a reactive 429 model-limit error IS telemetry — record it

@@ -30,6 +30,12 @@ export interface AccountHealth {
   /** Epoch ms when an exhausted account is expected back. */
   resumeAt?: number;
   reason?: string;
+  /**
+   * Set when paid spill-over is nearly spent but real quota is not, i.e. the
+   * one case where the pool has deliberately NOT acted and the answer belongs
+   * to the owner (#14). The caller surfaces this as an operator alert.
+   */
+  overageAdvisory?: string;
 }
 
 export interface HealthOptions {
@@ -37,6 +43,12 @@ export interface HealthOptions {
   utilizationThreshold?: number;
   /** Ignore state older than this. Default 6 hours. */
   staleAfterMs?: number;
+  /**
+   * Treat utilization on the overage window as a reason to rotate, restoring
+   * pre-1.7.5 behaviour. Off by default: spending spill-over is a budget
+   * decision, so the pool asks rather than assumes (#14).
+   */
+  rotateOnOverage?: boolean;
 }
 
 const DEFAULT_UTILIZATION_THRESHOLD = 0.85;
@@ -148,6 +160,20 @@ export function isPeriodWindow(window: string): boolean {
 }
 
 /**
+ * Whether a window measures consumption against allowance PLUS purchased
+ * spill-over (`seven_day_overage_included`) rather than the allowance itself.
+ *
+ * The two diverge widely — 0.96 against 0.75 on one live account — and they
+ * answer different questions. "96% of the way through the money I am willing
+ * to spend" is a budget fact; "75% of the way through my quota" is a capacity
+ * fact. Only the second is a reason for the pool to move work off an account,
+ * so utilization on an overage window does not rotate by itself (#14).
+ */
+export function isOverageWindow(window: string): boolean {
+  return /overage/i.test(window);
+}
+
+/**
  * Tolerant warning test. `status` is CLI-internal and undocumented, so match
  * the family (`allowed_warning`, and any future `*_warning`) rather than one
  * exact string — same philosophy as the shim's parsing.
@@ -165,6 +191,44 @@ export function isWarningStatus(status: string): boolean {
  * means clock skew or a `resetsAt` parse bug, and we log it distinctly.
  */
 export const MAX_RESET_HORIZON_MS = 8 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long a reset-LESS rejection blocks, by the period of the window that
+ * refused.
+ *
+ * The block is a guess at "how long until this limit lifts", and one flat hour
+ * was the wrong guess for half the windows: right for `five_hour`, badly wrong
+ * for the weekly ones, where the real reset can be days out. The account came
+ * back at +1h, the pool returned home to a still-limited account, and the turn
+ * failed again — so the pool read as not rotating at all (#10).
+ *
+ * Day-scoped windows therefore block for longer, but deliberately nowhere near
+ * their real period: over-benching a recovered account costs live capacity, and
+ * a rejection we hold no reset stamp for is exactly the case we are least sure
+ * about. Six hours trades roughly six wasted launches a day down to one, while
+ * staying an order of magnitude short of the 8-day reset horizon. A fresh
+ * observation still displaces it at any time — the block ends on evidence, not
+ * only on the clock.
+ */
+export const PERIOD_RESET_LESS_BLOCK_MS = 6 * 60 * 60 * 1000;
+
+export function resetLessBlockMs(window: string): number {
+  return isShortWindow(window) ? MODEL_REJECTED_TTL_MS : PERIOD_RESET_LESS_BLOCK_MS;
+}
+
+/**
+ * Does a window's recorded model (if it has one) apply to this request?
+ *
+ * A window with no model is legacy or unattributable and stays account-wide,
+ * exactly as before 1.7.5. A window that names a model asserts nothing about
+ * any other model — including a request that names none, where we cannot show
+ * it applies and so must not bench the account (#12).
+ */
+function windowAppliesToModel(w: { model?: string }, requestedWindowKey?: string): boolean {
+  if (w.model === undefined) return true;
+  if (requestedWindowKey === undefined) return false;
+  return modelWindowKey(w.model) === requestedWindowKey;
+}
 
 /**
  * The credential verdict for an account, or undefined when its login is not
@@ -225,6 +289,10 @@ export function classifyAccountHealth(
   // account idle >6h must stay binding while it holds a live reset-bearing
   // window (weekly / model cap that has not yet reset).
   let hasLiveEvidence = false;
+  // Highest utilization seen on a spill-over window we declined to rotate on,
+  // and on the real-quota windows, so the advisory can quote both (#14).
+  let overageUtilization: number | undefined;
+  let quotaUtilization: number | undefined;
   for (const [window, w] of Object.entries(state.windows)) {
     const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
     // Reset-bearing = carries a still-future reset. Trusted until that reset
@@ -290,7 +358,17 @@ export function classifyAccountHealth(
     // Reset-less account windows keep the existing TTL/decay: aged out by
     // staleAfterMs to no positive evidence. Reset-bearing windows never age
     // out here.
-    const fresh = resetBearing || nowMs - w.seenAt <= staleAfterMs;
+    //
+    // A reset-less period REJECTION ages by its own block instead (#10), for
+    // the same reason model windows do: the generic freshness gate runs first,
+    // so a pool configured with a staleAfterMs shorter than the block would
+    // discard the rejection while its own rule still says the account is
+    // limited — silently reinstating the bug the block exists to fix.
+    const ownBlockMs =
+      w.status === "rejected" && resetMs === undefined && isPeriodWindow(window)
+        ? resetLessBlockMs(window)
+        : 0;
+    const fresh = resetBearing || nowMs - w.seenAt <= Math.max(staleAfterMs, ownBlockMs);
     if (!fresh) continue;
     hasLiveEvidence = true;
 
@@ -308,6 +386,8 @@ export function classifyAccountHealth(
       w.status === "rejected" &&
       resetBearing &&
       isPeriodWindow(window) &&
+      // Scoped to the model that earned it, when we know which that was (#12).
+      windowAppliesToModel(w, requestedWindowKey) &&
       rejectionStillAssertable(w.seenAt, nowMs)
     ) {
       return {
@@ -327,15 +407,26 @@ export function classifyAccountHealth(
     // where a limit event with no recognisable type lands, and a real one of
     // those was a Fable-only 429 — exhausting the account on it would strand
     // every other model behind a one-model limit.
-    if (w.status === "rejected" && resetMs === undefined && isPeriodWindow(window)) {
+    if (
+      w.status === "rejected" &&
+      resetMs === undefined &&
+      isPeriodWindow(window) &&
+      windowAppliesToModel(w, requestedWindowKey) &&
+      // The block ends when the BLOCK says so. It used to end whenever the
+      // generic staleness gate happened to drop the window, so the bench ran
+      // for `staleAfterMs` (6h by default) while `resumeAt` advertised one
+      // hour — the duration was an accident of an unrelated knob and the time
+      // we reported was not the time we honoured. Now the two agree, and each
+      // window's period sets its own (#10).
+      nowMs - w.seenAt <= resetLessBlockMs(window)
+    ) {
       return {
         verdict: "exhausted",
-        resumeAt: w.seenAt + MODEL_REJECTED_TTL_MS,
-        reason: `${window} rejected ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; TTL block)`,
+        resumeAt: w.seenAt + resetLessBlockMs(window),
+        reason: `${window} rejected ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; ${Math.round(resetLessBlockMs(window) / 3600000)}h block)`,
       };
     }
     if (
-      worst.verdict === "ok" &&
       typeof w.utilization === "number" &&
       w.utilization >= threshold &&
       // A passed reset voids the observation: that utilization belonged to the
@@ -343,10 +434,21 @@ export function classifyAccountHealth(
       // (resetMs === undefined) windows count on freshness alone.
       (resetBearing || resetMs === undefined)
     ) {
-      worst = {
-        verdict: "near_limit",
-        reason: `${window} utilization ${w.utilization} >= ${threshold}`,
-      };
+      // The one branch that had no window filter while both its siblings did,
+      // so spill-over consumption crossed the same threshold as real quota and
+      // drove routing (#14). Record it instead of acting on it; the owner is
+      // asked once the loop knows whether real quota agreed.
+      if (isOverageWindow(window) && !options.rotateOnOverage) {
+        overageUtilization = Math.max(overageUtilization ?? 0, w.utilization);
+      } else if (worst.verdict === "ok") {
+        worst = {
+          verdict: "near_limit",
+          reason: `${window} utilization ${w.utilization} >= ${threshold}`,
+        };
+      }
+    }
+    if (!isOverageWindow(window) && typeof w.utilization === "number") {
+      quotaUtilization = Math.max(quotaUtilization ?? 0, w.utilization);
     }
     // Numberless warning on a short window: the only signal the 5-hour session
     // limit ever gives before it bites. Deliberately narrow —
@@ -371,6 +473,21 @@ export function classifyAccountHealth(
   // No live reset-bearing window and every reset-less window is stale: nothing
   // to act on. Treated as healthy — we only ever rotate on positive evidence.
   if (worst.verdict === "ok" && !hasLiveEvidence) return { verdict: "no_data" };
+  // Ask only when the answer would actually change something: spill-over is
+  // nearly spent AND real quota is not, so the pool is staying put on a
+  // judgement the owner may want made differently. If real quota is also over
+  // threshold the pool has already rotated and there is nothing to ask.
+  if (worst.verdict === "ok" && overageUtilization !== undefined) {
+    const pct = (n: number) => `${Math.round(n * 100)}%`;
+    worst = {
+      ...worst,
+      overageAdvisory:
+        `paid overage is ${pct(overageUtilization)} spent while real quota is at ` +
+        `${quotaUtilization !== undefined ? pct(quotaUtilization) : "an unreported level"} — ` +
+        `not rotating on spill-over alone. Set pool.rotateOnOverage: true to rotate on it, ` +
+        `or leave it to keep using the overage you have paid for.`,
+    };
+  }
   return worst;
 }
 

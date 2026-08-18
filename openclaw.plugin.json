@@ -1,7 +1,7 @@
 {
   "id": "multi-clawd",
   "name": "multi-clawd",
-  "version": "1.7.4",
+  "version": "1.8.0",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
   "cliBackends": [
     "claw1",
@@ -50,6 +50,10 @@
           "staleAfterMs": {
             "type": "number",
             "description": "Ignore health data older than this. Default 21600000 (6h)."
+          },
+          "rotateOnOverage": {
+            "type": "boolean",
+            "description": "Rotate when the seven_day_overage_included window (quota PLUS purchased spill-over) crosses utilizationThreshold. Default false: high utilization there means little paid overage left, not little quota left, so the pool keeps using the overage you have paid for and raises an operator alert instead of deciding for you."
           },
           "minDwellMs": {
             "type": "number",

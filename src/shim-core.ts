@@ -31,6 +31,21 @@ export interface WindowHealth {
   seenAt: number;
   /** Raw `rate_limit_info` JSON for windows whose kind could not be read. */
   rawInfo?: string;
+  /**
+   * The model that was running when this window was recorded, canonicalised.
+   *
+   * A named period window used to be keyed by `rateLimitType` alone, which
+   * asserted the whole account was limited — but a rejection carries no
+   * evidence that it applies beyond the model that earned it, and live state
+   * disproved the assumption: an account holding
+   * `seven_day_overage_included: rejected` kept serving a different model
+   * fine (#12). Recording the model lets the reader scope the rejection to it.
+   *
+   * Absent on records written before 1.7.5, and on events the shim could not
+   * attribute to a model; the reader treats those as account-wide, exactly as
+   * before, so no migration is required.
+   */
+  model?: string;
 }
 
 /**
@@ -49,7 +64,7 @@ export const PRUNE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
  * from the persisted state. The reader (health.ts) already un-binds such a
  * window the moment its reset passes; this writer-side expiry makes the state
  * FILE self-heal too, instead of carrying a dead rejection for up to 14 days
- * (the generic prune horizon). Motivating incident: Friday's 21 Jul 2026
+ * (the generic prune horizon). Motivating incident: a 21 Jul 2026
  * post-reset deadlock — a `model:claude-fable-5` `status=rejected` record with
  * a passed reset sat in the state file indefinitely (a successful launch never
  * writes a per-model window, so nothing ever overwrote it) and an older
@@ -199,6 +214,7 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
       seenAt: w.seenAt,
       // Tolerant round-trip: keep a string rawInfo, drop anything else.
       rawInfo: typeof w.rawInfo === "string" ? w.rawInfo : undefined,
+      model: typeof w.model === "string" ? w.model : undefined,
     };
   }
   // Tolerant round-trip of the credential record: a malformed one is dropped,
@@ -537,11 +553,20 @@ export function clearCredentialFailure(
   };
 }
 
-/** Fold one event into the account's health state (windows keyed by type). */
+/**
+ * Fold one event into the account's health state (windows keyed by type).
+ *
+ * `model` is the model the run was serving, when the shim can name it. It is
+ * stored on the record rather than folded into the key on purpose: the key
+ * stays `seven_day` / `five_hour` as it always was, so persisted state,
+ * `mergeHealthStates`, and every window-name predicate keep working untouched
+ * — only the reader gains the ability to scope a rejection to its model (#12).
+ */
 export function updateHealthState(
   state: AccountHealthState,
   event: RateLimitEvent,
   now: number,
+  model?: string,
 ): AccountHealthState {
   const key = event.rateLimitType ?? "unknown";
   return {
@@ -556,6 +581,7 @@ export function updateHealthState(
         isUsingOverage: event.isUsingOverage,
         seenAt: now,
         rawInfo: event.rawInfo,
+        model: model === undefined ? undefined : canonicalizeModelIdForWindow(model),
       },
     },
   };

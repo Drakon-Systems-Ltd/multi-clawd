@@ -4,6 +4,51 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.8.0] — 2026-08-11
+
+**What a rejection actually claims, and who decides how your money is spent.**
+Four filed issues, all in the same handful of lines: each one a case where a
+window's number was read as saying more than it said.
+
+### Added
+- **`pool.rotateOnOverage`** (default `false`). Utilization on
+  `seven_day_overage_included` measures spend against allowance **plus
+  purchased spill-over** — "little paid overage left", not "little quota left".
+  It was the one utilization branch with no window filter, so 96% spill-over
+  drove rotation while real quota sat at 75%, and sticky return-home then
+  stranded the account until the overage window cooled. The pool no longer
+  decides this: it keeps using the overage you paid for, **raises an operator
+  alert naming both numbers**, and rotates on spill-over only if you opt in
+  (#14).
+
+### Fixed
+- **A period rejection is scoped to the model that earned it** (#12). Named
+  period windows were keyed by `rateLimitType` alone, so a rejection produced
+  while serving one model benched the account for every model — while live
+  state showed such an account still serving a different model fine. The shim
+  now records the model on the window; the reader scopes to it. Records
+  written before this release carry no model and stay account-wide, so no
+  migration and no key change.
+- **Reset-less rejections block for their own window's period** (#10). The
+  bench ran for `staleAfterMs` — an unrelated staleness knob, 6h by default —
+  while `resumeAt` advertised one hour, so the duration was accidental and the
+  time reported was not the time honoured. Now each window sets its own: 1h for
+  hour-scoped, 6h for day-scoped, and the block ages by its own clock rather
+  than being truncated by a shorter `staleAfterMs`.
+- **An exhaustion alert no longer outlives the exhaustion** (#15, via
+  `fix/exhaustion-alert-lifecycle`). `pool-exhausted:<pool>:<model>` was raised
+  and never cleared, so a 6h error TTL kept injecting "every account is
+  exhausted" into heartbeat prompts long after the windows reset — and because
+  that alert reaches the operator only through the heartbeat, interactive turns
+  ran fine while every wake reported an outage that was over. The whole family
+  is now swept per launch and each key re-checked against current state.
+
+### Verified already fixed
+- **#6** (a failed `oauthTokenRef` spawning a credential-less child that hung
+  until a watchdog killed it) was closed by the 1.7.3 credential work: the
+  launch path now tries each member in turn, skips a member whose provider is
+  down without benching it, and throws loudly only when none resolve.
+
 ## [1.7.4] — 2026-08-11
 
 **Two accounts, three ways a healthy one could be taken out of service.** This

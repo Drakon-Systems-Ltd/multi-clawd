@@ -900,6 +900,12 @@ interface PoolConfig {
   accounts?: string[];
   utilizationThreshold?: number;
   staleAfterMs?: number;
+  /**
+   * Rotate on `seven_day_overage_included` utilization — spending against
+   * purchased spill-over rather than quota. Off by default: the pool asks
+   * rather than deciding how the operator's money is spent (#14).
+   */
+  rotateOnOverage?: boolean;
   /** Minimum ms to stay on a rotated-to account before returning home. Default 600000. */
   minDwellMs?: number;
   models?: string[];
@@ -1057,6 +1063,7 @@ export function registerPoolBackend(
   const options = {
     utilizationThreshold: pool.utilizationThreshold,
     staleAfterMs: pool.staleAfterMs,
+    rotateOnOverage: pool.rotateOnOverage,
   };
   const poolAccount: AccountConfig = {
     id: poolId,
@@ -1128,7 +1135,7 @@ export function registerPoolBackend(
     // into heartbeat prompts long after the windows reset. The alert reaches
     // the operator ONLY through the heartbeat hook, so interactive turns kept
     // working normally while every wake reported an outage that was over —
-    // Friday's box declared four models exhausted at 11:20Z off gravestones
+    // one box declared four models exhausted at 11:20Z off gravestones
     // written during a real 09:20Z outage (#15).
     //
     // Sweep the whole family, not just this launch's model, and re-check each
@@ -1152,6 +1159,25 @@ export function registerPoolBackend(
     }
     // A member benched for a rejected login is invisible otherwise: the pool
     // quietly succeeds on the remaining account until that one runs out too.
+    // Paid spill-over nearly spent while real quota is fine: the pool has
+    // deliberately not rotated, because whether to burn overage is the owner's
+    // call, not a routing heuristic's (#14). Say so once per account, and stop
+    // saying it the moment the condition clears.
+    for (const v of verdicts) {
+      const key = `overage:${poolId}:${v.id}`;
+      if (v.health.overageAdvisory) {
+        raiseAlert({
+          key,
+          // info, not error: nothing is broken and nothing is degraded — the
+          // pool is serving normally. This is a question, and an error-severity
+          // question would outlive its own answer by hours.
+          severity: "info",
+          text: `pool ${poolId}: account "${v.id}" — ${v.health.overageAdvisory}`,
+        });
+      } else {
+        alertState = clearAlert(alertState, key);
+      }
+    }
     for (const v of verdicts) {
       const key = `credential:${poolId}:${v.id}`;
       if (v.health.verdict === "credential_failed") {
