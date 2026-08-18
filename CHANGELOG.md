@@ -4,6 +4,20 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.8.1] — 2026-08-18
+
+### Fixed
+- **`multi-clawd login` failed from a global install** (#16, PR by @jarvis-drakon).
+  It imported `dist/index.js` for one optional call, and that module hard-imports
+  the `openclaw` plugin SDK — an **optional peer**, absent from a
+  `npm i -g` install. The import threw `ERR_MODULE_NOT_FOUND` and a bare `catch`
+  reported it as `built dist/ is missing — reinstall the package`, which was
+  both wrong and unfixable by the one action it suggested. `explain` and `chain`
+  were unaffected because their modules carry no peer, which is what pointed at
+  the cause. The peer-free helpers now live in `src/credential-state.ts` and the
+  CLI loads those; `index.ts` re-exports them so no existing importer changed.
+  Verified by running `login` from a packed tarball with no peer installed.
+
 ## [1.8.0] — 2026-08-11
 
 **What a rejection actually claims, and who decides how your money is spent.**

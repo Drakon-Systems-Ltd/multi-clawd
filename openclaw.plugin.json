@@ -1,7 +1,7 @@
 {
   "id": "multi-clawd",
   "name": "multi-clawd",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
   "cliBackends": [
     "claw1",
