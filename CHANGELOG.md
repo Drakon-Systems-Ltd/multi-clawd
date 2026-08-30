@@ -4,6 +4,25 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.8.2] — 2026-08-30
+
+### Fixed
+- **Current OpenClaw and Hermes compatibility** (#17). The plugin contract is
+  now pinned and tested against OpenClaw 2026.7.1, including exact child
+  environment isolation, while the standalone CLI and Hermes commands remain
+  usable when the optional OpenClaw peer is absent.
+- **Rotated Hermes setup tokens are selectable immediately.** Hermes Agent
+  0.20.6 quarantine/error telemetry is cleared only when the access token
+  changes; no-op and metadata-only syncs preserve Hermes' runtime state.
+- **Hermes integration tests are genuinely isolated.** Test children receive
+  temporary homes and cannot inherit ambient Anthropic credentials from the
+  release machine.
+
+### Verified
+- OpenClaw 2026.7.1 plugin registration and clear-environment contract.
+- Hermes Agent 0.20.6 credential-pool APIs and live lease selection.
+- Peer-free global CLI paths, including `login` and `hermes --help`.
+
 ## [1.8.1] — 2026-08-18
 
 ### Fixed

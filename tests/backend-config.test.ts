@@ -3,7 +3,7 @@
  * each caused a production incident when set wrong, so they are pinned by
  * test rather than trusted to survive refactors.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildBackend } from "../src/index.js";
 
@@ -47,5 +47,14 @@ describe("plugin manifest", () => {
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     );
     expect(pkg.openclaw.build.openclawVersion).toBe(pkg.devDependencies.openclaw);
+  });
+
+  it("ships a normalized executable CLI bin entry", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    const cli = new URL("../scripts/cli.mjs", import.meta.url);
+    expect(pkg.bin).toEqual({ "multi-clawd": "scripts/cli.mjs" });
+    expect(statSync(cli).mode & 0o111).not.toBe(0);
   });
 });
