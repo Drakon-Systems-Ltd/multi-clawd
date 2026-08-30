@@ -4,7 +4,7 @@
  * so failover can pool multiple Claude accounts before dropping a model tier —
  * with the full skills/MCP harness intact on every account.
  *
- * How it works (verified against openclaw 2026.6.11):
+ * How it works (verified against OpenClaw 2026.7.1):
  * - `api.registerCliBackend(...)` mirrors the bundled `claude-cli` backend
  *   (same argv, jsonl stream parsing, `bundleMcp` claude-config-file bridge,
  *   always-on native tools, native compaction) but scoped to one account id.
@@ -133,12 +133,13 @@ const BASE_ARGS = [
 ];
 
 /**
- * Mirrors CLAUDE_CLI_CLEAR_ENV from the bundled backend: strip the host's own
- * Claude/Anthropic auth env so the child only sees this account's login.
+ * Mirrors CLAUDE_CLI_CLEAR_ENV from OpenClaw 2026.7.1's bundled backend: strip
+ * the host's own Claude/Anthropic auth and telemetry env so the child only sees
+ * this account's login.
  * The runner deletes these from the inherited env BEFORE merging the env
  * returned by prepareExecution, so our injected vars survive.
  */
-const CLEAR_ENV = [
+export const CLEAR_ENV = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_API_KEY_OLD",
   "ANTHROPIC_API_TOKEN",
@@ -161,6 +162,22 @@ const CLEAR_ENV = [
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_FOUNDRY",
   "CLAUDE_CODE_USE_VERTEX",
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_HEADERS",
+  "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+  "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+  "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+  "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+  "OTEL_LOGS_EXPORTER",
+  "OTEL_METRICS_EXPORTER",
+  "OTEL_SDK_DISABLED",
+  "OTEL_TRACES_EXPORTER",
 ];
 
 function expandHome(p: string): string {

@@ -73,7 +73,10 @@ multi-clawd hermes sync --profile work --strategy least_used
 multi-clawd hermes doctor --config ~/configs/openclaw.json
 ```
 
-Validated against Hermes Agent **0.19.1**.
+Validated against Hermes Agent **0.20.6**. The bridge/core/CLI integration
+tests exercise that installed release's real Python APIs in isolated temporary
+homes; on machines without a compatible Hermes install, those integration tests
+skip while the no-Hermes CLI safety tests still run.
 
 ### Only stable setup tokens are imported
 
@@ -94,7 +97,7 @@ Everything else is refused, on purpose:
   on that source instead of duplicating the grant.
 - **`configDir` logins are not importable, and Hermes cannot be pointed at
   them either.** The same single-use-refresh-token problem applies, and unlike
-  a native login there is no Hermes-side fallback: as of Hermes Agent 0.19.1,
+  a native login there is no Hermes-side fallback: as of Hermes Agent 0.20.6,
   its `claude_code` credential source reads only the native path above, never
   an arbitrary `configDir`. A `configDir` account can only reach Hermes' pool
   by getting its own `oauthTokenFile` (a `claude setup-token`, same as above),
@@ -377,7 +380,11 @@ happens to say today. Swap the tag if you want a different release, but
 prefer a tag over a branch.
 
 **Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
-second Claude subscription you own.
+second Claude subscription you own. The current plugin SDK contract and runtime
+registration path are tested against OpenClaw **2026.7.1**. The standalone
+`multi-clawd` CLI and Hermes commands do not require the optional OpenClaw peer
+to be resolvable; plugin loading and OpenClaw-backed commands still require the
+host-provided peer.
 
 **Upgrading:**
 

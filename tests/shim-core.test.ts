@@ -348,12 +348,12 @@ describe("mergeHealthStates", () => {
     expect(merged.windows.recent).toBeDefined();
   });
 
-  // Writer-side expiry of spent rejections — Friday's 21 Jul 2026 post-reset
-  // deadlock (fleet SIGNALS 02:25–04:25Z). The reader already un-binds a
+  // Writer-side expiry of spent rejections prevents a post-reset deadlock.
+  // The reader already un-binds a
   // rejected window once its reset passes; these pin that the state FILE
   // self-heals too, because success never writes a per-model window, so only
   // deletion/expiry can clear a stale rejection from disk.
-  test("expires a rejected model window whose resetsAt has passed (Friday claw1 shape)", () => {
+  test("expires a rejected model window whose resetsAt has passed (account A shape)", () => {
     const now = 1_784_600_000_000; // ~21 Jul 2026 03:33Z
     const passedReset = 1_784_595_600; // 21 Jul 2026 01:00Z weekly reset (epoch s)
     const disk: AccountHealthState = {
@@ -373,7 +373,7 @@ describe("mergeHealthStates", () => {
     expect(merged.windows.seven_day).toBeDefined(); // healthy evidence untouched
   });
 
-  test("expires an ACCOUNT-level rejected window with a passed reset too (Friday claw2 shape)", () => {
+  test("expires an ACCOUNT-level rejected window with a passed reset too (account B shape)", () => {
     const now = 1_784_600_000_000;
     const disk: AccountHealthState = {
       accountId: "claw2",

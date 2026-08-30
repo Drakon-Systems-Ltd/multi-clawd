@@ -548,7 +548,7 @@ describe("account-level rejections bind symmetrically, reset or no reset", () =>
  * reset stamp 11 Aug 20:00Z. Reset-bearing windows were trusted until their own
  * reset regardless of age, so that single record benched a healthy account for
  * 30+ hours — direct probes outside the shim returned opus-5 successfully
- * throughout, all fleet traffic piled onto claw2, and the pool alarmed
+ * throughout, all pool traffic piled onto the second account, and the pool alarmed
  * "every account is exhausted" with both accounts serving.
  *
  * The rule the file already applies to credentials (a failure stops binding

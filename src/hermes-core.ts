@@ -84,7 +84,7 @@ const API_KEY_PREFIX = "sk-ant-api";
  * copies is invalidated on the next refresh.
  *
  * Hermes' own `claude_code` credential source only reads the machine's
- * *native* `~/.claude/.credentials.json` — as of Hermes Agent 0.19.1 there is
+ * *native* `~/.claude/.credentials.json` — as of Hermes Agent 0.20.6 there is
  * no way to point it at an arbitrary `configDir`. So a native account needs
  * nothing copied (Hermes already reads the same file multi-clawd's own
  * `"native": true` account uses); a `configDir` account has no Hermes-native
@@ -139,7 +139,7 @@ export function validateHermesProfileName(value: unknown): string {
  * Parse one configured account. Only a structurally broken entry throws — an
  * account that simply cannot be imported into Hermes is reported by
  * {@link describeHermesAccountSupport} so one unusable account never hides the
- * rest of the fleet.
+ * rest of the configured accounts.
  */
 export function validateHermesAccount(value: unknown): HermesAccount {
   const row = asRecord(value);
