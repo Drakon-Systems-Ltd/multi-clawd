@@ -139,11 +139,10 @@ describe("model-aware classifyAccountHealth", () => {
     expect(classifyAccountHealth(stateFresh, {}, later, "claude-fable-5").verdict).toBe("no_data");
   });
 
-  // Friday's 21 Jul 2026 post-weekly-reset deadlock, exact live shapes (fleet
-  // SIGNALS 02:25–04:25Z). Both fixtures pass at HEAD — the un-bind rules date
-  // to v0.3.6/7089c88 — so they pin that the deadlock class can never RETURN,
-  // and document that a box exhibiting it is running a pre-fix build.
-  test("Friday claw1 shape: stale rejected fable window with passed reset + healthy base windows → account serves fable", () => {
+  // Post-weekly-reset deadlock regression, using representative persisted
+  // shapes. Both fixtures pass at HEAD, so they pin that the deadlock class
+  // cannot return and diagnose stale pre-fix state.
+  test("account A shape: stale rejected fable window with passed reset + healthy base windows → account serves fable", () => {
     const passedResetS = NOW_S - 90 * 60; // weekly reset 90m ago
     const state = stateWith({
       [modelWindowKey("claude-fable-5")]: {
@@ -158,7 +157,7 @@ describe("model-aware classifyAccountHealth", () => {
     expect(h.verdict).toBe("ok"); // NOT exhausted — the deadlock verdict
   });
 
-  test("Friday claw2 shape: account-level rejected window with passed reset, file untouched for days → not binding", () => {
+  test("account B shape: account-level rejected window with passed reset, file untouched for days → not binding", () => {
     const state = stateWith({
       seven_day_overage_included: {
         status: "rejected",
@@ -171,7 +170,7 @@ describe("model-aware classifyAccountHealth", () => {
   });
 
   test("absence of a model window means unconstrained: success writes no per-model telemetry", () => {
-    // Friday autopsy finding 1: a successful fable-5 turn writes NO
+    // A successful fable-5 turn writes NO
     // model-scoped window, so a state holding only healthy account windows
     // must classify as serviceable for any requested model.
     const state = stateWith({

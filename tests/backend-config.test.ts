@@ -41,4 +41,11 @@ describe("plugin manifest", () => {
     );
     expect(manifest.version).toBe(pkg.version);
   });
+
+  it("builds and tests against the same current OpenClaw SDK release", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    expect(pkg.openclaw.build.openclawVersion).toBe(pkg.devDependencies.openclaw);
+  });
 });

@@ -78,8 +78,8 @@ describe("CLI/plugin version skew", () => {
   });
 
   test("the trap that motivated this: CLI older than plugin", () => {
-    // Exactly the state Michael hit — `update` had moved the plugin to 1.5.4
-    // while the global CLI sat at 1.5.1, so doctor reported with old logic.
+    // A real skew state: `update` had moved the plugin to 1.5.4 while the
+    // global CLI sat at 1.5.1, so doctor reported with old logic.
     expect(classifyCliSkew({ cliVersion: "1.5.1", pluginVersion: "1.5.4" })).toBe("cli-behind");
   });
 

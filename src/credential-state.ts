@@ -6,8 +6,8 @@
  * installs globally, `openclaw` is a peerDependency, and on a machine where the
  * peer is not resolvable from the CLI's own directory every import of
  * index.ts throws ERR_MODULE_NOT_FOUND. `login` used to reach into index.ts for
- * the single call below and died on that machine (Michael's Mac, 18 Aug 2026)
- * reporting a missing build. Nothing here may import `openclaw`, directly or
+ * the single call below and died in a peer-free global install while reporting
+ * a missing build. Nothing here may import `openclaw`, directly or
  * transitively — tests/cli-peer-independence.test.ts enforces it.
  */
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";

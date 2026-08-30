@@ -1,9 +1,9 @@
 /**
  * Regression: an exhaustion alert must not outlive the exhaustion (#15).
  *
- * Friday's box (Michael's MacBook) declared "pool clawd: every account is
- * exhausted" on its 10:20Z and 11:20Z heartbeat wakes — naming four models —
- * while interactive turns through the same gateway ran Claude fine. The pool
+ * A gateway declared "pool clawd: every account is exhausted" on later
+ * heartbeat wakes while interactive turns through the same gateway ran Claude
+ * fine. The pool
  * was healthy; the wakes were reading `pool-exhausted:clawd:<model>` keys
  * raised during a real 09:20Z outage and never cleared, sitting out the 6h
  * error TTL. Alerts reach the operator through the heartbeat hook alone, which
@@ -108,7 +108,7 @@ describe("exhaustion alert lifecycle", () => {
 
     // The windows reset. One launch on ONE model is all that happens next —
     // the operator never re-requests the other three, which is exactly how
-    // four gravestones survived on Friday's box.
+    // four stale gravestones can survive.
     for (const id of ["claw1", "claw2"]) writeHealthy(id);
     await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
 

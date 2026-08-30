@@ -414,7 +414,7 @@ failover; findings came from a full security review of the package.
 
 ## [1.2.3] — 2026-07-20
 
-Wizard safety, from a real fleet run that overwrote a working account:
+Wizard safety, covering an update that overwrote a working account:
 
 - **Existing accounts are protected.** When the second-account id already
   exists, the wizard shows what's configured and defaults to **keeping its
@@ -445,7 +445,7 @@ scheduler unit pointing into it orphans again on each update, forever.
 
 ## [1.2.1] — 2026-07-20
 
-Fixes from the first real fleet run of `npx … update`:
+Fixes from end-to-end validation of `npx … update`:
 
 - **Watchdog repoint targets the installed plugin, never the npx cache.** Run
   via `npx`, the wizard's own directory is the ephemeral npx cache — pointing

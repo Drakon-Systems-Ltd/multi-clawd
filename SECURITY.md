@@ -30,9 +30,10 @@ credit you (unless you'd rather we didn't), and note it in the CHANGELOG.
   `oauthTokenFile`, multi-clawd warns (once per process) when the file is
   readable beyond your own user account. It warns rather than refuses: the
   credential still works, and the fix is yours to make — `chmod 600`.
-- **Host credentials are stripped from child processes.** 22 Claude/Anthropic
-  environment variables are cleared before each launch, so one account's
-  credential cannot bleed into another account's session.
+- **Host credentials are stripped from child processes.** 38 Claude/Anthropic
+  environment variables covering authentication, runtime, and telemetry are
+  cleared before each launch, so one account's credential cannot bleed into
+  another account's session.
 - **State files are written `0600`,** atomically (temp file + rename), and
   contain rate-limit telemetry only — never credentials.
 

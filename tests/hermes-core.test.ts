@@ -59,7 +59,7 @@ describe("strategy and profile validation", () => {
 });
 
 describe("account inspection", () => {
-  test("normalises ids and reports unusable ones instead of aborting the fleet", () => {
+  test("normalises ids and reports unusable ones instead of aborting the account set", () => {
     const { accounts, unsupported } = collectHermesAccounts([
       { id: "Claw1", oauthTokenFile: "/tmp/claw1.token" },
       { id: "work.acct", oauthTokenFile: "/tmp/work.token" },

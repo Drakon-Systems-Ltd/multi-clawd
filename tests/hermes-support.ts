@@ -100,6 +100,12 @@ export function isolatedEnv(home: string, hermesHome: string): Record<string, st
   env.HERMES_HOME = hermesHome;
   delete env.XDG_CONFIG_HOME;
   delete env.HERMES_MANAGED;
+  // Hermes 0.20.6 seeds Anthropic pool rows from these ambient variables.
+  // A test child must see only the staged auth.json, never the developer's
+  // real subscription or API credential.
+  delete env.ANTHROPIC_TOKEN;
+  delete env.CLAUDE_CODE_OAUTH_TOKEN;
+  delete env.ANTHROPIC_API_KEY;
   return env;
 }
 

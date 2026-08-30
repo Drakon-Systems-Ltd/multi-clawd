@@ -381,30 +381,20 @@ tested (`src/watchdog-core.ts`).
 - Sticky selection is per-pool, not per-session — OpenClaw's
   `prepareExecution` context has no session id. True session affinity is
   part of the v0.4 standalone-proxy track (Hermes runtimes).
-- **CLI-served turns are extension-tool-mute ("Ekho-mute", observed live
-  17 Jul 2026 in production).** When a turn is served through a CLI backend
-  (reseeded CLI harness rather than the native runtime), extension/MCP tools
-  — `ekho_send`, cron, sessions — are absent for the duration. The mute is
-  **one-directional**: inbound tool calls die, but exec and file writes
-  survive, which is why an ekho-sdk wire call works as a stopgap and why the
-  file-based status JSON keeps reporting. Consequences on the record:
-  - Any host whose Claude fallback is this class (a claw2→claw3
-    `oauthTokenFile`/CLI-reseed chain included) is Ekho-mute through the tool
-    exactly when it may most need to send a security alert or refusal
-    (a known security-fallback caveat). Operators should know this before leaning on
-    Claude fallback in anger.
-  - Accepted v0.3.x fix (publisher's call): a **gateway-side queued-outbox
-    flush** — plugin-local and testable, it restores the capability that
-    matters (an agent's outbound Ekho message surviving a CLI-served turn).
-    Full extension-tool bridging into the reseeded CLI harness is
-    OpenClaw-core surgery: file it upstream alongside the startup
-    retry-with-grace item; the plugin does not grow into a shim of the whole
-    tool system.
-  - Design principle, standing: **the telemetry plane stays file-based
-    (git/session-context), never Ekho/tool-dependent** — the degraded
-    CLI-served state is precisely when it must keep reporting. The v1
-    status-JSON writer already honours this; Bridge-v2-style
-    delivery-receipts/pending-auth queues must not be built on Ekho alone.
+- **CLI-served turns are extension-tool-mute.** When a turn is served through
+  a CLI backend (reseeded CLI harness rather than the native runtime), host
+  extension and MCP tools are absent for the duration. The mute is
+  **one-directional**: host tool calls are unavailable, but exec and file writes
+  survive, so file-based status JSON keeps reporting. Consequences:
+  - A fallback served through this class may be unable to send a host-tool-based
+    security alert or refusal. Operators should account for that before relying
+    on CLI fallback for critical notification paths.
+  - The bounded mitigation is a **gateway-side queued-outbox flush** —
+    plugin-local and testable. Full extension-tool bridging into the reseeded
+    CLI harness requires an upstream OpenClaw change; this plugin does not grow
+    into a shim of the whole tool system.
+  - The telemetry plane stays file-based and never host-tool-dependent. The
+    degraded CLI-served state is precisely when reporting must keep working.
 
 ## v0.3.5: tier-aware degradation + pinned lanes
 
@@ -558,7 +548,7 @@ Then reference `claw2/claude-fable-5` in the fallback chain.
    (`openclaw plugins install <path>` or link); `openclaw plugins list` shows
    `multi-clawd` active.
 2. **Backend resolves + harness** — one-shot:
-   `openclaw agent --agent main --model claw2/claude-fable-5 --message "confirm + list mcp__openclaw__* tools"`.
+   `openclaw agent --agent <agent-id> --model claw2/claude-fable-5 --message "confirm + list mcp__openclaw__* tools"`.
    Expect a reply AND visible OpenClaw MCP tools (proves `bundleMcp`).
 3. **Live failover** — add `claw2/claude-fable-5` as the first fallback
    after the primary; restart; exhaust the main account's Fable pool; confirm
@@ -572,7 +562,7 @@ Then reference `claw2/claude-fable-5` in the fallback chain.
 - v0.3 — `oauthTokenRef` secret-manager resolvers (1Password), setup helper
   (`claude setup-token` capture into an isolated dir).
 - v1.0 — npm + ClawHub parity release (publishes as a ClawHub PLUGIN, not
-  a skill). Trigger: after the initial internal rollout closes out. Release gates:
+  a skill). Trigger: after release validation closes out. Release gates:
   - `npm pack --dry-run` contents check: `scripts/doctor.mjs` and
     `scripts/eviction-watchdog.mjs` must ship in the tarball (files list
     fixed 16 Jul 2026; verify anyway before the tag).

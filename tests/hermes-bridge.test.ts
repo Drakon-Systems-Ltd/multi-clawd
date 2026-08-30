@@ -1,3 +1,4 @@
+import process from "node:process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -96,6 +97,21 @@ function allOutput(result: ReturnType<typeof bridge>): string {
 }
 
 describe.skipIf(!HERMES)(`secure Hermes Python bridge (${HERMES?.version ?? SKIP_REASON})`, () => {
+  test("isolated Hermes children ignore ambient Anthropic credential seeds", () => {
+    const names = ["ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+    const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    try {
+      for (const name of names) process.env[name] = `poison-${name}`;
+      const env = isolatedEnv("/tmp/test-home", "/tmp/test-hermes-home");
+      for (const name of names) expect(env[name], name).toBeUndefined();
+    } finally {
+      for (const name of names) {
+        if (original[name] === undefined) delete process.env[name];
+        else process.env[name] = original[name];
+      }
+    }
+  });
+
   test("adds a setup-token row via Hermes APIs, defaults the strategy, and emits no token", () => {
     const target = makeHome();
     const result = bridge(target, applyRequest(target, { strategy: "round_robin" }));
@@ -174,7 +190,7 @@ describe.skipIf(!HERMES)(`secure Hermes Python bridge (${HERMES?.version ?? SKIP
     expect(readStrategy(target)).toMatchObject({ anthropic: "fill_first" });
   });
 
-  test("updates idempotently, keeps runtime bookkeeping, clears stale expiries, and preserves unrelated rows", () => {
+  test("updates idempotently, clears quarantine status on rotation, keeps unrelated bookkeeping and stale expiries, and preserves unrelated rows", () => {
     const target = makeHome();
     const unrelated = {
       id: "keep-api-key",
@@ -220,12 +236,16 @@ describe.skipIf(!HERMES)(`secure Hermes Python bridge (${HERMES?.version ?? SKIP
     expect(managed).toMatchObject({
       access_token: TOKEN_TWO,
       priority: 0,
-      last_error_code: 429,
+      // Not a status field — unrelated bookkeeping survives untouched.
       request_count: 11,
     });
     expect(managed.refresh_token ?? null).toBeNull();
     expect(managed.expires_at ?? null).toBeNull();
     expect(managed.expires_at_ms ?? null).toBeNull();
+    // The rotated token is proof this row is being actively managed again —
+    // its old quarantine must not survive onto the new credential.
+    expect(managed.last_status ?? null).toBeNull();
+    expect(managed.last_error_code ?? null).toBeNull();
 
     const authMtime = statSync(join(target.hermesHome, "auth.json")).mtimeMs;
     const second = bridge(
@@ -467,6 +487,150 @@ describe.skipIf(!HERMES)(`secure Hermes Python bridge (${HERMES?.version ?? SKIP
     expect(cross.json.error.code).toBe("target_home_mismatch");
     expect(localRows(first)).toHaveLength(1);
     expect(localRows(second)).toHaveLength(0);
+  });
+
+  test("a rotated access token un-quarantines a row Hermes had exhausted, and Hermes can select it again", () => {
+    const target = makeHome();
+    const quarantinedAt = Math.floor(Date.now() / 1000) - 3600;
+    const farFutureReset = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    writeAuthStore(target.hermesHome, [
+      {
+        id: stableId("claw1"),
+        label: "multi-clawd:claw1",
+        source: "manual:multi-clawd",
+        auth_type: "oauth",
+        priority: 0,
+        access_token: TOKEN_ONE,
+        last_status: "exhausted",
+        last_status_at: quarantinedAt,
+        last_error_code: 402,
+        last_error_reason: "billing",
+        last_error_message: "account has run out of credits",
+        last_error_reset_at: farFutureReset,
+      },
+    ]);
+
+    // Sanity: Hermes itself considers this row unselectable before the rotation.
+    const before = hermesPython(
+      target.home,
+      target.hermesHome,
+      "import json; from agent.credential_pool import load_pool; " +
+        "pool = load_pool('anthropic'); " +
+        "print(json.dumps({'leased': pool.acquire_lease()}))",
+    ) as { leased: string | null };
+    expect(before.leased).toBeNull();
+
+    const result = bridge(
+      target,
+      applyRequest(target, { credentials: [credential("claw1", TOKEN_TWO, 0)] }),
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.json.actions[0].action).toBe("update");
+    expect(allOutput(result)).not.toContain(TOKEN_TWO);
+
+    const rows = localRows(target);
+    expect(rows).toHaveLength(1);
+    const managed = rows[0];
+    expect(managed.access_token).toBe(TOKEN_TWO);
+    for (const field of [
+      "last_status",
+      "last_status_at",
+      "last_error_code",
+      "last_error_reason",
+      "last_error_message",
+      "last_error_reset_at",
+    ]) {
+      expect(managed[field] ?? null, field).toBeNull();
+    }
+
+    // End-to-end proof, not just field inspection: Hermes' own selection now
+    // leases this credential.
+    const after = hermesPython(
+      target.home,
+      target.hermesHome,
+      "import json; from agent.credential_pool import load_pool; " +
+        "pool = load_pool('anthropic'); " +
+        "print(json.dumps({'leased': pool.acquire_lease()}))",
+    ) as { leased: string | null };
+    expect(after.leased).toBe(stableId("claw1"));
+  });
+
+  test("a no-op sync (same token, same metadata) leaves Hermes' quarantine telemetry byte-identical", () => {
+    const target = makeHome();
+    const quarantinedAt = Math.floor(Date.now() / 1000) - 3600;
+    const farFutureReset = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    const seeded = {
+      id: stableId("claw1"),
+      label: "multi-clawd:claw1",
+      source: "manual:multi-clawd",
+      auth_type: "oauth",
+      priority: 0,
+      access_token: TOKEN_ONE,
+      last_status: "exhausted",
+      last_status_at: quarantinedAt,
+      last_error_code: 402,
+      last_error_reason: "billing",
+      last_error_message: "account has run out of credits",
+      last_error_reset_at: farFutureReset,
+    };
+    writeAuthStore(target.hermesHome, [seeded]);
+    const authMtime = statSync(join(target.hermesHome, "auth.json")).mtimeMs;
+
+    const result = bridge(
+      target,
+      applyRequest(target, { credentials: [credential("claw1", TOKEN_ONE, 0)] }),
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.json.actions[0].action).toBe("noop");
+    // wrote can still be true here (a first-ever apply also persists the
+    // default pool strategy) — the pool FILE, not the aggregate flag, is what
+    // must stay untouched by a no-op credential sync.
+    expect(statSync(join(target.hermesHome, "auth.json")).mtimeMs).toBe(authMtime);
+
+    const rows = localRows(target);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(seeded);
+  });
+
+  test("a metadata-only change (same token, different priority) preserves quarantine telemetry", () => {
+    const target = makeHome();
+    const quarantinedAt = Math.floor(Date.now() / 1000) - 3600;
+    const farFutureReset = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+    writeAuthStore(target.hermesHome, [
+      {
+        id: stableId("claw1"),
+        label: "multi-clawd:claw1",
+        source: "manual:multi-clawd",
+        auth_type: "oauth",
+        priority: 0,
+        access_token: TOKEN_ONE,
+        last_status: "exhausted",
+        last_status_at: quarantinedAt,
+        last_error_code: 402,
+        last_error_reason: "billing",
+        last_error_message: "account has run out of credits",
+        last_error_reset_at: farFutureReset,
+      },
+    ]);
+
+    const result = bridge(
+      target,
+      applyRequest(target, { credentials: [credential("claw1", TOKEN_ONE, 3)] }),
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.json.actions[0].action).toBe("update");
+
+    const rows = localRows(target);
+    expect(rows).toHaveLength(1);
+    const managed = rows[0];
+    expect(managed.priority).toBe(3);
+    expect(managed.access_token).toBe(TOKEN_ONE);
+    expect(managed.last_status).toBe("exhausted");
+    expect(managed.last_status_at).toBe(quarantinedAt);
+    expect(managed.last_error_code).toBe(402);
+    expect(managed.last_error_reason).toBe("billing");
+    expect(managed.last_error_message).toBe("account has run out of credits");
+    expect(managed.last_error_reset_at).toBe(farFutureReset);
   });
 
   test("a named profile is never fabricated", () => {

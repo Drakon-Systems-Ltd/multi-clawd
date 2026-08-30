@@ -10,7 +10,7 @@ grant (a native or config-dir ``.credentials.json``) is single-use on refresh,
 so duplicating one into a second store guarantees that one of the copies dies.
 For a *native* login that copy is unnecessary anyway: Hermes' own
 ``claude_code`` credential source already reads that exact file directly. A
-*config-dir* login has no such fallback — as of Hermes Agent 0.19.1,
+*config-dir* login has no such fallback — as of Hermes Agent 0.20.6,
 ``claude_code`` only reads the native path, never an arbitrary config dir — so
 it can only reach this bridge via its own setup token, never a duplicated
 grant. Requests carrying refresh tokens or expiries are refused outright.
@@ -60,6 +60,24 @@ ACCOUNT_ID_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 # Cleared whenever a managed row is written: a setup token never expires on a
 # schedule, so a stale expiry copied from an older row would quarantine it.
 STALE_EXPIRY_FIELDS = ("expires_at", "expires_at_ms", "last_refresh")
+# Hermes' own runtime bookkeeping (agent/credential_pool.py PooledCredential).
+# Cleared ONLY when the access token itself changes: Hermes' selection
+# (CredentialPool._available_entries) skips an entry whose last_status is
+# "exhausted" or "dead" until last_error_reset_at passes, which can be hours
+# or days out. A rotated-in token proves the row is being actively managed
+# again, so carrying the old verdict forward would leave a freshly-rotated
+# credential unselectable until that window lapses on its own. A
+# metadata-only update (label/priority) with the SAME token is not evidence
+# of anything — Hermes' own telemetry for a healthy pool must survive it
+# untouched.
+STATUS_FIELDS = (
+    "last_status",
+    "last_status_at",
+    "last_error_code",
+    "last_error_reason",
+    "last_error_message",
+    "last_error_reset_at",
+)
 # Mirrors src/hermes-core.ts's parseClaudeSetupToken: ASCII-only, and shaped
 # like the current `sk-ant-oat01-...` setup-token family. The version digits
 # are intentionally unconstrained beyond "two or more" so a future
@@ -443,7 +461,12 @@ def merge_credential(existing: dict[str, Any], credential: DesiredCredential) ->
     Expiry fields are cleared: a setup token carries no expiry, and a value left
     over from an older row would make Hermes treat a perfectly good credential
     as expired.
+
+    Status fields are cleared too, but only when the access token actually
+    changed — see STATUS_FIELDS. A metadata-only update (same token) preserves
+    them exactly.
     """
+    token_rotated = existing.get("access_token") != credential.access_token
     updated = copy.deepcopy(existing)
     updated.update(
         {
@@ -458,6 +481,9 @@ def merge_credential(existing: dict[str, Any], credential: DesiredCredential) ->
     updated.pop("refresh_token", None)
     for field in STALE_EXPIRY_FIELDS:
         updated.pop(field, None)
+    if token_rotated:
+        for field in STATUS_FIELDS:
+            updated.pop(field, None)
     return updated
 
 
