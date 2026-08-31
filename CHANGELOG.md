@@ -4,6 +4,21 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Changed
+- Pinned the development/runtime contract to OpenClaw 2026.8.1 while retaining
+  the declared OpenClaw 2026.6 minimum runtime.
+- Migrated plugin config lookup and CLI/provider types away from deprecated or
+  private-local SDK subpaths introduced by OpenClaw 2.0 packaging changes.
+- Aligned Claude CLI environment isolation and session/recovery fields with the
+  2026.8.1 bundled backend, while still stripping `CLAUDE_CONFIG_DIR` so native
+  accounts cannot inherit a host config dir.
+
+### Verified
+- Live 2026.8.1 SDK contracts for CLI backend/provider registration, heartbeat
+  hooks, SecretRef resolution, bundled catalog loading, and packaged artifacts.
+
 ## [1.8.2] — 2026-08-30
 
 ### Fixed

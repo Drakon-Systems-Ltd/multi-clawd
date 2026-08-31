@@ -42,13 +42,12 @@ describe("resolveBaseModelIds", () => {
 });
 
 describe("loadBundledCatalogIds (real environment)", () => {
-  test("never throws; returns null or a list of modern claude ids", async () => {
+  test("loads the packaged OpenClaw catalog as a list of modern claude ids", async () => {
     const result = await loadBundledCatalogIds();
-    if (result !== null) {
-      expect(Array.isArray(result)).toBe(true);
-      for (const id of result) {
-        expect(id).toMatch(/^claude-/);
-      }
+    expect(result).not.toBeNull();
+    expect(Array.isArray(result)).toBe(true);
+    for (const id of result ?? []) {
+      expect(id).toMatch(/^claude-/);
     }
   });
 });

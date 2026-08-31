@@ -381,7 +381,7 @@ prefer a tag over a branch.
 
 **Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
 second Claude subscription you own. The current plugin SDK contract and runtime
-registration path are tested against OpenClaw **2026.7.1**. The standalone
+registration path are tested against OpenClaw **2026.8.1**. The standalone
 `multi-clawd` CLI and Hermes commands do not require the optional OpenClaw peer
 to be resolvable; plugin loading and OpenClaw-backed commands still require the
 host-provided peer.
@@ -603,7 +603,7 @@ Three moves, all through the official plugin SDK (details in
    (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`) into the child process
    env, after the host's ambient Claude credentials are stripped.
 
-## Known issue: idle backends can be evicted by OpenClaw core
+## Legacy issue: idle backend eviction on OpenClaw ≤ 2026.7.1
 
 On OpenClaw ≤ 2026.7.1, core's *scoped* harness activation can silently drop
 a plugin-registered CLI backend from the live registry: when an agent turn
@@ -615,9 +615,10 @@ list` (a separate cache) still lists its models. A common real-world trigger
 is an hourly heartbeat running on a model served by another harness.
 
 - Upstream bug: [openclaw#107408](https://github.com/openclaw/openclaw/issues/107408)
-- Upstream fix: [openclaw#107596](https://github.com/openclaw/openclaw/pull/107596)
+- Upstream fix: [openclaw#108110](https://github.com/openclaw/openclaw/pull/108110)
 
-**Until that lands:** a gateway restart always restores the backend (startup
+OpenClaw 2026.8.1 includes the fix. On affected older runtimes, a gateway
+restart always restores the backend (startup
 loads are full-scope), and backends that are in regular use effectively
 re-assert themselves. This repo ships a ready-made mitigation —
 `scripts/eviction-watchdog.mjs` — which tails the gateway log for the

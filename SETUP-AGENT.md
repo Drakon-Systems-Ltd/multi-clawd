@@ -155,9 +155,9 @@ choose, same merge discipline, and confirm the final chain back to them.
 On OpenClaw ≤ 2026.7.1, an **idle** plugin CLI backend can be silently
 evicted by core's scoped harness activation
 ([openclaw#107408](https://github.com/openclaw/openclaw/issues/107408),
-fix pending in [openclaw#107596](https://github.com/openclaw/openclaw/pull/107596)).
-Symptom: `Unknown CLI backend: claw2` while the model catalog still lists
-it. A gateway restart always heals it.
+fixed in [openclaw#108110](https://github.com/openclaw/openclaw/pull/108110)
+and included in OpenClaw 2026.8.1). Symptom: `Unknown CLI backend: claw2`
+while the model catalog still lists it. A gateway restart always heals it.
 
 Since v1.1 the **setup wizard schedules the bundled eviction watchdog
 itself** (systemd/launchd, every ~5 min, restart → probe → confirm) and the
