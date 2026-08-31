@@ -4,7 +4,7 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.8.3] — 2026-08-31
 
 ### Changed
 - Pinned the development/runtime contract to OpenClaw 2026.8.1 while retaining
