@@ -4,7 +4,7 @@
  * so failover can pool multiple Claude accounts before dropping a model tier —
  * with the full skills/MCP harness intact on every account.
  *
- * How it works (verified against OpenClaw 2026.7.1):
+ * How it works (verified against OpenClaw 2026.8.1):
  * - `api.registerCliBackend(...)` mirrors the bundled `claude-cli` backend
  *   (same argv, jsonl stream parsing, `bundleMcp` claude-config-file bridge,
  *   always-on native tools, native compaction) but scoped to one account id.
@@ -28,20 +28,12 @@
  *   status/failover surfaces treat the backend as authenticated (mode
  *   "token") without an OpenClaw auth profile.
  */
-import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
-  resolvePluginConfigObject,
-  resolveLivePluginConfigObject,
-} from "openclaw/plugin-sdk/plugin-config-runtime";
-import {
-  CLI_FRESH_WATCHDOG_DEFAULTS,
-  CLI_RESUME_WATCHDOG_DEFAULTS,
-  type CliBackendPlugin,
-  type CliBackendPrepareExecutionContext,
-  type CliBackendPreparedExecution,
-} from "openclaw/plugin-sdk/cli-backend";
-import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
-import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
+  definePluginEntry,
+  type OpenClawPluginApi,
+  type ProviderPlugin,
+  type ProviderRuntimeModel,
+} from "openclaw/plugin-sdk/plugin-entry";
 import type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -99,6 +91,25 @@ import {
 } from "./login-health.js";
 import { execFileSync } from "node:child_process";
 
+// OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
+// declaration files. Derive the backend contract from the stable registration
+// API instead; this remains valid on the declared 2026.6+ compatibility range.
+type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
+type CliBackendPrepareExecution = NonNullable<CliBackendPlugin["prepareExecution"]>;
+type CliBackendPrepareExecutionContext = Parameters<CliBackendPrepareExecution>[0];
+type CliBackendPreparedExecution = Awaited<ReturnType<CliBackendPrepareExecution>>;
+
+const CLI_FRESH_WATCHDOG_DEFAULTS = {
+  noOutputTimeoutRatio: 0.8,
+  minMs: 180_000,
+  maxMs: 600_000,
+};
+const CLI_RESUME_WATCHDOG_DEFAULTS = {
+  noOutputTimeoutRatio: 0.3,
+  minMs: 60_000,
+  maxMs: 180_000,
+};
+
 export interface AccountConfig {
   id: string;
   label?: string;
@@ -133,9 +144,9 @@ const BASE_ARGS = [
 ];
 
 /**
- * Mirrors CLAUDE_CLI_CLEAR_ENV from OpenClaw 2026.7.1's bundled backend: strip
- * the host's own Claude/Anthropic auth and telemetry env so the child only sees
- * this account's login.
+ * Mirrors CLAUDE_CLI_CLEAR_ENV from OpenClaw 2026.8.1's bundled backend, then
+ * keeps CLAUDE_CONFIG_DIR as a multi-account extra: native accounts must not
+ * inherit a host-set config dir, or they stop using the default login/keychain.
  * The runner deletes these from the inherited env BEFORE merging the env
  * returned by prepareExecution, so our injected vars survive.
  */
@@ -149,6 +160,10 @@ export const CLEAR_ENV = [
   "ANTHROPIC_OAUTH_TOKEN",
   "ANTHROPIC_UNIX_SOCKET",
   "CLAUDE_CONFIG_DIR",
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+  "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+  "MAX_THINKING_TOKENS",
   "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
   "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
@@ -184,6 +199,17 @@ function expandHome(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
   return resolve(p);
+}
+
+function pluginConfigFromRoot(root: unknown, pluginId: string): Record<string, unknown> | undefined {
+  if (typeof root !== "object" || root === null) return undefined;
+  const entries = (root as { plugins?: { entries?: Record<string, unknown> } }).plugins?.entries;
+  const entry = entries?.[pluginId];
+  if (typeof entry !== "object" || entry === null) return undefined;
+  const config = (entry as { config?: unknown }).config;
+  return typeof config === "object" && config !== null && !Array.isArray(config)
+    ? config as Record<string, unknown>
+    : undefined;
 }
 
 /**
@@ -630,7 +656,7 @@ function checkModelCurrency(catalogIds: readonly string[], chainRefs: readonly s
 }
 
 export function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
-  return {
+  const backend: CliBackendPlugin = {
     id: account.id,
     liveTest: {
       defaultModelRef: `${account.id}/${account.defaultModel ?? "claude-fable-5"}`,
@@ -654,6 +680,8 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
       command: process.execPath,
       args: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode)],
       resumeArgs: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode), "--resume", "{sessionId}"],
+      forkArg: "--fork-session",
+      resumeAtArg: "--resume-session-at",
       output: "jsonl",
       liveSession: "claude-stdio",
       input: "stdin",
@@ -671,8 +699,9 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
       modelAliases: { ...MODEL_ALIASES },
       imageArg: "@",
       imagePathScope: "workspace",
-      sessionArg: "--session-id",
+      sessionArgs: ["--session-id", "{sessionId}"],
       sessionMode: "always",
+      freshSessionRecovery: "invalidated-only",
       // MUST stay true (parity with the bundled claude-cli backend). When a
       // pool rotation lands mid-conversation, the Claude CLI session being
       // resumed lives in the PREVIOUS account's config dir, so the resume
@@ -709,6 +738,10 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
       return { env: await buildAccountEnv(account) };
     },
   };
+  // Older OpenClaw gateways still read `sessionArg`. 2026.8.1 types dropped it
+  // in favour of `sessionArgs`; unknown fields are ignored.
+  Object.assign(backend.config, { sessionArg: "--session-id" });
+  return backend;
 }
 
 /** Child env for one account: tested contract lives in account-env.ts. */
@@ -773,33 +806,22 @@ export default definePluginEntry({
     //
     // `api.pluginConfig` has been observed arriving empty on some registration
     // passes even though plugins.entries["multi-clawd"].config is present and
-    // schema-valid. Historically we fell back to `resolvePluginConfigObject(
-    // api.config, …)`, but 2026.7.x builds the register() api with `api.config`
-    // empty in the real registration pass and expose the live config behind
-    // `api.runtime.config.current()` instead (mirrors the bundled active-memory
-    // / thread-ownership plugins). Reading only `api.config` therefore silently
-    // no-ops the plugin on 2026.7.x — claw2 never registers (observed after
-    // the 2026.6.11 → 2026.7.1 upgrade).
+    // schema-valid. OpenClaw 2026.7.x also builds some registration APIs with
+    // `api.config` empty while exposing the live config behind
+    // `api.runtime.config.current()`. Reading only one source can therefore
+    // silently no-op the plugin.
     //
-    // Preference order, robust on both 2026.6.x and 2026.7.x:
-    //   1. live runtime config via api.runtime.config.current()  (2026.7.x)
-    //   2. the injected startup pluginConfig                     (both)
-    //   3. the static api.config snapshot                        (2026.6.x)
-    // The runtime config accessor returns a deeply-readonly config; the
-    // resolver only reads it, so cast to its exact expected loader type
-    // (readonly→mutable variance is cosmetic here).
-    const runtimeConfigLoader = (
-      api.runtime?.config?.current
-        ? () => api.runtime.config.current()
-        : undefined
-    ) as Parameters<typeof resolveLivePluginConfigObject>[0];
-    // Try each config source in order and take the FIRST that actually carries
-    // accounts. A plain ?? chain doesn't work here: resolveLivePluginConfigObject
-    // returns {} (not undefined) when it falls back to an empty startup config,
-    // which would short-circuit the chain before the api.config fallback runs.
+    // OpenClaw 2.0 deprecates the broad plugin-config-runtime facade. Read the
+    // root snapshots locally and keep api.pluginConfig as the stable boundary:
+    //   1. live runtime config via api.runtime.config.current()
+    //   2. the static api.config snapshot
+    //   3. the injected startup pluginConfig
+    const runtimeConfigLoader = api.runtime?.config?.current
+      ? () => api.runtime.config.current()
+      : undefined;
     const candidates: Array<Record<string, unknown> | undefined> = [
-      resolveLivePluginConfigObject(runtimeConfigLoader, "multi-clawd", api.pluginConfig),
-      resolvePluginConfigObject(api.config, "multi-clawd"),
+      pluginConfigFromRoot(runtimeConfigLoader?.(), "multi-clawd"),
+      pluginConfigFromRoot(api.config, "multi-clawd"),
       api.pluginConfig,
     ];
     const hasAccounts = (c: Record<string, unknown> | undefined): boolean =>

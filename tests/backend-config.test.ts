@@ -29,6 +29,16 @@ describe("buildBackend config", () => {
     expect(backend.config.resumeArgs).toContain("--resume");
     expect(backend.config.resumeArgs).toContain("{sessionId}");
   });
+
+  it("keeps the OpenClaw 2.0 session, fork, and recovery contract", () => {
+    const backend = buildBackend(account);
+    expect(backend.config.sessionArgs).toEqual(["--session-id", "{sessionId}"]);
+    expect((backend.config as { sessionArg?: string }).sessionArg).toBe("--session-id");
+    expect(backend.config.forkArg).toBe("--fork-session");
+    expect(backend.config.resumeAtArg).toBe("--resume-session-at");
+    expect(backend.config.freshSessionRecovery).toBe("invalidated-only");
+    expect(backend.config.clearEnv).toContain("CLAUDE_CONFIG_DIR");
+  });
 });
 
 describe("plugin manifest", () => {
@@ -46,7 +56,15 @@ describe("plugin manifest", () => {
     const pkg = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     );
+    expect(pkg.devDependencies.openclaw).toBe("2026.8.1");
     expect(pkg.openclaw.build.openclawVersion).toBe(pkg.devDependencies.openclaw);
+  });
+
+  it("retains the declared OpenClaw 2026.6 minimum runtime contract", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    expect(pkg.peerDependencies.openclaw).toBe(">=2026.6");
   });
 
   it("ships a normalized executable CLI bin entry", () => {

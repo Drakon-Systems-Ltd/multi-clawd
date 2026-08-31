@@ -223,7 +223,8 @@ there is no registry-rebuilt event, no timer hook, and no plugin API that
 forces a rebuild. The eviction is a *narrower registry snapshot becoming
 active*, not a removal — recovery is a full-scope rebuild (gateway restart
 re-runs `register()`). Hence `scripts/eviction-watchdog.mjs` (log-signature →
-restart, once per event) until upstream PR openclaw#107596 lands.
+restart, once per event) on affected OpenClaw ≤ 2026.7.1 runtimes. OpenClaw
+2026.8.1 carries the registry-preservation fix from openclaw#108110.
 
 ## v0.3: hardening (field-feedback release)
 
