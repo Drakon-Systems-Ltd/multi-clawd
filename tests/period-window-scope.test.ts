@@ -91,14 +91,18 @@ describe("#12 a period rejection is scoped to the model that earned it", () => {
 
   test("model matching is canonical — provider-prefixed ids still match", () => {
     const s = stateWith({
-      seven_day: { status: "rejected", seenAt: NOW - 10 * MIN, model: "claude-fable-5" },
+      seven_day_overage_included: {
+        status: "rejected",
+        seenAt: NOW - 10 * MIN,
+        model: "claude-fable-5",
+      },
     });
     expect(classifyAccountHealth(s, {}, NOW, "clawd/claude-fable-5").verdict).toBe("exhausted");
   });
 
   test("a reset-BEARING period rejection is scoped the same way", () => {
     const s = stateWith({
-      seven_day: {
+      seven_day_overage_included: {
         status: "rejected",
         resetsAt: NOW / 1000 + 3600,
         seenAt: NOW - 10 * MIN,
@@ -121,9 +125,82 @@ describe("#12 a period rejection is scoped to the model that earned it", () => {
 
   test("a model-scoped rejection does not bench the account for an unspecified request", () => {
     const s = stateWith({
-      seven_day: { status: "rejected", seenAt: NOW - 10 * MIN, model: "claude-fable-5" },
+      seven_day_overage_included: {
+        status: "rejected",
+        seenAt: NOW - 10 * MIN,
+        model: "claude-fable-5",
+      },
     });
     // No requested model: we cannot say this applies, so it must not exhaust.
     expect(classifyAccountHealth(s, {}, NOW).verdict).not.toBe("exhausted");
+  });
+});
+
+/**
+ * #19 — the #12 scoping was applied to allowance windows too, so a WEEKLY
+ * account lockout was honoured for one model only.
+ *
+ * Live case, claw1 on 2026-09-01: `seven_day: rejected` (resets 20:00Z)
+ * stamped `claude-sonnet-5`. The classifier returned `ok` for
+ * `claude-opus-5`, the pool kept claw1 as its home account, and every
+ * non-interactive lane failed with "You've hit your weekly limit" while the
+ * pool's other account sat idle.
+ */
+describe("#19 an allowance rejection is account-wide, whatever model tripped it", () => {
+  test("seven_day rejected while serving sonnet also benches opus", () => {
+    const s = stateWith({
+      seven_day: {
+        status: "rejected",
+        resetsAt: NOW / 1000 + 3600,
+        seenAt: NOW - 10 * MIN,
+        model: "claude-sonnet-5",
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW, "claude-sonnet-5").verdict).toBe("exhausted");
+    expect(classifyAccountHealth(s, {}, NOW, "claude-opus-5").verdict).toBe("exhausted");
+    // and with no model named at all — an allowance window needs no attribution
+    expect(classifyAccountHealth(s, {}, NOW).verdict).toBe("exhausted");
+  });
+
+  test("five_hour behaves the same way", () => {
+    const s = stateWith({
+      five_hour: { status: "rejected", seenAt: NOW - 5 * MIN, model: "claude-sonnet-5" },
+    });
+    expect(classifyAccountHealth(s, {}, NOW, "claude-opus-5").verdict).toBe("exhausted");
+  });
+
+  test("spill-over stays model-scoped — #12 is not reversed", () => {
+    const s = stateWith({
+      seven_day_overage_included: {
+        status: "rejected",
+        seenAt: NOW - 10 * MIN,
+        model: "claude-fable-5",
+      },
+    });
+    expect(classifyAccountHealth(s, {}, NOW, "claude-opus-5").verdict).not.toBe("exhausted");
+  });
+
+  test("the exact live claw1 state benches opus-5", () => {
+    const s = {
+      accountId: "claw1",
+      updatedAt: NOW,
+      windows: {
+        five_hour: {
+          status: "allowed",
+          resetsAt: NOW / 1000 - 3600,
+          seenAt: NOW - 30 * MIN,
+          model: "claude-opus-5",
+        },
+        seven_day: {
+          status: "rejected",
+          resetsAt: NOW / 1000 + 6 * 3600,
+          seenAt: NOW - 5 * MIN,
+          model: "claude-sonnet-5",
+        },
+      },
+    } as Parameters<typeof classifyAccountHealth>[0];
+    const h = classifyAccountHealth(s, {}, NOW, "claude-opus-5");
+    expect(h.verdict).toBe("exhausted");
+    expect(h.reason).toMatch(/seven_day rejected until/);
   });
 });

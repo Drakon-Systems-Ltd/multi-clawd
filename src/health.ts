@@ -217,14 +217,48 @@ export function resetLessBlockMs(window: string): number {
 }
 
 /**
+ * Is this window the account's own allowance, rather than purchased spill-over?
+ *
+ * `five_hour` and `seven_day` measure the subscription allowance itself, and
+ * that allowance is ACCOUNT-wide: when it runs out, the account serves nothing.
+ * `seven_day_overage_included` measures a spend budget on top of it, which
+ * behaves differently — see the note on `windowAppliesToModel`.
+ */
+function isAllowanceWindow(window: string): boolean {
+  return isPeriodWindow(window) && !isOverageWindow(window);
+}
+
+/**
  * Does a window's recorded model (if it has one) apply to this request?
  *
  * A window with no model is legacy or unattributable and stays account-wide,
  * exactly as before 1.7.5. A window that names a model asserts nothing about
  * any other model — including a request that names none, where we cannot show
  * it applies and so must not bench the account (#12).
+ *
+ * #12's live evidence was an account carrying `seven_day_overage_included:
+ * rejected` that kept serving a different model fine, and the scoping was
+ * applied to every named period window on the strength of it. That overshot.
+ * Measured on claw1, 2026-09-01 (#19): `seven_day: rejected` stamped
+ * `claude-sonnet-5`, and `claude-opus-5` requests to the same account came
+ * back "You've hit your weekly limit · resets 8pm (UTC)". The classifier
+ * called that account `ok` for opus, the pool kept electing it as home, and
+ * every non-interactive lane died on "All models failed" while the other
+ * account sat idle.
+ *
+ * So the stamp is scoped by what the window MEASURES, not by whether it has a
+ * model: on an allowance window the model records what tripped the limit, not
+ * what the limit covers. Erring account-wide is also the safe direction — an
+ * over-benched account costs capacity the pool can route around, while an
+ * under-benched one costs the turn outright, and any fresh `allowed`
+ * observation displaces the bench immediately.
  */
-function windowAppliesToModel(w: { model?: string }, requestedWindowKey?: string): boolean {
+function windowAppliesToModel(
+  window: string,
+  w: { model?: string },
+  requestedWindowKey?: string,
+): boolean {
+  if (isAllowanceWindow(window)) return true;
   if (w.model === undefined) return true;
   if (requestedWindowKey === undefined) return false;
   return modelWindowKey(w.model) === requestedWindowKey;
@@ -386,8 +420,9 @@ export function classifyAccountHealth(
       w.status === "rejected" &&
       resetBearing &&
       isPeriodWindow(window) &&
-      // Scoped to the model that earned it, when we know which that was (#12).
-      windowAppliesToModel(w, requestedWindowKey) &&
+      // Scoped to the model that earned it on a spill-over window (#12); an
+      // allowance window is account-wide whatever model tripped it (#19).
+      windowAppliesToModel(window, w, requestedWindowKey) &&
       rejectionStillAssertable(w.seenAt, nowMs)
     ) {
       return {
@@ -411,7 +446,7 @@ export function classifyAccountHealth(
       w.status === "rejected" &&
       resetMs === undefined &&
       isPeriodWindow(window) &&
-      windowAppliesToModel(w, requestedWindowKey) &&
+      windowAppliesToModel(window, w, requestedWindowKey) &&
       // The block ends when the BLOCK says so. It used to end whenever the
       // generic staleness gate happened to drop the window, so the bench ran
       // for `staleAfterMs` (6h by default) while `resumeAt` advertised one
