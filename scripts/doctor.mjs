@@ -393,16 +393,20 @@ if (!pool) {
   if (warns.length === 0) ok(`effective chain: all live Claude tiers route through the ${poolId} pool`);
 
   // ── case 2: session-level /model overrides ─────────────────────────────────
-  // Enumerate agents/*/sessions/sessions.json. A store that is expected (its
-  // agent has a sessions/ dir) but absent/unparseable gets a LOUD skip — never
-  // a silent pass; a missed off-pool pin is worse than an extra line.
+  // Enumerate every agent's session store — the 2026.8.x per-agent SQLite
+  // database, or the older sessions.json map (src/session-store.ts owns the
+  // where and the how). A store that is expected but absent/unreadable gets a
+  // LOUD skip — never a silent pass; a missed off-pool pin is worse than an
+  // extra line.
+  const { locateSessionStore, readSessionStore } = await import(
+    join(EXT_DIR, "dist", "session-store.js")
+  ).catch(() => import(join(REPO_DIR, "dist", "session-store.js")));
   const AGENTS_DIR = join(HOME, ".openclaw", "agents");
   const stores = [];
   try {
     for (const agent of readdirSync(AGENTS_DIR)) {
-      const sessionsDir = join(AGENTS_DIR, agent, "sessions");
-      if (!existsSync(sessionsDir)) continue; // not an agent-with-sessions
-      stores.push(join(sessionsDir, "sessions.json"));
+      const location = locateSessionStore(join(AGENTS_DIR, agent));
+      if (location) stores.push(location);
     }
   } catch {
     /* no agents dir at all */
@@ -412,14 +416,17 @@ if (!pool) {
   } else {
     let sessionWarns = 0;
     let readable = 0;
-    for (const storePath of stores) {
-      const parsed = readJson(storePath);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        warn(`session-override check SKIPPED for ${storePath} (store unreadable)`);
+    for (const location of stores) {
+      const read = await readSessionStore(location);
+      if (!read.entries) {
+        warn(`session-override check SKIPPED for ${location.path} (${read.error})`);
         continue;
       }
       readable++;
-      const sessionFindings = auditSessionOverrides(parsed, true);
+      if (read.skippedRows > 0) {
+        warn(`${location.path}: ${read.skippedRows} session row(s) unparseable — those sessions were not audited`);
+      }
+      const sessionFindings = auditSessionOverrides(read.entries, true);
       for (const f of sessionFindings) {
         warn(`${renderSurface(f.surface)}: ${f.ref} ${f.reason}`);
         sessionWarns++;

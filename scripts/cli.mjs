@@ -222,21 +222,24 @@ async function chain(args = []) {
     );
   }
 
-  // Session pins, across every agent's session store.
+  // Session pins, across every agent's session store (2026.8.x SQLite database
+  // or the older sessions.json — src/session-store.ts owns the where/how).
   const sessionFindings = [];
   const agentsDir = join(homedir(), ".openclaw", "agents");
   try {
+    const store = await import(resolve(__dirname, "..", "dist", "session-store.js"));
     for (const agent of readdirSync(agentsDir)) {
-      const p = join(agentsDir, agent, "sessions", "sessions.json");
-      if (!existsSync(p)) continue;
-      try {
-        sessionFindings.push(...ca.auditSessionOverrides(JSON.parse(rf(p, "utf8")), Boolean(poolId)));
-      } catch {
-        /* unreadable store — skip, doctor reports install health */
+      const location = store.locateSessionStore(join(agentsDir, agent));
+      if (!location) continue;
+      const read = await store.readSessionStore(location);
+      if (!read.entries) {
+        console.log(`${DIM}  (session store ${location.path} not audited: ${read.error} — see doctor)${RESET}`);
+        continue;
       }
+      sessionFindings.push(...ca.auditSessionOverrides(read.entries, Boolean(poolId)));
     }
   } catch {
-    /* no agents dir */
+    /* no agents dir, or dist not built — doctor reports install health */
   }
   section("SESSION PINS", sessionFindings, (f) =>
     raw ? f.surface : f.surface.replace(/^session (.*)$/, (_, k) => `session ${ca.maskSessionKey(k)}`),

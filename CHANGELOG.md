@@ -4,6 +4,20 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **Session-pin audit reads the 2026.8.x SQLite session store.** OpenClaw 2026.8.x
+  imports each agent's `sessions/sessions.json` into `agent/openclaw-agent.sqlite`
+  (`session_nodes`, old entry kept as `entry_json`) and leaves only transcripts in
+  `sessions/`. `doctor` and `explain` still looked for the JSON map, so every agent
+  came back `session-override check SKIPPED (store unreadable)` while real off-pool
+  `/model` pins sat unaudited in the database. `src/session-store.ts` now owns
+  locating (SQLite preferred, JSON fallback) and reading the store; the database is
+  opened read-only via `node:sqlite` (Node ≥ 22.13 — an older runtime is reported
+  loudly, never passed), unparseable rows are counted, and a `sessions/` dir with
+  neither store is still a loud skip.
+
 ## 1.8.5 — 2026-09-03
 
 ### Fixed
