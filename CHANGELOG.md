@@ -4,7 +4,7 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.8.6] — 2026-09-03
 
 ### Fixed
 - **Session-pin audit reads the 2026.8.x SQLite session store.** OpenClaw 2026.8.x
