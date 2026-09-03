@@ -4,6 +4,19 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## 1.8.5 — 2026-09-03
+
+### Fixed
+- **Exact tool-cap runs no longer fail closed on OpenClaw 2026.8.2.** Every run that
+  carries a tool policy (all isolated cron jobs, `disableTools` side runs) was rejected
+  before launch with `CLI backend "clawd" cannot enforce this run's tool cap` because
+  the pool declared `nativeToolMode: "always-on"`. The backend is now `selectable`
+  with `toolAvailabilityEnforcement: "execution-args"` and a `resolveExecutionArgs`
+  that is a faithful port of core's restricted-argv rewrite (`src/tool-cap.ts`):
+  operator tool/settings/permission flags stripped, hooks/plugins/memory/slash/Chrome
+  disabled, native tools pinned to the exact set, OpenClaw MCP tools allow-listed by
+  name or all MCP tools denied. Chat turns carry no cap and are unchanged.
+
 ## [1.8.3] — 2026-08-31
 
 ### Changed

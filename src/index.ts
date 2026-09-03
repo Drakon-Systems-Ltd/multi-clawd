@@ -64,6 +64,7 @@ import {
   type TokenRefResolver,
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
+import { resolvePoolExecutionArgs } from "./tool-cap.js";
 import {
   addAlert,
   alertKeysWithPrefix,
@@ -670,7 +671,14 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
     // Full harness — mirror the bundled claude-cli backend.
     bundleMcp: true,
     bundleMcpMode: "claude-config-file",
-    nativeToolMode: "always-on",
+    // `selectable` + an enforcement strategy is what lets OpenClaw 2026.8.2 hand
+    // this backend a run with an exact tool policy (every cron job). With the
+    // old `always-on` the gateway failed closed before launch — "cannot enforce
+    // this run's tool cap" — and rung 1 of every cron chain died (3 Sep 2026).
+    // Chat turns carry no cap and are untouched. See tool-cap.ts.
+    nativeToolMode: "selectable",
+    toolAvailabilityEnforcement: "execution-args",
+    resolveExecutionArgs: resolvePoolExecutionArgs,
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     config: {
