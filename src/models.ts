@@ -53,8 +53,11 @@ const KNOWN_SPECS: Record<string, Omit<ModelSpec, "imageMaxSidePx">> = {
   "claude-opus-4-7": { name: "Claude Opus 4.7", contextWindow: 1048576, maxTokens: 64000 },
   "claude-opus-4-6": { name: "Claude Opus 4.6", contextWindow: 1048576, maxTokens: 64000 },
   "claude-sonnet-4-6": { name: "Claude Sonnet 4.6", contextWindow: 1048576, maxTokens: 64000 },
-  "claude-sonnet-5": { name: "Claude Sonnet 5", contextWindow: 200000, maxTokens: 64000 },
+  // Sonnet 5 ships a 1M window (OpenClaw's bundled anthropic catalog: 1000000).
+  "claude-sonnet-5": { name: "Claude Sonnet 5", contextWindow: 1000000, maxTokens: 64000 },
+  "claude-fable-5-1": { name: "Claude Fable 5.1", contextWindow: 1000000, maxTokens: 128000 },
   "claude-fable-5": { name: "Claude Fable 5", contextWindow: 1000000, maxTokens: 128000 },
+  // Haiku 4.5 is natively 200k — advertising more would overrun the model.
   "claude-haiku-4-5": { name: "Claude Haiku 4.5", contextWindow: 200000, maxTokens: 64000 },
 };
 

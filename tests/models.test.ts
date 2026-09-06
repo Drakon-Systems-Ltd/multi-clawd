@@ -67,6 +67,16 @@ describe("resolveModelSpec", () => {
     expect(opus5.contextWindow).toBe(1000000);
     expect(opus5.maxTokens).toBe(128000);
     expect(opus5.name).toBe("Claude Opus 5");
+    // Sonnet 5 and Fable 5.1 are 1M-window models (bundled anthropic catalog);
+    // both used to fall to the 200k default and starved the pool of context.
+    const sonnet5 = resolveModelSpec("claude-sonnet-5");
+    expect(sonnet5.contextWindow).toBe(1000000);
+    const fable51 = resolveModelSpec("claude-fable-5-1");
+    expect(fable51.contextWindow).toBe(1000000);
+    expect(fable51.maxTokens).toBe(128000);
+    expect(fable51.name).toBe("Claude Fable 5.1");
+    // Haiku 4.5 is genuinely 200k; it must NOT be widened.
+    expect(resolveModelSpec("claude-haiku-4-5").contextWindow).toBe(200000);
   });
 
   test("unknown modern ids get conservative defaults and a derived name", () => {

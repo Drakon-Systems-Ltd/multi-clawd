@@ -4,6 +4,17 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **Sonnet 5 and Fable 5.1 catalog rows advertised a 200k context window.**
+  `KNOWN_SPECS` still carried Sonnet 5 at 200000, and Fable 5.1 was missing
+  entirely so it fell to the conservative unknown-id default. Every pool
+  provider (`clawd/*`, `claw2/*`) therefore reported 200k for models whose
+  bundled `anthropic` catalog rows are 1000000, which shrank the prior-history
+  slice and triggered early compaction. Both now declare 1M (Fable 5.1 with
+  128k output). Haiku 4.5 stays at its native 200k on purpose.
+
 ## [1.8.6] — 2026-09-03
 
 ### Fixed
