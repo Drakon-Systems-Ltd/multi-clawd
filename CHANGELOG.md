@@ -4,6 +4,29 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Added
+- **`doctor` names the account actually being used.** The report described the
+  pool as *configured* (`claw1 → claw2`, plus a bare sticky line) and never
+  said whose subscription the next turn spends. It now resolves each account's
+  authenticated Claude login from the `oauthAccount` record the CLI writes into
+  that account's config dir, and re-runs the real launch decision (the same
+  classify → sticky-dwell path the backend takes) to name the account that will
+  serve the next turn, its login and plan, and whether that is home or a
+  rotation. Identities are **masked by default** (`s…e@example.com`) because
+  doctor output gets pasted into issues; `--raw` (or `DOCTOR_RAW=1`, already the
+  session-key opt-in) prints them in full, and `--verbose` adds the per-account
+  verdicts.
+- **Two pool members sharing one Claude login is now a failure, not a silent
+  pass.** A config dir copied from the default one, or a token minted from the
+  same account, gives two ids backed by one subscription: rotation "fails over"
+  onto the quota it just exhausted while credentials, telemetry and the chain
+  audit all still report READY. `doctor` compares the resolved `accountUuid`
+  (falling back to the email) across pool members and fails when two match.
+  Token-sourced accounts stay an explicit "not knowable at rest" note — their
+  identity lives inside the token, and doctor does not spend a turn to learn it.
+
 ## [1.8.7] — 2026-09-11
 
 ### Fixed

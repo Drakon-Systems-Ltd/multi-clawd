@@ -6,9 +6,10 @@
  *   1. plugin install + manifest/config key agreement (the --force trap)
  *   2. compiled-artifact freshness (stale dist detection)
  *   3. claude CLI availability + PATH sanity
- *   4. per-account credential-source health
+ *   4. per-account credential-source health + which Claude login each
+ *      account actually authenticates as (and whether two share one)
  *   5. per-account rate-limit telemetry (state files, age, windows)
- *   6. pool configuration + sticky state
+ *   6. pool configuration, sticky state, and the account the next turn runs on
  *   7. effective chain — Claude tiers must route through the clawd pool
  *   8. eviction watchdog presence (launchd/systemd)
  *
@@ -63,6 +64,11 @@ const STATE_DIR = join(HOME, ".openclaw", "state", "multi-clawd");
 const REPO_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const args = new Set(process.argv.slice(2));
+// Hoisted: doctor output is pasted into issues and support threads, so every
+// section that can print an identifying value (login emails in §4/§6, session
+// keys in §7) masks by default and honours the same single --raw opt-in.
+const VERBOSE = process.env.DOCTOR_VERBOSE === "1" || args.has("--verbose");
+const RAW = process.env.DOCTOR_RAW === "1" || args.has("--raw");
 let failures = 0;
 const ok = (msg) => console.log(`  ✅ ${msg}`);
 const warn = (msg) => console.log(`  ⚠️  ${msg}`);
@@ -243,8 +249,14 @@ console.log("account credentials");
 const { checkAccountCredential } = await import(join(EXT_DIR, "dist", "login-health.js")).catch(
   () => import(join(REPO_DIR, "dist", "login-health.js")),
 );
-const { summarizeWindowUsage } = await import(join(EXT_DIR, "dist", "health.js")).catch(() =>
-  import(join(REPO_DIR, "dist", "health.js")),
+const { summarizeWindowUsage, classifyAccountHealth } = await import(
+  join(EXT_DIR, "dist", "health.js")
+).catch(() => import(join(REPO_DIR, "dist", "health.js")));
+const { resolveAccountIdentity, describeIdentity, findDuplicateLogins, maskEmail } = await import(
+  join(EXT_DIR, "dist", "account-identity.js")
+).catch(() => import(join(REPO_DIR, "dist", "account-identity.js")));
+const { decideStickySelection } = await import(join(EXT_DIR, "dist", "sticky.js")).catch(() =>
+  import(join(REPO_DIR, "dist", "sticky.js")),
 );
 const io = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
@@ -260,9 +272,45 @@ const io = {
   },
   platform: process.platform,
 };
+// A native account's child sets no CLAUDE_CONFIG_DIR, so it authenticates
+// against whatever the default dir is in the ENV THE GATEWAY RUNS IN. Doctor
+// reads the same variable and prints the path it used, so a box that exports
+// CLAUDE_CONFIG_DIR globally shows its real source rather than a guess.
+const identityIo = {
+  readFile: (p) => readFileSync(expandHome(p), "utf8"),
+  expandHome,
+  defaultConfigDir: process.env.CLAUDE_CONFIG_DIR
+    ? expandHome(process.env.CLAUDE_CONFIG_DIR)
+    : join(HOME, ".claude"),
+};
 const accounts = pluginConfig.accounts ?? [];
+const identities = [];
 if (accounts.length === 0) warn("no accounts configured");
 for (const account of accounts) {
+  // WHO this account is, before WHETHER its credential works. An id is a
+  // label the operator chose; the login is the thing quota is spent against,
+  // and the two drift apart silently (a config dir re-logged-in as the wrong
+  // user looks perfectly healthy on every other line of this report).
+  const identity = resolveAccountIdentity(account, identityIo);
+  identities.push(identity);
+  const source = account.native
+    ? `native login, ${identityIo.defaultConfigDir}`
+    : account.configDir
+      ? `config dir ${account.configDir}`
+      : account.oauthTokenFile
+        ? "token file"
+        : account.oauthTokenRef
+          ? "token ref"
+          : "no declared source";
+  if (identity.status === "resolved") {
+    note(`${account.id} → ${describeIdentity(identity, { raw: RAW })} (${source})`);
+  } else if (account.oauthTokenFile || account.oauthTokenRef) {
+    // Expected, not a fault: the identity is inside the token. Proving it
+    // would cost a real turn, which doctor does not spend unless --probe.
+    note(`${account.id} → login not knowable at rest (${source}) — ${identity.reason}`);
+  } else {
+    warn(`${account.id}: cannot tell which Claude login this is — ${identity.reason}`);
+  }
   // RUNTIME credential health first: the source check below only proves a
   // credential EXISTS, and #8 is exactly the case where a present credential
   // is a session the Claude CLI has already rejected. A recorded runtime
@@ -285,6 +333,29 @@ for (const account of accounts) {
   if (check.status === "ok") ok(`${account.id}: credential source looks alive`);
   else if (check.status === "unknown") warn(`${account.id}: cannot verify (${check.reason ?? "no source"})`);
   else bad(`${account.id}: ${check.reason}`);
+}
+
+// Two ids, one login. This is the failure the rest of doctor cannot see: every
+// section still says READY while "failover" rotates onto the quota it just
+// exhausted. Scoped to pool members when a pool exists — outside a pool,
+// sharing a login is a legitimate way to run two profiles of one account.
+{
+  const poolMembers = pluginConfig.pool?.accounts;
+  const scoped = Array.isArray(poolMembers)
+    ? identities.filter((i) => poolMembers.includes(i.accountId))
+    : identities;
+  for (const dupe of findDuplicateLogins(scoped)) {
+    const who = dupe.email
+      ? ` (${RAW ? dupe.email : maskEmail(dupe.email)})`
+      : "";
+    bad(
+      `${dupe.accountIds.join(" and ")} are the SAME Claude login${who} — rotating between them ` +
+        `buys no extra quota. Log one of them into a different account (\`multi-clawd login <account>\`).`,
+    );
+  }
+  if (scoped.filter((i) => i.status === "resolved").length > 1 && findDuplicateLogins(scoped).length === 0) {
+    ok("pool accounts are distinct Claude logins");
+  }
 }
 
 // ── 5. telemetry state ──────────────────────────────────────────────────────
@@ -333,8 +404,62 @@ else {
   if (members.length < 2) bad(`pool "${pool.id ?? "clawd"}" has ${members.length} valid member(s); needs ≥ 2`);
   else ok(`pool "${pool.id ?? "clawd"}": ${members.join(" → ")}`);
   const sticky = readJson(join(STATE_DIR, `pool-${pool.id ?? "clawd"}.sticky.json`));
-  if (sticky) warn(`pool is currently stuck to ${sticky.account} (since ${new Date(sticky.since).toISOString()})`);
-  else ok("no sticky — pool is on its home account");
+
+  // WHICH ACCOUNT IS ACTUALLY BEING USED. Everything above describes the pool
+  // as configured; this answers the question an operator actually asks — whose
+  // subscription does the next turn spend? Re-run the real selection (the same
+  // classify → sticky-dwell decision index.ts makes at launch) rather than
+  // inferring it from the sticky file, because "no sticky" means home, a live
+  // sticky can be about to expire, and health outranks both.
+  if (members.length > 0) {
+    const now = Date.now();
+    const verdicts = members.map((id) => ({
+      id,
+      verdict: classifyAccountHealth(
+        readJson(join(STATE_DIR, `${id}.json`)),
+        {
+          staleAfterMs: pool.staleAfterMs,
+          utilizationThreshold: pool.utilizationThreshold,
+          rotateOnOverage: pool.rotateOnOverage,
+        },
+        now,
+      ).verdict,
+    }));
+    const decision = decideStickySelection({
+      verdicts,
+      sticky,
+      nowMs: now,
+      minDwellMs: pool.minDwellMs,
+    });
+    const identity = identities.find((i) => i.accountId === decision.account);
+    const who =
+      identity?.status === "resolved" ? ` (${describeIdentity(identity, { raw: RAW })})` : "";
+    const verdict = verdicts.find((v) => v.id === decision.account)?.verdict ?? "no_data";
+    const home = members[0];
+    if (decision.account === home) {
+      ok(`serving on ${decision.account}${who} — home account, health ${verdict}`);
+      if (sticky) {
+        note(
+          `sticky to ${sticky.account} (since ${new Date(sticky.since).toISOString()}) is spent — ` +
+            `the next turn returns home`,
+        );
+      }
+    } else {
+      // Rotated away from home is normal operation, not a fault: warn so it is
+      // visible, never bad, or a healthy rotation would flip READY.
+      warn(
+        `serving on ${decision.account}${who} — ROTATED off home (${home} is ${
+          verdicts[0].verdict
+        })${sticky ? `, sticky since ${new Date(sticky.since).toISOString()}` : ""}`,
+      );
+    }
+    // The launch decision is model-aware (a 429 can bench one account for one
+    // model only); doctor has no model in hand, so this is the account-wide
+    // answer. Say so rather than let a model-scoped exception read as a lie.
+    if (VERBOSE) {
+      note(`account-wide verdicts: ${verdicts.map((v) => `${v.id}:${v.verdict}`).join(" ")}`);
+    }
+  }
 }
 
 // ── 7. effective chain (pool-bypass sweep — CASE 1 config + CASE 2 session) ──
@@ -360,14 +485,13 @@ if (!pool) {
     join(EXT_DIR, "dist", "chain-audit.js")
   ).catch(() => import(join(REPO_DIR, "dist", "chain-audit.js")));
   const poolId = pool.id ?? "clawd";
-  const verbose = process.env.DOCTOR_VERBOSE === "1" || process.argv.includes("--verbose");
   // Session keys embed the operator's private channel id (e.g. a Telegram chat
   // id). Mask the id tail by default so doctor output is safe to paste into
-  // issues/support threads; `--raw` restores full keys for local exact-match
-  // debugging. Only case-2 session surfaces carry a key; config surfaces don't.
-  const raw = process.env.DOCTOR_RAW === "1" || process.argv.includes("--raw");
+  // issues/support threads; `--raw` (hoisted, shared with the login identities
+  // in §4/§6) restores full keys for local exact-match debugging. Only case-2
+  // session surfaces carry a key; config surfaces don't.
   const renderSurface = (surface) =>
-    raw ? surface : surface.replace(/^session (.+)$/, (_m, k) => `session ${maskSessionKey(k)}`);
+    RAW ? surface : surface.replace(/^session (.+)$/, (_m, k) => `session ${maskSessionKey(k)}`);
 
   // ── case 1: config-level refs ──────────────────────────────────────────────
   const findings = auditEffectiveChain(config, poolId);
@@ -380,7 +504,7 @@ if (!pool) {
   // them. A dead-noisy section trains people to skip it — the opposite of the
   // point. (Live-tier bypasses above are always listed in full.)
   if (notes.length > 0) {
-    if (verbose) {
+    if (VERBOSE) {
       for (const f of notes) {
         note(`${f.surface}: ${f.ref} (allowlist entry, not a live tier) ${f.reason}`);
       }

@@ -248,8 +248,9 @@ claude-cli/claude-fable-5        # main login
 - 🩺 **`npm run doctor` (v0.3)** — one command that says whether a box is
   actually ready: config/manifest agreement (with the exact `--force`
   preflight strip plan), dist freshness, CLI presence, credential health
-  (values never printed), telemetry age, pool + sticky state, watchdog
-  presence, optional `--probe` end-to-end turn.
+  (values never printed), **which Claude login each account authenticates as
+  and which one the next turn will run on**, telemetry age, pool + sticky
+  state, watchdog presence, optional `--probe` end-to-end turn.
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime
   config if the loader hands it an empty block, so a flaky registration pass
   can't silently no-op the plugin.
