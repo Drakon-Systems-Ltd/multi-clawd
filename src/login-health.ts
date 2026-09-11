@@ -8,6 +8,8 @@
  * turn failed "Not logged in" with no operator-visible warning.
  */
 
+import { createHash } from "node:crypto";
+
 export interface CredentialAccountShape {
   id: string;
   native?: boolean;
@@ -21,7 +23,24 @@ export interface CredentialIo {
   readFile: (path: string) => string;
   /** macOS: whether the "Claude Code-credentials" keychain item exists. */
   keychainHasClaudeCredentials: () => boolean;
+  /**
+   * macOS: whether the keychain holds credentials for a non-default config
+   * dir. The CLI keys those under `keychainServiceForConfigDir(absDir)`, so
+   * the implementer expands `~` and resolves the path before hashing.
+   */
+  keychainHasClaudeCredentialsForDir: (configDir: string) => boolean;
   platform: NodeJS.Platform;
+}
+
+/**
+ * Keychain service name Claude Code uses for a non-default `CLAUDE_CONFIG_DIR`:
+ * the default-dir item is `Claude Code-credentials`; every other dir gets a
+ * suffix of the first 8 hex chars of sha256(absolute dir path). `absDir` must
+ * be the expanded, resolved path — hashing `~/.x` yields the wrong item.
+ */
+export function keychainServiceForConfigDir(absDir: string): string {
+  const hash = createHash("sha256").update(absDir).digest("hex").slice(0, 8);
+  return `Claude Code-credentials-${hash}`;
 }
 
 export interface CredentialCheck {
@@ -165,7 +184,18 @@ export function checkAccountCredential(
     return checkCredentialsJson(io, "~/.claude");
   }
   if (account.configDir) {
-    return checkCredentialsJson(io, account.configDir);
+    // On macOS the CLI keeps per-dir logins in the keychain and writes no
+    // .credentials.json, so the file check alone reports a working login as
+    // dead. Keychain first; the file remains a valid fallback source.
+    if (io.platform === "darwin" && io.keychainHasClaudeCredentialsForDir(account.configDir)) {
+      return { status: "ok" };
+    }
+    const file = checkCredentialsJson(io, account.configDir);
+    if (file.status === "ok" || io.platform !== "darwin") return file;
+    return {
+      status: "broken",
+      reason: `keychain has no Claude Code credentials for ${account.configDir} and ${file.reason}`,
+    };
   }
   return { status: "unknown" };
 }

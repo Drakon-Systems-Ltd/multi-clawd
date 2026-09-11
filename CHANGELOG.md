@@ -4,6 +4,20 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.8.9] — 2026-09-11
+
+### Fixed
+- **macOS: a per-config-dir account with a keychain login is no longer reported
+  dead.** Claude Code 2.1.x stores a non-default `CLAUDE_CONFIG_DIR` login in
+  the keychain under `Claude Code-credentials-<sha256(absolute dir)[:8]>` and
+  writes no `.credentials.json`, but the source check only ever read the file.
+  Result: `doctor` printed `❌ <id>: ~/<dir>/.credentials.json unreadable` and
+  the gateway raised `login:<id>` at every start while turns on that account
+  succeeded. The check now probes the per-dir keychain item first (metadata
+  only, the secret is never read) and keeps the file as the fallback source;
+  when neither exists the reason names both. Linux behaviour is unchanged.
+  Reported from a fleet macOS host.
+
 ## [1.8.8] — 2026-09-11
 
 ### Added

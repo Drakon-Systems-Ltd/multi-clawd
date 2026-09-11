@@ -280,7 +280,10 @@ try {
 
 // ── 4. account credentials (values never printed) ──────────────────────────
 console.log("account credentials");
-const { checkAccountCredential } = await importDist("login-health.js", ["checkAccountCredential"]);
+const { checkAccountCredential, keychainServiceForConfigDir } = await importDist("login-health.js", [
+  "checkAccountCredential",
+  "keychainServiceForConfigDir",
+]);
 const { summarizeWindowUsage, classifyAccountHealth } = await importDist("health.js", [
   "summarizeWindowUsage",
   "classifyAccountHealth",
@@ -295,18 +298,20 @@ const { resolveAccountIdentity, describeIdentity, findDuplicateLogins, maskEmail
 const { decideStickySelection } = await importDist("sticky.js", ["decideStickySelection"]);
 const io = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
-  keychainHasClaudeCredentials: () => {
-    try {
-      execFileSync("security", ["find-generic-password", "-s", "Claude Code-credentials"], {
-        stdio: "ignore",
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  },
+  keychainHasClaudeCredentials: () => keychainHasService("Claude Code-credentials"),
+  keychainHasClaudeCredentialsForDir: (dir) =>
+    keychainHasService(keychainServiceForConfigDir(expandHome(dir))),
   platform: process.platform,
 };
+// Metadata-only probe (no `-w`): the secret is never read.
+function keychainHasService(service) {
+  try {
+    execFileSync("security", ["find-generic-password", "-s", service], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 // A native account's child sets no CLAUDE_CONFIG_DIR, so it authenticates
 // against whatever the default dir is in the ENV THE GATEWAY RUNS IN. Doctor
 // reads the same variable and prints the path it used, so a box that exports

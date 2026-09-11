@@ -86,6 +86,7 @@ import {
 } from "./model-currency.js";
 import {
   checkAccountCredential,
+  keychainServiceForConfigDir,
   createRefProbeTracker,
   type CredentialIo,
   type RefProbeTracker,
@@ -301,18 +302,21 @@ const LOGIN_PROBE_INITIAL_DELAY_MS = 45 * 1000;
 
 const realCredentialIo: CredentialIo = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
-  keychainHasClaudeCredentials: () => {
-    try {
-      execFileSync("security", ["find-generic-password", "-s", "Claude Code-credentials"], {
-        stdio: "ignore",
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  },
+  keychainHasClaudeCredentials: () => keychainHasService("Claude Code-credentials"),
+  keychainHasClaudeCredentialsForDir: (dir) =>
+    keychainHasService(keychainServiceForConfigDir(expandHome(dir))),
   platform: process.platform,
 };
+
+/** Metadata-only keychain probe (no `-w`): the secret is never read. */
+function keychainHasService(service: string): boolean {
+  try {
+    execFileSync("security", ["find-generic-password", "-s", service], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Periodic login-health probe: credential *sources* are checked (file shape,

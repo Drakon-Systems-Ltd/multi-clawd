@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { checkAccountCredential, createRefProbeTracker, type CredentialIo } from "../src/login-health";
+import {
+  checkAccountCredential,
+  createRefProbeTracker,
+  keychainServiceForConfigDir,
+  type CredentialIo,
+} from "../src/login-health";
 
 const MIN = 60 * 1000;
 
@@ -9,6 +14,7 @@ function io(overrides: Partial<CredentialIo>): CredentialIo {
       throw new Error("no file");
     },
     keychainHasClaudeCredentials: () => false,
+    keychainHasClaudeCredentialsForDir: () => false,
     platform: "darwin",
     ...overrides,
   };
@@ -71,6 +77,63 @@ describe("checkAccountCredential", () => {
     );
     expect(result.status).toBe("broken");
     expect(result.reason).toContain("blank");
+  });
+
+  /**
+   * On macOS, Claude Code 2.1.x keeps a non-default-dir login in the keychain
+   * (service `Claude Code-credentials-<sha256(absDir)[:8]>`) and writes no
+   * .credentials.json. Checking only the file reported a working login as
+   * dead on every doctor run and gateway start.
+   */
+  test("configDir macOS account is ok when its per-dir keychain item exists", () => {
+    const seen: string[] = [];
+    const result = checkAccountCredential(
+      { id: "claw2", configDir: "~/.claw2" },
+      io({
+        keychainHasClaudeCredentialsForDir: (dir) => {
+          seen.push(dir);
+          return true;
+        },
+      }),
+    );
+    expect(result.status).toBe("ok");
+    expect(seen).toEqual(["~/.claw2"]);
+  });
+
+  test("configDir macOS account falls back to credentials.json when the keychain has nothing", () => {
+    const good = JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-x" } });
+    expect(
+      checkAccountCredential({ id: "claw2", configDir: "~/.claw2" }, io({ readFile: () => good })).status,
+    ).toBe("ok");
+  });
+
+  test("configDir macOS account with neither keychain item nor file names both sources", () => {
+    const result = checkAccountCredential({ id: "claw2", configDir: "~/.claw2" }, io({}));
+    expect(result.status).toBe("broken");
+    expect(result.reason).toContain("keychain has no Claude Code credentials for ~/.claw2");
+    expect(result.reason).toContain(".credentials.json unreadable");
+  });
+
+  test("configDir Linux account never consults the keychain", () => {
+    const result = checkAccountCredential(
+      { id: "claw2", configDir: "~/.claw2" },
+      io({
+        platform: "linux",
+        keychainHasClaudeCredentialsForDir: () => {
+          throw new Error("keychain probed on linux");
+        },
+      }),
+    );
+    expect(result.status).toBe("broken");
+    expect(result.reason).toBe("~/.claw2/.credentials.json unreadable");
+  });
+
+  test("keychainServiceForConfigDir matches the CLI's per-dir service name", () => {
+    // first 8 hex chars of sha256 over the resolved path
+    expect(keychainServiceForConfigDir("/Users/example/.claw2")).toBe("Claude Code-credentials-618edf7f");
+    expect(keychainServiceForConfigDir("/Users/example/.claw2")).not.toBe(
+      keychainServiceForConfigDir("/Users/example/.claw3"),
+    );
   });
 
   test("ref-based accounts are unknown to the sync check (probed async elsewhere)", () => {
