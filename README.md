@@ -250,7 +250,8 @@ claude-cli/claude-fable-5        # main login
   preflight strip plan), dist freshness, CLI presence, credential health
   (values never printed), **which Claude login each account authenticates as
   and which one the next turn will run on**, telemetry age, pool + sticky
-  state, watchdog presence, optional `--probe` end-to-end turn.
+  state, **whether every non-Claude chain rung still has a usable auth
+  profile**, watchdog presence, optional `--probe` (one turn per account).
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime
   config if the loader hands it an empty block, so a flaky registration pass
   can't silently no-op the plugin.

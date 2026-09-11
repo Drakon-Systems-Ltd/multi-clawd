@@ -26,6 +26,44 @@ versioning from v1.0.
   (falling back to the email) across pool members and fails when two match.
   Token-sourced accounts stay an explicit "not knowable at rest" note — their
   identity lives inside the token, and doctor does not spend a turn to learn it.
+- **`doctor` checks that every non-Claude chain rung can actually
+  authenticate.** The effective-chain audit proved the chain was *routed*
+  correctly and said nothing about whether the providers it routes to still
+  hold a usable credential — a fallback whose provider has no eligible auth
+  profile is a rung that does not exist, and it stays invisible until the tier
+  above it dies. `src/chain-auth.ts` reads the auth store through the
+  documented CLI (`openclaw models auth list --json`, cached 15 min per agent)
+  and fails when `auth.order.<provider>` excludes every stored profile (the
+  documented `excluded_by_auth_order` case) or when every eligible OAuth
+  profile is stale past a 7-day refresh grace. A just-passed `expiresAt` is a
+  warn, not a failure: access tokens expire constantly and refresh on use.
+  An unreadable auth store is a LOUD skip, never a silent pass.
+- **`--probe` now probes every account, not just the pool.** It spent one turn
+  on the pool ref, which proves whichever account selection happens to pick —
+  so a dead second account stayed invisible until the day rotation needed it.
+  Each account gets its own probe and its own session key (a shared key resumes
+  the previous probe's session, which can answer from the account that started
+  it). `--probe-pool` keeps the old single-turn behaviour. A refusal by
+  `agents.defaults.modelPolicy.allow` is reported as "not probed" with the fix,
+  never as a credential failure — the gateway declined the ref before any login
+  was used.
+
+### Fixed
+- **Per-agent chains under `agents.entries.<id>` were invisible to both chain
+  audits.** OpenClaw 2026.8.x moved per-agent overrides into that map, and the
+  collectors still walked only `agents.<name>` and `agents.list[]`. On any
+  modern config a per-agent pin to a single pool account produced no warning,
+  and a per-agent chain shadowing `agents.defaults` — the exact 25 Jul incident
+  the shadowing audit exists for — produced nothing at all. Both collectors now
+  walk the map form, and `entries`/`ownership` are reserved so neither is
+  mistaken for an agent.
+- **doctor's dist imports fall back when the installed plugin is older than the
+  CLI.** The old `import(installed).catch(() => import(checkout))` only caught a
+  missing FILE, so an installed copy that loads but lacks a newly added export
+  crashed the report mid-run with every earlier section already printed as
+  clean. `importDist` also lets the chain audits run from the CLI's own copy —
+  they are doctor's logic, and mixing the two gave one report two different
+  views of the same config.
 
 ## [1.8.7] — 2026-09-11
 

@@ -465,3 +465,39 @@ describe("provider ids compare the way the router reads them", () => {
     expect(findings.some((f) => f.severity === "warn")).toBe(true);
   });
 });
+
+describe("2026.8.x agents.entries map form", () => {
+  // Regression: per-agent chains moved from `agents.<name>` / `agents.list[]`
+  // to `agents.entries.<id>`, and both collectors walked only the old shapes.
+  // Every per-agent pin and every shadowing chain on a modern config was
+  // invisible while doctor reported the chain clean.
+  const config = {
+    agents: {
+      defaults: { model: { primary: "clawd/claude-fable-5-1", fallbacks: ["openai/gpt-6"] } },
+      entries: {
+        main: {},
+        watchdog: {
+          model: { primary: "claw2/claude-haiku-4-5", fallbacks: ["clawd/claude-sonnet-5"] },
+        },
+      },
+    },
+  };
+
+  test("a per-agent pool-account pin under entries is audited", () => {
+    const findings = auditEffectiveChain(config, "clawd").filter((f) => f.severity === "warn");
+    expect(findings).toHaveLength(1);
+    expect(findings[0].surface).toBe("agents.entries.watchdog.model.primary");
+    expect(findings[0].ref).toBe("claw2/claude-haiku-4-5");
+  });
+
+  test("a shadowing chain under entries is reported", () => {
+    const shadows = auditChainShadowing(config);
+    expect(shadows).toHaveLength(1);
+    expect(shadows[0].agent).toBe("watchdog");
+    expect(shadows[0].agentPrimary).toBe("claw2/claude-haiku-4-5");
+  });
+
+  test("`entries` itself is never treated as an agent", () => {
+    expect(auditChainShadowing(config).map((f) => f.agent)).not.toContain("entries");
+  });
+});

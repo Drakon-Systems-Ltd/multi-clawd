@@ -11,12 +11,17 @@
  *   5. per-account rate-limit telemetry (state files, age, windows)
  *   6. pool configuration, sticky state, and the account the next turn runs on
  *   7. effective chain — Claude tiers must route through the clawd pool
- *   8. eviction watchdog presence (launchd/systemd)
+ *   8. chain auth — every non-Claude rung must have a usable auth profile
+ *   9. eviction watchdog presence (launchd/systemd)
  *
  * Flags:
  *   --preflight   print the exact config keys to strip before a --force
  *                 install against an older installed manifest
- *   --probe       spend one cheap turn proving the pool answers end-to-end
+ *   --probe       spend one cheap turn per account (plus the pool) proving
+ *                 each login answers end-to-end
+ *   --probe-pool  with --probe: the pool ref only, one turn total
+ *   --raw         print login emails and session keys unmasked
+ *   --verbose     list allowlist rungs, per-account verdicts, every surface
  *
  * Exit code: 0 all good, 1 any ❌.
  */
@@ -90,6 +95,35 @@ function readJson(path) {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Import a compiled module, preferring the INSTALLED plugin so findings
+ * describe the artifact that actually runs — but falling back to this
+ * checkout when the installed copy predates an export doctor needs.
+ *
+ * The fallback is the point: a bare `import(EXT).catch(() => import(REPO))`
+ * only catches a missing FILE. An older installed dist that loads fine but
+ * lacks a newly added export produced `X is not a function` mid-report, with
+ * every earlier section already printed as if all was well.
+ */
+async function importDist(file, required = [], prefer = "installed") {
+  // `prefer: "cli"` for pure static analysis (the chain audits): that logic is
+  // doctor's own, so it must run at the CLI's version. Mixing the two — a new
+  // section reading the checkout while an older section read the install —
+  // produced two different views of the same config in one report.
+  const dirs = prefer === "cli" ? [REPO_DIR, EXT_DIR] : [EXT_DIR, REPO_DIR];
+  const candidates = dirs.map((d) => join(d, "dist", file));
+  let firstError;
+  for (const path of candidates) {
+    try {
+      const mod = await import(path);
+      if (required.every((name) => typeof mod[name] === "function")) return mod;
+    } catch (err) {
+      firstError ??= err;
+    }
+  }
+  throw firstError ?? new Error(`no usable dist/${file} (missing: ${required.join(", ")})`);
 }
 
 function newestMtime(dir, exts) {
@@ -246,18 +280,19 @@ try {
 
 // ── 4. account credentials (values never printed) ──────────────────────────
 console.log("account credentials");
-const { checkAccountCredential } = await import(join(EXT_DIR, "dist", "login-health.js")).catch(
-  () => import(join(REPO_DIR, "dist", "login-health.js")),
-);
-const { summarizeWindowUsage, classifyAccountHealth } = await import(
-  join(EXT_DIR, "dist", "health.js")
-).catch(() => import(join(REPO_DIR, "dist", "health.js")));
-const { resolveAccountIdentity, describeIdentity, findDuplicateLogins, maskEmail } = await import(
-  join(EXT_DIR, "dist", "account-identity.js")
-).catch(() => import(join(REPO_DIR, "dist", "account-identity.js")));
-const { decideStickySelection } = await import(join(EXT_DIR, "dist", "sticky.js")).catch(() =>
-  import(join(REPO_DIR, "dist", "sticky.js")),
-);
+const { checkAccountCredential } = await importDist("login-health.js", ["checkAccountCredential"]);
+const { summarizeWindowUsage, classifyAccountHealth } = await importDist("health.js", [
+  "summarizeWindowUsage",
+  "classifyAccountHealth",
+]);
+const { resolveAccountIdentity, describeIdentity, findDuplicateLogins, maskEmail } =
+  await importDist("account-identity.js", [
+    "resolveAccountIdentity",
+    "describeIdentity",
+    "findDuplicateLogins",
+    "maskEmail",
+  ]);
+const { decideStickySelection } = await importDist("sticky.js", ["decideStickySelection"]);
 const io = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
   keychainHasClaudeCredentials: () => {
@@ -481,9 +516,11 @@ console.log("effective chain");
 if (!pool) {
   // No clawd pool ⇒ nothing to bypass; skip the whole section (mirrors §6).
 } else {
-  const { auditEffectiveChain, auditSessionOverrides, maskSessionKey } = await import(
-    join(EXT_DIR, "dist", "chain-audit.js")
-  ).catch(() => import(join(REPO_DIR, "dist", "chain-audit.js")));
+  const { auditEffectiveChain, auditSessionOverrides, maskSessionKey } = await importDist(
+    "chain-audit.js",
+    ["auditEffectiveChain", "auditSessionOverrides", "maskSessionKey"],
+    "cli",
+  );
   const poolId = pool.id ?? "clawd";
   // Session keys embed the operator's private channel id (e.g. a Telegram chat
   // id). Mask the id tail by default so doctor output is safe to paste into
@@ -522,9 +559,10 @@ if (!pool) {
   // where and the how). A store that is expected but absent/unreadable gets a
   // LOUD skip — never a silent pass; a missed off-pool pin is worse than an
   // extra line.
-  const { locateSessionStore, readSessionStore } = await import(
-    join(EXT_DIR, "dist", "session-store.js")
-  ).catch(() => import(join(REPO_DIR, "dist", "session-store.js")));
+  const { locateSessionStore, readSessionStore } = await importDist("session-store.js", [
+    "locateSessionStore",
+    "readSessionStore",
+  ]);
   const AGENTS_DIR = join(HOME, ".openclaw", "agents");
   const stores = [];
   try {
@@ -560,7 +598,107 @@ if (!pool) {
   }
 }
 
-// ── 8. watchdog ─────────────────────────────────────────────────────────────
+// ── 8. chain auth — can each non-Claude rung actually authenticate? ─────────
+//
+// §7 proves the chain is ROUTED correctly. It says nothing about whether the
+// rungs it routes to hold a credential. A fallback whose provider has no
+// eligible auth profile is a rung that does not exist, and the gap only shows
+// up at the moment the tier above it dies — the one moment it was supposed to
+// help. The auth store is read through the documented CLI (`models auth list
+// --json`), never by guessing at its on-disk shape, and cached because that
+// call costs seconds.
+console.log("chain auth");
+{
+  const { auditChainAuth } = await importDist("chain-auth.js", ["auditChainAuth"], "cli");
+  const { collectChainRefs } = await importDist("chain-audit.js", ["collectChainRefs"], "cli");
+  const AUTH_CACHE_TTL_MS = 15 * 60 * 1000;
+  const agentIds = Object.keys(config?.agents?.entries ?? {});
+  // Which store answers for a surface that names no agent (agents.defaults,
+  // cron sections): the default agent. `main` when it exists, else the first
+  // configured entry — the same fallback the CLI applies.
+  const defaultAgent = agentIds.includes("main") ? "main" : agentIds[0];
+
+  function ownerOf(surface) {
+    const entry = surface.match(/^agents\.entries\.([^.]+)\./)?.[1];
+    if (entry) return entry;
+    const list = surface.match(/^agents\.list\[([^\]]+)\]/)?.[1];
+    if (list && agentIds.includes(list)) return list;
+    const named = surface.match(/^agents\.([^.]+)\./)?.[1];
+    if (named && agentIds.includes(named)) return named;
+    return defaultAgent;
+  }
+
+  function loadProfiles(agentId) {
+    const cacheFile = join(STATE_DIR, `auth-profiles-${agentId}.json`);
+    const cached = readJson(cacheFile);
+    if (cached && Date.now() - (cached.checkedAt ?? 0) < AUTH_CACHE_TTL_MS) {
+      return { profiles: cached.profiles ?? [], cached: true };
+    }
+    try {
+      const out = execFileSync(
+        "openclaw",
+        ["models", "auth", "list", "--agent", agentId, "--json"],
+        { encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const profiles = JSON.parse(out)?.profiles ?? [];
+      try {
+        mkdirSync(STATE_DIR, { recursive: true });
+        writeFileSync(
+          cacheFile,
+          JSON.stringify({ profiles, checkedAt: Date.now() }, null, 2) + "\n",
+        );
+      } catch {
+        /* cache is an optimisation, never a requirement */
+      }
+      return { profiles, cached: false };
+    } catch (err) {
+      // A LOUD skip. Silently passing here would turn "doctor could not read
+      // the auth store" into "the chain is fine", which is the failure class
+      // this whole section exists to remove.
+      return { error: String(err).split("\n")[0].slice(0, 160) };
+    }
+  }
+
+  const refs = collectChainRefs(config ?? {});
+  const byAgent = new Map();
+  for (const ref of refs) {
+    const agentId = ownerOf(ref.surface);
+    if (!agentId) continue;
+    const list = byAgent.get(agentId) ?? [];
+    list.push(ref);
+    byAgent.set(agentId, list);
+  }
+  if (byAgent.size === 0) {
+    note("no chain refs to check");
+  }
+  for (const [agentId, agentRefs] of [...byAgent.entries()].sort()) {
+    const loaded = loadProfiles(agentId);
+    if (loaded.error) {
+      warn(`chain-auth check SKIPPED for agent ${agentId} — auth store unreadable (${loaded.error})`);
+      continue;
+    }
+    const findings = auditChainAuth({
+      refs: agentRefs,
+      profiles: loaded.profiles,
+      order: config?.auth?.order,
+      poolId: pluginConfig.pool?.id ?? "clawd",
+      nowMs: Date.now(),
+    });
+    if (findings.length === 0) {
+      ok(`${agentId}: every live non-Claude rung has a usable auth profile`);
+      continue;
+    }
+    for (const f of findings) {
+      const where = VERBOSE ? ` [${f.surfaces.join(", ")}]` : ` [${f.surfaces[0]}${f.surfaces.length > 1 ? ` +${f.surfaces.length - 1}` : ""}]`;
+      const line = `${agentId}: ${f.provider}${where} — ${f.reason}`;
+      if (f.severity === "bad") bad(line);
+      else if (f.severity === "warn") warn(line);
+      else note(line);
+    }
+  }
+}
+
+// ── 9. watchdog ─────────────────────────────────────────────────────────────
 console.log("eviction watchdog");
 let watchdogFound = false;
 try {
@@ -618,22 +756,63 @@ if (watchdogFound) {
   } else ok("watchdog scheduled");
 } else warn("no watchdog found (needed until openclaw#107596 ships — see README)");
 
-// ── 9. optional live probe ──────────────────────────────────────────────────
+// ── 10. optional live probe ─────────────────────────────────────────────────
 if (args.has("--probe")) {
-  console.log("live probe (spends one turn)");
-  const ref = pool ? `${pool.id ?? "clawd"}/${pool.defaultModel ?? "claude-fable-5"}` : accounts[0] ? `${accounts[0].id}/claude-fable-5` : undefined;
-  if (!ref) bad("nothing to probe");
-  else {
+  // EVERY account, not just the pool ref. The pool ref proves whichever
+  // account selection happens to pick right now — so a dead second account
+  // stayed invisible until the day rotation needed it, which is the day it
+  // could least afford to be wrong. One turn per account plus one for the
+  // pool; `--probe-pool` keeps the old single-turn behaviour.
+  const model = pool?.defaultModel ?? "claude-fable-5";
+  const targets = [];
+  if (pool) targets.push({ label: `pool ${pool.id ?? "clawd"}`, ref: `${pool.id ?? "clawd"}/${model}` });
+  if (!args.has("--probe-pool")) {
+    for (const account of accounts) targets.push({ label: account.id, ref: `${account.id}/${model}` });
+  }
+  console.log(`live probe (spends ${targets.length} turn${targets.length === 1 ? "" : "s"})`);
+  if (targets.length === 0) bad("nothing to probe");
+  for (const target of targets) {
     try {
       const out = execFileSync(
         "openclaw",
-        ["agent", "--agent", "main", "--session-key", "agent:main:mc-doctor-probe", "--model", ref, "--json", "--message", "Reply with exactly this line and nothing else: MC_DOCTOR_OK. Do not use any tools."],
-        { encoding: "utf8", timeout: 180000 },
+        [
+          "agent",
+          "--agent",
+          "main",
+          // Per-target session key: one shared key would resume the previous
+          // probe's session, and a resumed Claude session can answer from the
+          // account that STARTED it — the probe would then prove the wrong
+          // account while looking perfectly green.
+          "--session-key",
+          `agent:main:mc-doctor-probe:${target.ref.replace(/[^a-z0-9]+/gi, "-")}`,
+          "--model",
+          target.ref,
+          "--json",
+          "--message",
+          "Reply with exactly this line and nothing else: MC_DOCTOR_OK. Do not use any tools.",
+        ],
+        // stderr captured, not inherited: a refusal is classified below and
+        // reported as one line, instead of dumping the CLI's own error block
+        // into the middle of the report.
+        { encoding: "utf8", timeout: 180000, stdio: ["ignore", "pipe", "pipe"] },
       );
-      if (out.includes("MC_DOCTOR_OK")) ok(`${ref} answered end-to-end`);
-      else bad(`${ref} probe returned unexpected output`);
+      if (out.includes("MC_DOCTOR_OK")) ok(`${target.label}: ${target.ref} answered end-to-end`);
+      else bad(`${target.label}: ${target.ref} probe returned unexpected output`);
     } catch (err) {
-      bad(`${ref} probe failed: ${String(err).slice(0, 200)}`);
+      const text = String(err.stderr ?? "") + String(err.stdout ?? "") + String(err);
+      // A model-policy refusal says nothing about the ACCOUNT: the gateway
+      // declined the ref before any login was used. Reporting it as a probe
+      // failure would accuse a perfectly healthy account (pool members are
+      // normally reached through `<pool>/*`, so a direct `claw<N>/…` ref is
+      // often simply not allowlisted).
+      if (/modelPolicy\.allow/.test(text)) {
+        warn(
+          `${target.label}: not probed — \`${target.ref}\` is blocked by agents.defaults.modelPolicy.allow. ` +
+            `Add \`${target.ref.split("/")[0]}/*\` to probe this account directly; its pool routing is unaffected.`,
+        );
+      } else {
+        bad(`${target.label}: ${target.ref} probe failed: ${String(err).slice(0, 200)}`);
+      }
     }
   }
 }

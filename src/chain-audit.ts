@@ -144,7 +144,7 @@ function classifyBypass(ref: string, poolId: string): string | null {
   return `pins a single pool account; cross-account failover won't fire — use ${poolId}/ for the pool`;
 }
 
-interface CollectedRef {
+export interface CollectedRef {
   surface: string;
   ref: string;
   /** True for `agents.defaults.models` allowlist keys: report at note level only. */
@@ -191,14 +191,19 @@ function collectCronRefs(surface: string, node: unknown, depth: number, out: Col
   }
 }
 
-/** Reserved keys under `agents` that are not per-agent override objects. */
-const RESERVED_AGENT_KEYS = new Set(["defaults", "list", "models"]);
+/**
+ * Reserved keys under `agents` that are not per-agent override objects.
+ * `entries` is the 2026.8.x per-agent map (`agents.entries.<id>`) and gets its
+ * own pass below — treating it as an agent named "entries" collected nothing,
+ * so every per-agent chain on a modern config was invisible to this audit.
+ */
+const RESERVED_AGENT_KEYS = new Set(["defaults", "list", "models", "entries", "ownership"]);
 
 /**
  * Collect every model reference under `agents` (plus cron/scheduled sections)
  * as flat {surface, ref, allowlist} records — no classification yet.
  */
-function collectChainRefs(config: unknown): CollectedRef[] {
+export function collectChainRefs(config: unknown): CollectedRef[] {
   const out: CollectedRef[] = [];
   const push = (surface: string, value: unknown) => {
     for (const r of extractModelRefs(surface, value)) out.push({ ...r, allowlist: false });
@@ -228,6 +233,22 @@ function collectChainRefs(config: unknown): CollectedRef[] {
     const agent = v as Record<string, unknown>;
     if ("model" in agent) push(`agents.${name}.model`, agent.model);
     if ("cron" in agent) collectCronRefs(`agents.${name}.cron`, agent.cron, 0, out);
+  }
+
+  // per-agent overrides — map form: agents.entries.<id>.model / .subagents / .cron
+  const entries = agents.entries;
+  if (entries && typeof entries === "object" && !Array.isArray(entries)) {
+    for (const [name, v] of Object.entries(entries as Record<string, unknown>)) {
+      if (!v || typeof v !== "object") continue;
+      const agent = v as Record<string, unknown>;
+      if ("model" in agent) push(`agents.entries.${name}.model`, agent.model);
+      const agentSubagents = agent.subagents;
+      if (agentSubagents && typeof agentSubagents === "object") {
+        const sub = agentSubagents as Record<string, unknown>;
+        if (sub.model !== undefined) push(`agents.entries.${name}.subagents.model`, sub.model);
+      }
+      if ("cron" in agent) collectCronRefs(`agents.entries.${name}.cron`, agent.cron, 0, out);
+    }
   }
 
   // per-agent overrides — array form: agents.list[].model / .cron
@@ -324,6 +345,17 @@ function collectAgentModelBlocks(config: unknown): Array<{ agent: string; surfac
     if (!v || typeof v !== "object") continue;
     const agent = v as Record<string, unknown>;
     if ("model" in agent) out.push({ agent: name, surface: `agents.${name}.model`, model: agent.model });
+  }
+  // The 2026.8.x map form. Missing here meant a shadowing chain on a modern
+  // config produced no finding at all — the exact 25 Jul failure, unreported.
+  const entries = agents.entries;
+  if (entries && typeof entries === "object" && !Array.isArray(entries)) {
+    for (const [name, v] of Object.entries(entries as Record<string, unknown>)) {
+      if (!v || typeof v !== "object") continue;
+      const agent = v as Record<string, unknown>;
+      if (!("model" in agent)) continue;
+      out.push({ agent: name, surface: `agents.entries.${name}.model`, model: agent.model });
+    }
   }
   if (Array.isArray(agents.list)) {
     agents.list.forEach((a, i) => {
