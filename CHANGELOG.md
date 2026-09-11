@@ -4,7 +4,7 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.8.8] — 2026-09-11
 
 ### Added
 - **`doctor` names the account actually being used.** The report described the
