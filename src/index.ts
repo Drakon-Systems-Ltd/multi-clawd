@@ -766,6 +766,18 @@ async function buildAccountEnv(
 }
 
 /**
+ * OpenClaw >= 2026.9 loads plugins in named registration modes. In
+ * `"cli-metadata"` and `"setup-only"` the runtime facade is intentionally
+ * unavailable (a throwing Proxy), and a plugin with no root CLI commands has
+ * nothing to register. Older cores have no `registrationMode` at all; treat
+ * that (and every runtime-bearing mode) as a normal registration.
+ */
+export function isRuntimelessRegistration(api: unknown): boolean {
+  const mode = (api as { registrationMode?: unknown } | null)?.registrationMode;
+  return mode === "cli-metadata" || mode === "setup-only";
+}
+
+/**
  * Minimal provider registration whose only jobs are (a) contributing the
  * model catalog rows for this account's provider id and (b) synthetic auth
  * so status surfaces show the backend as authenticated. Model runs never
@@ -814,6 +826,13 @@ export default definePluginEntry({
   description:
     "Register additional Claude Code logins as first-class OpenClaw CLI backends for cross-account failover.",
   register(api) {
+    // OpenClaw 2026.9.x runs register() in several modes (api.registrationMode).
+    // In "cli-metadata" (root help / plugin scan) and "setup-only" the runtime
+    // is a proxy that throws on ANY property read, so even `api.runtime?.config`
+    // fails the whole registration. This plugin owns no CLI commands, so there
+    // is nothing to contribute in those modes: return before touching runtime.
+    if (isRuntimelessRegistration(api)) return;
+
     // Resolve this plugin's config defensively across OpenClaw versions.
     //
     // `api.pluginConfig` has been observed arriving empty on some registration

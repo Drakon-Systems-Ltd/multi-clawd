@@ -4,6 +4,26 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.8.10] — 2026-09-12
+
+### Fixed
+- **OpenClaw 2026.9.4: `register()` no longer fails during the `cli-metadata`
+  plugin scan.** 2026.9.x loads plugins in named registration modes
+  (`api.registrationMode`). In `"cli-metadata"` (root help, `plugins doctor`,
+  the updater's plugin pass) and `"setup-only"` the runtime facade is a Proxy
+  that throws on any property read, so `api.runtime?.config?.current` — the
+  first thing `register()` did — failed the whole registration with
+  `runtime is intentionally unavailable during "cli-metadata" registration`.
+  Gateway registration was unaffected (that pass is `"full"`), so backends and
+  live turns kept working; the failure only showed in every plugin scan.
+  `register()` now returns before touching the runtime in the two runtimeless
+  modes — this plugin owns no root CLI commands, so there is nothing to
+  contribute there. Cores without `registrationMode` (≤ 2026.8) and every
+  runtime-bearing mode (`full`, `discovery`, `tool-discovery`,
+  `setup-runtime`) register exactly as before. Regression test drives
+  `register()` with a throwing runtime Proxy mirroring the core's
+  `createUnavailableRuntime()`.
+
 ## [1.8.9] — 2026-09-11
 
 ### Fixed
