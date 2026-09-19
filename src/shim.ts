@@ -11,6 +11,14 @@
  * - Passthrough fidelity beats capture: stream bytes are forwarded as-is,
  *   and any capture/state failure is swallowed (stderr note only) — a broken
  *   state file must never break a live turn.
+ * - The ONE exception, and it is bounded (#19): while a launch is eligible for
+ *   an in-turn retry, the stream's preamble records (`system`, `rate_limit_event`)
+ *   are held back until the first record that is neither. If a model limit
+ *   arrives in that window the turn has not begun downstream, so the shim
+ *   swallows the error and re-spawns on a healthy account instead of losing the
+ *   user's turn to the next provider in the host's chain. The moment anything
+ *   else is seen — content, a result, an unparseable line, or a size cap — the
+ *   held bytes are released in order and the shim is a pure passthrough again.
  * - Tolerant parsing: rate_limit_event is CLI-internal and undocumented;
  *   unknown fields, statuses, and window types are preserved or ignored,
  *   never fatal.
@@ -33,6 +41,13 @@ import {
 import { rewriteModelArg } from "./degrade.js";
 import { parseModelLimitError, recordModelLimit } from "./shim-core.js";
 import { canonicalModelId } from "./models.js";
+import {
+  buildRetryEnv,
+  chooseRetryAccount,
+  parseRetryRoster,
+  retryArming,
+  RETRY_ROSTER_ENV,
+} from "./retry-plan.js";
 
 function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
   const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
@@ -50,8 +65,10 @@ function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
   return { command: "claude", prependArgs: [] };
 }
 
-const stateFile = process.env.MULTI_CLAWD_STATE_FILE;
-const accountId = process.env.MULTI_CLAWD_ACCOUNT_ID ?? "unknown";
+// Mutable: an in-turn retry (#19) moves this process onto a sibling account,
+// and everything the shim records afterwards belongs to that account.
+let stateFile = process.env.MULTI_CLAWD_STATE_FILE;
+let accountId = process.env.MULTI_CLAWD_ACCOUNT_ID ?? "unknown";
 
 let state: AccountHealthState = { accountId, windows: {} };
 
@@ -144,12 +161,53 @@ if (modelOverride) {
     );
   }
 }
-const child = spawn(command, childArgs, {
+// ── in-turn retry arming (#19) ──────────────────────────────────────────────
+// Decided before a byte exists, because whether the preamble must be held back
+// is a property of the launch, not of what the stream turns out to contain.
+const retryRoster = parseRetryRoster(process.env[RETRY_ROSTER_ENV]);
+const arming = retryArming(childArgs, retryRoster);
+let retryArmed = arming.armed;
+if (!retryArmed && retryRoster.length > 0 && arming.reason) {
+  // Only worth a line when a roster was actually supplied: otherwise every
+  // launch on a single-account pool would narrate a feature it never had.
+  process.stderr.write(`[multi-clawd shim] in-turn retry unavailable: ${arming.reason}\n`);
+}
+
+let child = spawn(command, childArgs, {
   stdio: ["pipe", "pipe", "inherit"],
   env: process.env,
 });
-
-process.stdin.pipe(child.stdin);
+// stdin must be REPLAYABLE while a retry is possible: the prompt was written
+// to the first child and the second one needs the same bytes. Capped, because
+// a reseeded history prompt can be large and an un-retryable turn must not pay
+// for a buffer it will never use.
+const STDIN_REPLAY_CAP_BYTES = 8 * 1024 * 1024;
+let stdinReplay: Buffer[] = [];
+let stdinReplayBytes = 0;
+let stdinEnded = false;
+if (retryArmed) {
+  process.stdin.on("data", (chunk: Buffer) => {
+    if (retryArmed) {
+      stdinReplayBytes += chunk.length;
+      if (stdinReplayBytes > STDIN_REPLAY_CAP_BYTES) {
+        // Too big to replay honestly — disarm rather than retry with a
+        // truncated prompt, which would silently change what the user asked.
+        retryArmed = false;
+        stdinReplay = [];
+        releaseHeldOutput();
+      } else {
+        stdinReplay.push(chunk);
+      }
+    }
+    child.stdin.write(chunk);
+  });
+  process.stdin.on("end", () => {
+    stdinEnded = true;
+    child.stdin.end();
+  });
+} else {
+  process.stdin.pipe(child.stdin);
+}
 
 /** The model THIS launch actually runs (post-degradation argv, canonical). */
 function effectiveModelId(): string | undefined {
@@ -181,7 +239,8 @@ function guessLimitResetsAt(): number | undefined {
  */
 let sawAuthFailure = false;
 
-const scanner = createLineScanner((line) => {
+/** Telemetry for one stream line. Runs whether or not the line is forwarded. */
+function observeLine(line: string): void {
   try {
     const event = parseRateLimitEvent(line);
     if (event) {
@@ -190,7 +249,9 @@ const scanner = createLineScanner((line) => {
     }
     // v0.3.6: a reactive 429 model-limit error IS telemetry — record it
     // model-scoped so the next launch for this model rotates accounts even
-    // when no proactive weekly window was ever captured.
+    // when no proactive weekly window was ever captured. Recording happens
+    // BEFORE any retry decision on purpose: the retry re-reads state, and the
+    // account that just refused must already be excluded when it does.
     const limitHit = parseModelLimitError(line);
     if (limitHit) {
       const model = effectiveModelId();
@@ -218,13 +279,195 @@ const scanner = createLineScanner((line) => {
   } catch {
     // capture must never interfere with the stream
   }
-});
+}
 
-child.stdout.on("data", (chunk: Buffer) => {
+const scanner = createLineScanner(observeLine);
+
+// ── held preamble (#19) ─────────────────────────────────────────────────────
+// Only records that carry nothing for the user are ever held: `system` (the
+// init handshake) and `rate_limit_event` (telemetry the gateway ignores).
+// Anything else — assistant content, a result, a line we cannot parse — ends
+// the hold immediately, in arrival order, and the shim is a passthrough for
+// the rest of the launch.
+const HOLD_CAP_BYTES = 256 * 1024;
+/**
+ * How long the preamble may be held before it is released regardless. A hard
+ * model limit is a pre-flight refusal and arrives in well under a second, so
+ * this never costs a real retry — it exists so that a CLI which sends its init
+ * record and then thinks for a long time cannot have that record sat on. The
+ * gateway's own no-output watchdog floor is 180s (index.ts), an order of
+ * magnitude above this, so the hold can never be what trips it.
+ */
+const HOLD_MAX_MS = Number(process.env.MULTI_CLAWD_HOLD_MAX_MS ?? 10_000);
+let held: string[] = [];
+let heldBytes = 0;
+let holdTail = "";
+let retryUsed = false;
+
+function isPreambleRecord(line: string): boolean {
+  if (line.length === 0) return true;
+  try {
+    const record = JSON.parse(line) as { type?: unknown; message?: { model?: unknown } };
+    if (record.type === "system" || record.type === "rate_limit_event") return true;
+    // Captured from the real CLI (2.1.268) refusing a capped model: the limit
+    // arrives as `rate_limit_event` → an `assistant` record whose model is
+    // `<synthetic>` and whose text IS the refusal → the `is_error` result. The
+    // synthetic record is the CLI's own notice, not model output — nothing was
+    // generated and the user is owed none of it — so holding it is what lets
+    // the retry see the error that follows. Without this the hold released one
+    // record too early and the fix never fired in production, only in tests.
+    if (record.type === "assistant" && record.message?.model === "<synthetic>") return true;
+    return false;
+  } catch {
+    // Unclassifiable bytes are not ours to sit on.
+    return false;
+  }
+}
+
+/** Flush everything held, in order, and become a plain passthrough. */
+function releaseHeldOutput(): void {
+  if (held.length > 0) {
+    process.stdout.write(held.join(""));
+    held = [];
+    heldBytes = 0;
+  }
+  if (holdTail.length > 0) {
+    process.stdout.write(holdTail);
+    // Lines completed inside the tail have not been observed yet — hand them
+    // to the scanner so releasing the hold never costs us telemetry.
+    scanner.push(holdTail);
+    holdTail = "";
+  }
+  retryArmed = false;
+  stdinReplay = [];
+}
+
+function readSiblingState(file: string) {
+  try {
+    return parseStoredState(readFileSync(file, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Re-spawn this turn on a healthy sibling. Returns true when the launch has
+ * been replaced — the caller must then forward nothing further from the old
+ * child, whose limit error is the one thing this whole path exists to avoid
+ * showing the user.
+ */
+function attemptRetry(): boolean {
+  if (!retryArmed || retryUsed) return false;
+  const model = effectiveModelId();
+  const target = chooseRetryAccount({
+    roster: retryRoster,
+    readState: readSiblingState,
+    modelId: model,
+    nowMs: Date.now(),
+  });
+  if (!target) {
+    process.stderr.write(
+      `[multi-clawd shim] model limit on ${accountId} with no healthy sibling to retry onto — ` +
+        `passing the failure through to the host's chain\n`,
+    );
+    releaseHeldOutput();
+    return false;
+  }
+  retryUsed = true;
+  retryArmed = false;
+  process.stderr.write(
+    `[multi-clawd shim] model limit on ${accountId}${model ? ` for ${model}` : ""} — ` +
+      `retrying this turn on ${target.id} (nothing forwarded downstream yet)\n`,
+  );
+  // The failed attempt is never shown: its preamble described a session the
+  // user will never see, and its error is the bug.
+  held = [];
+  heldBytes = 0;
+  holdTail = "";
+  const previous = child;
+  previous.stdout.removeAllListeners();
+  previous.removeAllListeners("close");
+  previous.removeAllListeners("error");
+  try {
+    previous.kill("SIGTERM");
+  } catch {
+    // already gone — it returned an error result, which is why we are here
+  }
+  // Identity swap: every byte and every state write from here belongs to the
+  // sibling, including the credential-recovery clear at exit.
+  accountId = target.id;
+  stateFile = target.stateFile;
+  state = { accountId, windows: {} };
+  sawAuthFailure = false;
+  child = spawn(command, childArgs, {
+    stdio: ["pipe", "pipe", "inherit"],
+    env: buildRetryEnv(process.env, target),
+  });
+  attachChildHandlers();
+  for (const chunk of stdinReplay) child.stdin.write(chunk);
+  if (stdinEnded) child.stdin.end();
+  stdinReplay = [];
+  return true;
+}
+
+function onArmedChunk(chunk: Buffer): void {
+  holdTail += chunk.toString("utf8");
+  while (retryArmed) {
+    const idx = holdTail.indexOf("\n");
+    if (idx < 0) break;
+    const raw = holdTail.slice(0, idx + 1);
+    holdTail = holdTail.slice(idx + 1);
+    const line = raw.trim();
+    observeLine(line);
+    if (parseModelLimitError(line) && attemptRetry()) return;
+    held.push(raw);
+    heldBytes += raw.length;
+    if (!isPreambleRecord(line) || heldBytes > HOLD_CAP_BYTES) {
+      releaseHeldOutput();
+      return;
+    }
+  }
+  if (!retryArmed && holdTail.length > 0) {
+    // Disarmed while this chunk was being drained: the remainder is ordinary
+    // stream now.
+    const rest = holdTail;
+    holdTail = "";
+    process.stdout.write(rest);
+    scanner.push(rest);
+  }
+}
+
+if (retryArmed) {
+  const holdTimer = setTimeout(() => {
+    if (!retryArmed) return;
+    process.stderr.write(
+      `[multi-clawd shim] in-turn retry window closed after ${HOLD_MAX_MS}ms — releasing the stream\n`,
+    );
+    releaseHeldOutput();
+  }, HOLD_MAX_MS);
+  holdTimer.unref?.();
+}
+
+function onPassthroughChunk(chunk: Buffer): void {
   process.stdout.write(chunk); // passthrough first, always
   scanner.push(chunk.toString("utf8"));
-});
-child.stdout.on("end", () => scanner.flush());
+}
+
+function attachChildHandlers(): void {
+  const armedForThisChild = retryArmed;
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (armedForThisChild && retryArmed) onArmedChunk(chunk);
+    else onPassthroughChunk(chunk);
+  });
+  child.stdout.on("end", () => {
+    // A stream that ended while still armed carried nothing but preamble —
+    // release it rather than swallow it.
+    if (retryArmed) releaseHeldOutput();
+    scanner.flush();
+  });
+  child.on("close", onChildClose);
+  child.on("error", onChildError);
+}
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
@@ -254,7 +497,7 @@ function clearRecordedAuthFailureOnSuccess(): void {
   }
 }
 
-child.on("close", (code, signal) => {
+function onChildClose(code: number | null, signal: NodeJS.Signals | null): void {
   if (signal) {
     process.kill(process.pid, signal);
     return;
@@ -263,9 +506,11 @@ child.on("close", (code, signal) => {
   // the state write, which must happen before we hand over the exit code.
   if ((code ?? 0) === 0) clearRecordedAuthFailureOnSuccess();
   process.exit(code ?? 0);
-});
+}
 
-child.on("error", (err) => {
+function onChildError(err: Error): void {
   process.stderr.write(`[multi-clawd shim] failed to spawn claude: ${String(err)}\n`);
   process.exit(127);
-});
+}
+
+attachChildHandlers();

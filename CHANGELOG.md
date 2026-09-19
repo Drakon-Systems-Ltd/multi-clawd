@@ -4,6 +4,45 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **A model limit discovered mid-launch no longer costs the turn (#19).** The
+  pool picks an account *before* spawn, from telemetry already on disk, so a
+  limit hit *during* the launch could never reach that decision: the shim
+  recorded it, the turn died, and the host's fallback chain served the user
+  from the next rung — routinely a different provider — while a fully
+  provisioned sibling sat idle. Rotation landed one turn late. The shim now
+  holds the stream's preamble while a retry is possible and, on a model limit,
+  swallows the refusal and re-spawns on a healthy sibling instead.
+  - **What "preamble" means was settled against the real CLI, not assumed.**
+    Claude Code 2.1.268 reports a cap as `rate_limit_event` → an `assistant`
+    record whose model is `<synthetic>` and whose text *is* the refusal → the
+    `is_error` result. The synthetic record is the CLI's own notice, not model
+    output, so it is held too; without that the hold released one record early
+    and the fix worked only in tests. `system` and `rate_limit_event` records
+    are also held; anything else — content, a result, an unparseable line, a
+    256KB cap, or a 10s window — releases everything in arrival order and
+    restores pure passthrough.
+  - **Bounded on purpose.** Fresh launches only (a `--resume` session lives in
+    the previous account's config dir, and its stdin carries only the new
+    message, so re-spawning it elsewhere would drop the conversation — the
+    gateway's own fresh-session recovery owns that path). Secret-free siblings
+    only: offering a token-backed account would put every account's OAuth token
+    in every child's environment, so one compromised child would own the pool
+    rather than one login; `native`/`configDir` accounts switch with a path and
+    cost nothing. One retry per launch, never onto the account that just
+    refused, never on an auth failure (#8 still fails once and loudly).
+  - Verified live on a box whose home account was genuinely capped: the refusal
+    was swallowed, the turn was served by the sibling, and the consumer saw a
+    single session with no limit text in it.
+
+### Added
+- `multi-clawd` hands the shim a retry roster (`MULTI_CLAWD_RETRY_ACCOUNTS`) in
+  the pool's own preference order, minus the account being launched. Building
+  it resolves no secrets, so it adds no secret-provider calls to the launch
+  path.
+
 ## [1.8.10] — 2026-09-12
 
 ### Fixed

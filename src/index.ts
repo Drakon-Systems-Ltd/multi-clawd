@@ -65,6 +65,7 @@ import {
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { resolvePoolExecutionArgs } from "./tool-cap.js";
+import { RETRY_ROSTER_ENV } from "./retry-plan.js";
 import {
   addAlert,
   alertKeysWithPrefix,
@@ -756,6 +757,39 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
   return backend;
 }
 
+/**
+ * The siblings the shim may re-spawn onto when a model limit lands mid-launch
+ * (#19), in the pool's own preference order.
+ *
+ * Secret-free accounts only, and that is a security decision rather than an
+ * implementation limit: handing the shim a sibling's OAuth token would put
+ * every account's credential in every child's environment, so one compromised
+ * child would own the pool instead of one login. A `native` or `configDir`
+ * account is switched to with a path, so it costs nothing to offer; a
+ * token-backed account keeps today's next-launch rotation.
+ */
+export function buildRetryRoster(
+  members: AccountConfig[],
+  launchedId: string,
+): Array<{ id: string; stateFile: string; env: Record<string, string> }> {
+  const roster: Array<{ id: string; stateFile: string; env: Record<string, string> }> = [];
+  for (const member of members) {
+    if (member.id === launchedId) continue;
+    if (member.oauthTokenFile || member.oauthTokenRef) continue;
+    const stateFile = healthStateFile(member.id);
+    // No token to resolve, so this never touches the secret provider — a
+    // launch-path 1Password call per sibling would be a real cost for a
+    // contingency that usually does not happen.
+    const env = buildAccountChildEnv(member, undefined, stateFile);
+    // The shim gets the credential half only; its own identity vars are set
+    // at retry time from the roster entry.
+    delete env.MULTI_CLAWD_ACCOUNT_ID;
+    delete env.MULTI_CLAWD_STATE_FILE;
+    roster.push({ id: member.id, stateFile, env });
+  }
+  return roster;
+}
+
 /** Child env for one account: tested contract lives in account-env.ts. */
 async function buildAccountEnv(
   account: AccountConfig,
@@ -1253,10 +1287,12 @@ export function registerPoolBackend(
     // drops to the next provider rather than a wrong Claude account.
     const order = [chosen, ...members.filter((m) => m.id !== chosen.id)];
     let env: Record<string, string> | undefined;
+    let launched: AccountConfig | undefined;
     const unresolved: string[] = [];
     for (const candidate of order) {
       try {
         env = await buildAccountEnv(candidate, deps?.resolver);
+        launched = candidate;
         if (candidate.id !== chosen.id) {
           logger.warn(
             `[multi-clawd] pool ${poolId}: ${chosen.id}'s credential did not resolve — ` +
@@ -1277,6 +1313,17 @@ export function registerPoolBackend(
       throw new Error(`[multi-clawd] ${text}`);
     }
     alertState = clearAlert(alertState, `pool-unresolvable:${poolId}`);
+    // #19: hand the shim the siblings it may re-spawn onto if a model limit
+    // lands DURING this launch. Selection here is proactive and reads only
+    // what is already on disk, so a limit discovered mid-turn can never reach
+    // it — without this the turn is surrendered to the next rung of the host's
+    // chain (routinely another provider) while a healthy account sits idle,
+    // and the rotation arrives one turn late. Roster order is the pool's own
+    // preference order, minus the account actually launched.
+    {
+      const roster = buildRetryRoster(members, (launched ?? chosen).id);
+      if (roster.length > 0) env[RETRY_ROSTER_ENV] = JSON.stringify(roster);
+    }
     // Tier degradation: only when the whole pool is exhausted and the launch
     // is not a pinned (contractual) lane. The shim enforces the swap.
     if (ladder.length > 0) {

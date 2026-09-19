@@ -9,6 +9,29 @@ const lines = [
 ];
 process.stdout.write(lines[0] + "\n");
 
+// #19 retry path: emit the model-limit error IMMEDIATELY after the init
+// record — the real shape of a hard cap, where nothing reaches the user
+// before the refusal. Scoped to one account id so a test can prove the retry
+// landed somewhere else.
+const limitForAccount = process.env.FAKE_CLAUDE_LIMIT_FOR_ACCOUNT;
+if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
+  // Optional stall first, to exercise the shim's hold-window timeout: top-level
+  // await keeps the rest of this fixture from running, so the launch really is
+  // "init record, then nothing".
+  const delayMs = Number(process.env.FAKE_CLAUDE_LIMIT_DELAY_MS ?? "0");
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  process.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "You've reached your Fable 5 limit. /model to switch models.",
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.exit(Number(process.env.FAKE_CLAUDE_LIMIT_EXIT ?? "1"));
+}
+
 // Tests may override the emitted rate-limit payload to simulate turns that
 // carry a different window type (e.g. seven_day with utilization).
 const rateLimitInfo = process.env.FAKE_CLAUDE_RATE_LIMIT_INFO
@@ -72,6 +95,8 @@ process.stdin.on("end", () => {
             type: "result",
             result: stdin.trim(),
             received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
+            served_by: process.env.MULTI_CLAWD_ACCOUNT_ID ?? null,
+            config_dir: process.env.CLAUDE_CONFIG_DIR ?? null,
             session_id: "s1",
           },
     ) + "\n",

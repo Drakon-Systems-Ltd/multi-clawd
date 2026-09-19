@@ -241,6 +241,11 @@ claude-cli/claude-fable-5        # main login
 - 🧲 **Sticky rotation (v0.3)** — after handing over, the pool dwells on the
   spare account (default 10 min) before returning home, so turns never flap
   across the threshold. Health always overrides stickiness.
+- 🔁 **In-turn retry on a reactive limit** — when an account hits a model cap
+  *during* a launch, the pool no longer loses that turn to the next provider in
+  your chain: the refusal is swallowed before anything reaches you and the turn
+  is re-spawned on a healthy account. Fresh launches, secret-free sibling
+  accounts, one retry.
 - 📟 **Operator alerts (v0.3)** — dead logins (probed every 15 min without
   spending quota), pool rotations, whole-pool exhaustion, and watchdog
   restarts surface through your agent's next heartbeat (e.g. straight into
