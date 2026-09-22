@@ -38,6 +38,11 @@ versioning from v1.0.
     single session with no limit text in it.
 
 ### Added
+- **Claude Opus 5.5 is a known spec.** `claude-opus-5-5` (released 22 Sep 2026)
+  now resolves to its real 1M context window and 128k output instead of the
+  200k/64k defaults for unknown ids, and `opus-5.5` is accepted as an alias.
+  Also listed in the fallback id set, so the pool exposes it even when the
+  bundled catalog cannot be mirrored.
 - `multi-clawd` hands the shim a retry roster (`MULTI_CLAWD_RETRY_ACCOUNTS`) in
   the pool's own preference order, minus the account being launched. Building
   it resolves no secrets, so it adds no secret-provider calls to the launch
