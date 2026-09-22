@@ -32,6 +32,7 @@ describe("isModernClaudeModelId", () => {
 
 describe("canonicalModelId", () => {
   test("maps CLI aliases to canonical ids", () => {
+    expect(canonicalModelId("opus-5.5")).toBe("claude-opus-5-5");
     expect(canonicalModelId("opus-4.8")).toBe("claude-opus-4-8");
     expect(canonicalModelId("sonnet-4.6")).toBe("claude-sonnet-4-6");
   });
@@ -62,6 +63,12 @@ describe("resolveModelSpec", () => {
     expect(fable.contextWindow).toBe(1000000);
     expect(fable.maxTokens).toBe(128000);
     expect(fable.name).toBe("Claude Fable 5");
+    // Opus 5.5 (released 22 Sep 2026) is a KNOWN spec — 1M context, 128k output.
+    // Without it the pool advertised the model at the 200k default.
+    const opus55 = resolveModelSpec("claude-opus-5-5");
+    expect(opus55.contextWindow).toBe(1000000);
+    expect(opus55.maxTokens).toBe(128000);
+    expect(opus55.name).toBe("Claude Opus 5.5");
     // Opus 5 (released 24 Jul 2026) is a KNOWN spec — 1M context, 128k output.
     const opus5 = resolveModelSpec("claude-opus-5");
     expect(opus5.contextWindow).toBe(1000000);

@@ -37,6 +37,7 @@ export interface CatalogEntry {
 /** Aliases the claude CLI itself accepts; short forms pass through unchanged. */
 export const MODEL_ALIASES: Record<string, string> = {
   opus: "opus",
+  "opus-5.5": "claude-opus-5-5",
   "opus-5": "claude-opus-5",
   "opus-4.8": "claude-opus-4-8",
   "opus-4.7": "claude-opus-4-7",
@@ -48,6 +49,8 @@ export const MODEL_ALIASES: Record<string, string> = {
 
 /** Known specs — used when available; unknown modern ids fall back to defaults. */
 const KNOWN_SPECS: Record<string, Omit<ModelSpec, "imageMaxSidePx">> = {
+  // Opus 5.5 (released 22 Sep 2026): 1M context, 128k output per the models overview.
+  "claude-opus-5-5": { name: "Claude Opus 5.5", contextWindow: 1000000, maxTokens: 128000 },
   "claude-opus-5": { name: "Claude Opus 5", contextWindow: 1000000, maxTokens: 128000 },
   "claude-opus-4-8": { name: "Claude Opus 4.8", contextWindow: 1048576, maxTokens: 128000 },
   "claude-opus-4-7": { name: "Claude Opus 4.7", contextWindow: 1048576, maxTokens: 64000 },
