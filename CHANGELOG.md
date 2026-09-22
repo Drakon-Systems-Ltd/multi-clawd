@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [1.8.11] — 2026-09-22
+
 ### Fixed
 - **A model limit discovered mid-launch no longer costs the turn (#19).** The
   pool picks an account *before* spawn, from telemetry already on disk, so a
