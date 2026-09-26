@@ -92,3 +92,17 @@ describe("explain: direct route", () => {
     expect(withDirect).not.toContain("op://");
   });
 });
+
+describe("explain: adopted profiles", () => {
+  test("a missing adopted profile points at paste-token, not at direct sync", () => {
+    const text = renderDirectSection(
+      {
+        members: [{ accountId: "claw1", profileId: "anthropic:mine", source: "adopted", stored: false, adopted: true }],
+        problems: [],
+      },
+      0,
+    ).join("\n");
+    expect(text).toContain("paste-token --provider anthropic --profile-id anthropic:mine");
+    expect(text).not.toContain("direct sync");
+  });
+});

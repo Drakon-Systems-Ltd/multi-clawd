@@ -772,7 +772,13 @@ if (accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) {
       for (const e of status.errors) warn(`agent ${agentId}: direct-route check partly SKIPPED — ${e}`);
       for (const m of status.explain.members) {
         const v = status.verdicts.find((x) => x.accountId === m.accountId)?.verdict ?? "no_data";
-        if (m.stored === false) bad(`${m.accountId}: ${m.profileId} is NOT stored for agent ${agentId} — run \`multi-clawd direct sync\``);
+        if (m.stored === false) {
+          bad(
+            m.adopted
+              ? `${m.accountId}: adopted profile ${m.profileId} is NOT stored for agent ${agentId} — store it yourself (openclaw models auth paste-token --provider anthropic --profile-id ${m.profileId}) or fix direct.profileId`
+              : `${m.accountId}: ${m.profileId} is NOT stored for agent ${agentId} — run \`multi-clawd direct sync\``,
+          );
+        }
         else if (m.stored === true) ok(`${m.accountId}: ${m.profileId} stored for agent ${agentId} (health: ${v})`);
         if (m.cooldownUntil && m.cooldownUntil > Date.now()) {
           note(`${m.profileId} is cooling down (${m.cooldownReason ?? "cooldown"}) for ~${Math.ceil((m.cooldownUntil - Date.now()) / 60000)}m — OpenClaw skips it until then`);

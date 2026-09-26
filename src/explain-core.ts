@@ -57,6 +57,8 @@ export interface ExplainDirect {
     source: string;
     /** Whether OpenClaw's store holds the profile; undefined = not checked. */
     stored?: boolean;
+    /** An adopted profile: the operator stores it; `direct sync` cannot. */
+    adopted?: boolean;
     /** Epoch ms the profile is cooling down until, when it is. */
     cooldownUntil?: number;
     cooldownReason?: string;
@@ -241,7 +243,14 @@ export function renderDirectSection(direct: ExplainDirect, nowMs: number): strin
   for (const m of direct.members) {
     const bits = [m.source];
     if (m.stored === true) bits.push("stored in OpenClaw");
-    else if (m.stored === false) bits.push("NOT STORED — run `multi-clawd direct sync`");
+    else if (m.stored === false) {
+      bits.push(
+        m.adopted
+          ? "NOT STORED — this profile is yours to store (`openclaw models auth paste-token --provider anthropic --profile-id " +
+              `${m.profileId}\`) or fix direct.profileId`
+          : "NOT STORED — run `multi-clawd direct sync`",
+      );
+    }
     if (m.cooldownUntil !== undefined && m.cooldownUntil > nowMs) {
       bits.push(
         `COOLING DOWN${m.cooldownReason ? ` (${m.cooldownReason})` : ""} for ${relativeUntil(m.cooldownUntil, nowMs)}`,

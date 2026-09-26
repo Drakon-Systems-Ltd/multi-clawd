@@ -124,6 +124,7 @@ export async function gatherDirectStatus(params: {
           profileId: m.profileId,
           source: describeDirectSource(m),
           stored: snapshot ? snapshot.stored.has(m.profileId) : undefined,
+          ...(m.source.kind === "existing" ? { adopted: true } : {}),
           ...(u ? { cooldownUntil: u.until, cooldownReason: u.reason ?? u.kind } : {}),
         };
       }),
