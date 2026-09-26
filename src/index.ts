@@ -93,6 +93,9 @@ import {
   type RefProbeTracker,
 } from "./login-health.js";
 import { execFileSync } from "node:child_process";
+import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
+import { createDirectOrderController } from "./direct-sync.js";
+import { createOpenclawRunner } from "./openclaw-runner.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
 // declaration files. Derive the backend contract from the stable registration
@@ -129,6 +132,11 @@ export interface AccountConfig {
   models?: string[];
   /** Model used for live probes (openclaw models status). */
   defaultModel?: string;
+  /**
+   * v1.9: also serve the gateway's direct `anthropic/*` route through an
+   * OpenClaw auth profile. Absent = CLI-only, exactly as before.
+   */
+  direct?: DirectConfig;
 }
 
 /** Mirrors the bundled claude-cli backend argv (extensions/anthropic/cli-backend.ts). */
@@ -895,6 +903,7 @@ export default definePluginEntry({
     const cfg = (candidates.find(hasAccounts) ?? {}) as {
       accounts?: AccountConfig[];
       pool?: PoolConfig;
+      directRoute?: DirectRouteConfig;
     };
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
     const sourceNames = [
@@ -986,6 +995,20 @@ export default definePluginEntry({
         accounts.filter((a) => seen.has(a.id.trim())),
         logger,
       );
+      startDirectOrderSync({
+        accounts: accounts.filter((a) => seen.has(a.id.trim())),
+        pool: cfg.pool,
+        directRoute: cfg.directRoute,
+        registrationMode: (api as { registrationMode?: unknown }).registrationMode,
+        configOrder: () => {
+          const root = (runtimeConfigLoader?.() ?? api.config) as
+            | { auth?: { order?: Record<string, unknown> } }
+            | undefined;
+          const order = root?.auth?.order?.anthropic;
+          return Array.isArray(order) ? order.filter((v): v is string => typeof v === "string") : undefined;
+        },
+        logger,
+      });
     }
 
     api.logger.info(
@@ -1372,3 +1395,118 @@ export function registerPoolBackend(
   })();
 }
 
+
+interface DirectRouteConfig {
+  /** Agents whose anthropic order the plugin keeps. Default ["main"]. */
+  agents?: string[];
+  /** Keep auth order in pool-health order. Default true. */
+  manageOrder?: boolean;
+  /** Order-sync tick. Default 60000; minimum 15000. */
+  intervalMs?: number;
+  /** The OpenClaw CLI to invoke. Default "openclaw" on PATH. */
+  openclawCommand?: string;
+}
+
+/**
+ * The direct route's order loop (v1.9). Module scope for the same reason as
+ * the login probe: register() re-runs on every config rebuild, and a rebuild
+ * must neither stack timers nor forget what was already applied. The
+ * controller is only rebuilt when its inputs change.
+ */
+let directTimer: ReturnType<typeof setInterval> | undefined;
+let directInitial: ReturnType<typeof setTimeout> | undefined;
+let directController: { signature: string; tick: () => Promise<unknown> } | undefined;
+
+export function stopDirectOrderSync(): void {
+  if (directTimer) clearInterval(directTimer);
+  if (directInitial) clearTimeout(directInitial);
+  directTimer = undefined;
+  directInitial = undefined;
+  directController = undefined;
+}
+
+/**
+ * Start (or keep) the loop that holds `auth.order.anthropic` in pool-health
+ * order. A no-op — no timer, no CLI calls, no store reads — unless at least
+ * one account opted in with `direct`. That is the compatibility contract.
+ *
+ * Runs only in a full registration: discovery/setup passes and CLI metadata
+ * scans must not spawn writers. The timer is unref'd with a delayed first
+ * tick, so a short-lived CLI process that happens to load the full runtime
+ * exits long before it would ever tick.
+ */
+export function startDirectOrderSync(params: {
+  accounts: AccountConfig[];
+  pool?: PoolConfig;
+  directRoute?: DirectRouteConfig;
+  registrationMode?: unknown;
+  configOrder: () => readonly string[] | undefined;
+  logger: { info: (m: string) => void; warn: (m: string) => void };
+}): { active: boolean; members: string[] } {
+  const { logger } = params;
+  const mode = params.registrationMode;
+  if (mode !== undefined && mode !== "full") return { active: false, members: [] };
+  const { members, problems } = collectDirectMembers(params.accounts, params.pool?.accounts ?? []);
+  for (const p of problems) {
+    logger.warn(`[multi-clawd] direct route: account "${p.accountId}" skipped — ${p.reason}`);
+  }
+  if (members.length === 0 || params.directRoute?.manageOrder === false) {
+    stopDirectOrderSync();
+    return { active: false, members: members.map((m) => m.accountId) };
+  }
+  const agents = (params.directRoute?.agents?.length ? params.directRoute.agents : ["main"]).filter(
+    (a) => typeof a === "string" && a.trim(),
+  );
+  const intervalMs = Math.max(15_000, params.directRoute?.intervalMs ?? 60_000);
+  const healthOptions = {
+    utilizationThreshold: params.pool?.utilizationThreshold,
+    staleAfterMs: params.pool?.staleAfterMs,
+    rotateOnOverage: params.pool?.rotateOnOverage,
+  };
+  const signature = JSON.stringify({
+    members: members.map((m) => m.profileId),
+    agents,
+    intervalMs,
+    healthOptions,
+    minDwellMs: params.pool?.minDwellMs,
+    command: params.directRoute?.openclawCommand,
+  });
+  if (directController?.signature === signature && directTimer) {
+    return { active: true, members: members.map((m) => m.accountId) };
+  }
+  stopDirectOrderSync();
+  const stickyFile = join(homedir(), ".openclaw", "state", "multi-clawd", "direct-order.sticky.json");
+  const controller = createDirectOrderController({
+    members,
+    agents,
+    runner: createOpenclawRunner(params.directRoute?.openclawCommand ?? "openclaw"),
+    readHealth: (id) => readHealthState(id),
+    healthOptions,
+    minDwellMs: params.pool?.minDwellMs,
+    configOrder: params.configOrder,
+    readSticky: () => readStickyEntry(stickyFile),
+    writeSticky: (entry) => writeStickyEntry(stickyFile, entry, logger),
+    logger,
+  });
+  directController = { signature, tick: controller.tick };
+  const tick = () => void controller.tick().catch((err) => logger.warn(`[multi-clawd] direct route tick failed: ${String(err)}`));
+  directInitial = setTimeout(tick, Math.min(30_000, intervalMs));
+  directInitial.unref?.();
+  directTimer = setInterval(tick, intervalMs);
+  directTimer.unref?.();
+  logger.info(
+    `[multi-clawd] direct route: keeping anthropic order for agent(s) ${agents.join(", ")} in pool-health order — ${members
+      .map((m) => `${m.accountId}=${m.profileId}`)
+      .join(", ")}`,
+  );
+  return { active: true, members: members.map((m) => m.accountId) };
+}
+
+/**
+ * Run the direct-route order loop once, now. For `multi-clawd` diagnostics and
+ * tests of the real wire; the gateway itself runs it on its timer. Resolves
+ * undefined when the loop is not active.
+ */
+export async function runDirectOrderTickNow(): Promise<unknown> {
+  return directController?.tick();
+}
