@@ -136,7 +136,7 @@
             },
             "oauthTokenRef": {
               "type": "object",
-              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers \u2014 same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
+              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers — same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
               "additionalProperties": true,
               "properties": {
                 "source": {

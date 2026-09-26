@@ -6,6 +6,53 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+Proposed release: **1.9.0**. This is a minor release: one new opt-in
+feature, and no behaviour change without `direct`.
+
+### Added
+- **One pool, both Claude transports.** Pool accounts can now also serve
+  OpenClaw's direct Anthropic route (`anthropic/*`), not only the Claude Code
+  CLI backends. Opt an account in with `direct`:
+  - `true` reuses its setup-token;
+  - `{ tokenRef }` or `{ tokenFile }` gives it a setup-token for the API route;
+  - `{ profileId }` adopts a profile already stored in OpenClaw.
+  See "Direct route" in the README and the v1.9 section of DESIGN.md.
+  - **Credentials are stored through OpenClaw's own commands.**
+    - Secret references go through `openclaw secrets apply` as a `tokenRef`,
+      so the token is never copied. Both scrub passes are off, so none of
+      your other `anthropic` profiles are touched.
+    - Token files are piped to `openclaw models auth paste-token` on stdin.
+    - Native and config-dir logins are never read. They need their own
+      `claude setup-token`, and the wizard says so.
+  - **Proactive ordering.** A loop in the gateway keeps each managed agent's
+    `anthropic` auth order in pool-health order, using the same health files
+    and the same rotation rule as the CLI pool. A nearly-maxed account moves
+    to the back before it errors; OpenClaw's in-turn rotation and cooldowns
+    handle the rest.
+    - It writes with `openclaw models auth order set`, and only when the order
+      would change. That command refreshes the running gateway itself.
+    - Profiles multi-clawd doesn't manage are kept.
+    - A failed write backs off for 10 minutes.
+    - It runs only in a full registration.
+    - The choice of a timer over hooks or `prepareExecution` is recorded in
+      DESIGN.md, with the dist evidence.
+  - `multi-clawd direct` shows status; `multi-clawd direct sync [--dry-run]
+    [--resync]` stores missing profiles and applies the order right away.
+    `update` offers the sync when `direct` is configured.
+  - `explain` gains a DIRECT ROUTE block: the profile per account, whether
+    it's stored, cooldowns, and the live order.
+  - `chain` and `doctor` stop flagging `anthropic/*` rungs once the direct
+    route pools two accounts. `doctor` checks direct token files (shape and
+    mode, never printed), stored profiles, order and cooldowns. `--probe`
+    adds one live call per managed profile.
+  - `setup` has an optional direct-route step (default no).
+
+### Unchanged
+- Configurations without `direct` behave exactly as in 1.8.11: no timer, no
+  OpenClaw CLI calls, and the same `explain`/`chain`/`doctor` output (checked
+  line by line against 1.8.11 on a live config). The CLI and pool backends
+  are untouched.
+
 ## [1.8.11] — 2026-09-22
 
 ### Fixed
