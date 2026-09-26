@@ -4,10 +4,10 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.9.0] - 2026-09-26
 
-Proposed release: **1.9.0**. This is a minor release: one new opt-in
-feature, and no behaviour change without `direct`.
+A minor release: one new opt-in feature, and no behaviour change without
+`direct`.
 
 ### Added
 - **One pool, both Claude transports.** Pool accounts can now also serve
