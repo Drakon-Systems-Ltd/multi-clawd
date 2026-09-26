@@ -283,3 +283,16 @@ export function planDirectOrder(params: {
   const changed = order.length !== current.length || order.some((id, i) => id !== current[i]);
   return { order, firstAccount: first.accountId, sticky: decision.sticky, changed };
 }
+
+/**
+ * Whether the direct route pools accounts: at least two accounts serve
+ * `anthropic/*` through ordered profiles. Config-only (no IO), so `chain` and
+ * `doctor` can decide it without reading the auth store.
+ */
+export function directRoutePools(
+  accounts: readonly DirectAccountShape[],
+  directRoute?: { manageOrder?: boolean },
+): boolean {
+  if (directRoute?.manageOrder === false) return false;
+  return collectDirectMembers(accounts).members.length >= 2;
+}

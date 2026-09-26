@@ -241,3 +241,18 @@ describe("adopting a profile the operator already stored", () => {
     expect(DIRECT_SETUP_TOKEN_GUIDANCE).toContain("direct.profileId");
   });
 });
+
+describe("directRoutePools", () => {
+  test("two members pool; one does not; manageOrder:false does not", async () => {
+    const { directRoutePools } = await import("../src/direct-route");
+    const two = [
+      { id: "a", oauthTokenRef: REF, direct: true },
+      { id: "b", native: true, direct: { profileId: "anthropic:b" } },
+    ];
+    expect(directRoutePools(two)).toBe(true);
+    expect(directRoutePools(two.slice(0, 1))).toBe(false);
+    expect(directRoutePools([...two.slice(0, 1), { id: "c", native: true, direct: true }])).toBe(false);
+    expect(directRoutePools(two, { manageOrder: false })).toBe(false);
+    expect(directRoutePools([{ id: "a", oauthTokenRef: REF }, { id: "b", oauthTokenRef: REF2 }])).toBe(false);
+  });
+});

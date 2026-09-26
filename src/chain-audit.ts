@@ -111,12 +111,27 @@ function parseRef(ref: string): { provider?: string; modelId: string } {
  * are built by the callers from this severity + the parsed provider, so the two
  * cases can never disagree on WHAT bypasses the pool.
  */
-export function offPoolClaudeRef(ref: string, poolId: string): "strong" | "warn" | null {
+export interface PoolRouteOptions {
+  /**
+   * v1.9: the direct Anthropic route pools at least two accounts (auth-profile
+   * order kept in pool-health order), so an `anthropic/…` ref gets
+   * cross-account failover too and is no longer a bypass. `claude-cli/…` is
+   * unaffected — the bundled CLI backend is not governed by the plugin.
+   */
+  directPooled?: boolean;
+}
+
+export function offPoolClaudeRef(
+  ref: string,
+  poolId: string,
+  opts: PoolRouteOptions = {},
+): "strong" | "warn" | null {
   if (typeof ref !== "string" || ref.length === 0) return null;
   const { provider, modelId } = parseRef(ref);
   if (!isClaudeModelId(modelId)) return null; // not a Claude tier → nothing to fail over
   if (provider === undefined) return null; // bare id: routing is ambiguous, don't cry wolf
   if (provider === poolId.trim().toLowerCase()) return null; // correct pool routing
+  if (provider === "anthropic" && opts.directPooled) return null; // pooled by auth-profile order
   if (provider === "anthropic" || provider === "claude-cli") return "strong";
   if (ACCOUNT_PIN_RE.test(provider)) return "warn";
   // Some other provider prefix on a Claude id (e.g. a custom gateway): out of
@@ -130,8 +145,8 @@ export function offPoolClaudeRef(ref: string, poolId: string): "strong" | "warn"
  * (pool-routed, non-Claude, a bare/ambiguous id, or an unrelated provider).
  * Delegates the WHAT to `offPoolClaudeRef`; owns only the reason wording.
  */
-function classifyBypass(ref: string, poolId: string): string | null {
-  const severity = offPoolClaudeRef(ref, poolId);
+function classifyBypass(ref: string, poolId: string, opts: PoolRouteOptions): string | null {
+  const severity = offPoolClaudeRef(ref, poolId, opts);
   if (!severity) return null;
   const { provider } = parseRef(ref);
   if (provider === "anthropic") {
@@ -287,11 +302,15 @@ export function collectChainRefs(config: unknown): CollectedRef[] {
  *          tiers; `note` findings are registered-but-unused allowlist rungs. Returns
  *          an empty array when no pool id is given (nothing to bypass → skip).
  */
-export function auditEffectiveChain(config: unknown, poolId: string | undefined | null): ChainFinding[] {
+export function auditEffectiveChain(
+  config: unknown,
+  poolId: string | undefined | null,
+  opts: PoolRouteOptions = {},
+): ChainFinding[] {
   if (!poolId) return [];
   const findings: ChainFinding[] = [];
   for (const { surface, ref, allowlist } of collectChainRefs(config)) {
-    const reason = classifyBypass(ref, poolId);
+    const reason = classifyBypass(ref, poolId, opts);
     if (!reason) continue;
     findings.push({ surface, ref, severity: allowlist ? "note" : "warn", reason });
   }
@@ -442,6 +461,7 @@ export interface SessionOverrideEntry {
 export function auditSessionOverrides(
   sessions: Record<string, SessionOverrideEntry> | null | undefined,
   poolConfigured: boolean,
+  opts: PoolRouteOptions = {},
 ): ChainFinding[] {
   if (!poolConfigured) return []; // no pool ⇒ nothing to bypass ⇒ skip
   const findings: ChainFinding[] = [];
@@ -487,7 +507,7 @@ export function auditSessionOverrides(
 
     // 3. OFF-POOL CLASSIFY via the shared case-1 predicate.
     const ref = `${provider}/${model}`;
-    const severity = offPoolClaudeRef(ref, POOL_PROVIDER);
+    const severity = offPoolClaudeRef(ref, POOL_PROVIDER, opts);
     if (!severity) continue; // clawd/ (in-pool) or non-Claude → fine
 
     // 4. Emit — all `warn` for doctor (informational; never flips READY).
