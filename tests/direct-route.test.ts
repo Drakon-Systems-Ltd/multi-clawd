@@ -219,3 +219,25 @@ describe("planDirectOrder", () => {
     expect(planDirectOrder({ members: [], nowMs: NOW })).toBeUndefined();
   });
 });
+
+describe("adopting a profile the operator already stored", () => {
+  test("direct.profileId with no token adopts, for any account kind", () => {
+    for (const account of [
+      { id: "claw1", native: true, direct: { profileId: "anthropic:manual" } },
+      { id: "claw2", configDir: "~/.claw2", direct: { profileId: "anthropic:someone" } },
+      { id: "claw3", oauthTokenRef: REF, direct: { profileId: "anthropic:x" } },
+    ]) {
+      expect(directCredentialSource(account)).toEqual({ kind: "existing" });
+    }
+  });
+
+  test("a token source next to profileId still means sync-under-that-id", () => {
+    expect(
+      directCredentialSource({ id: "a", native: true, direct: { profileId: "anthropic:a1", tokenRef: REF } }),
+    ).toEqual({ kind: "ref", ref: REF, reused: false });
+  });
+
+  test("the guidance names the adopt option", () => {
+    expect(DIRECT_SETUP_TOKEN_GUIDANCE).toContain("direct.profileId");
+  });
+});

@@ -51,6 +51,8 @@ export type DirectCredentialSource =
   | { kind: "none" }
   | { kind: "ref"; ref: SecretRefShape; reused: boolean }
   | { kind: "file"; path: string; reused: boolean }
+  /** A profile the operator already stored; ordered, never re-written. */
+  | { kind: "existing" }
   | { kind: "unsupported"; code: string; reason: string };
 
 /**
@@ -61,7 +63,8 @@ export const DIRECT_SETUP_TOKEN_GUIDANCE =
   "a native or config-dir Claude login is a rotating single-use OAuth grant — copying it into " +
   "OpenClaw would invalidate one of the two copies on the next refresh. Run `claude setup-token` " +
   "signed in as THIS account, store the printed token in your secret manager (or a 0600 file), " +
-  'and set direct.tokenRef (or direct.tokenFile) on the account';
+  "and set direct.tokenRef (or direct.tokenFile) on the account — or, if a profile for this " +
+  'account is already stored in OpenClaw, name it with direct.profileId';
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -109,6 +112,12 @@ export function directCredentialSource(account: DirectAccountShape): DirectCrede
     return { kind: "ref", ref: explicitRef, reused: false };
   }
   if (explicitFile) return { kind: "file", path: explicitFile, reused: false };
+  // An explicit profileId with no token of its own adopts a profile the
+  // operator stored themselves (e.g. with `paste-token`). Checked before the
+  // CLI-token reuse below: naming a profile is the more specific instruction.
+  if (typeof explicit?.profileId === "string" && explicit.profileId.trim()) {
+    return { kind: "existing" };
+  }
   if (!account.native) {
     if (account.oauthTokenFile) {
       return { kind: "file", path: account.oauthTokenFile, reused: true };
