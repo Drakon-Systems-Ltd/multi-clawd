@@ -136,7 +136,7 @@
             },
             "oauthTokenRef": {
               "type": "object",
-              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers — same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
+              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers \u2014 same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
               "additionalProperties": true,
               "properties": {
                 "source": {
@@ -163,6 +163,44 @@
             "defaultModel": {
               "type": "string",
               "description": "Model id used for live probes (openclaw models status). Defaults to claude-fable-5."
+            },
+            "direct": {
+              "description": "Opt this account into the gateway's direct Anthropic route (anthropic/* models) as well as the CLI. `true` reuses the account's own setup-token (oauthTokenRef / oauthTokenFile). A native or config-dir login is a rotating grant that is never copied, so it needs an explicit setup-token: {\"tokenRef\": {...}} or {\"tokenFile\": \"...\"}. `multi-clawd update`/`setup` store it as the OpenClaw auth profile anthropic:<id>, and the plugin keeps auth.order.anthropic in pool-health order. Omit to leave the account CLI-only (unchanged behaviour).",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "tokenRef": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "description": "Secret reference resolving to a `claude setup-token` value for THIS account, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}.",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "tokenFile": {
+                      "type": "string",
+                      "description": "Path to a 0600 file holding a `claude setup-token` value for THIS account. Mutually exclusive with tokenRef."
+                    },
+                    "profileId": {
+                      "type": "string",
+                      "description": "OpenClaw auth profile id. Default anthropic:<account id>. Must start with anthropic:."
+                    }
+                  }
+                }
+              ]
             }
           }
         }

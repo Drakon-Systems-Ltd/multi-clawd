@@ -255,3 +255,50 @@ export function existingAccountDefaults(
 export function looksLikeSecretRef(id: string): boolean {
   return id.includes("://");
 }
+
+/**
+ * The `direct` value for one account (v1.9, direct `anthropic/*` route).
+ *
+ * - `reuse`: the account's CLI credential already IS a setup-token
+ *   (oauthTokenRef / oauthTokenFile), so `direct: true` shares it.
+ * - `ref` / `file`: a setup-token supplied for the direct route alone — the
+ *   only option for a native or config-dir login, whose rotating grant this
+ *   plugin never copies.
+ *
+ * Returns undefined for "skip": the account stays exactly as it was.
+ */
+export function buildDirectSetting(
+  account: SetupAccount,
+  choice:
+    | { kind: "skip" }
+    | { kind: "reuse" }
+    | { kind: "ref"; ref: Record<string, unknown> }
+    | { kind: "file"; path: string },
+): true | { tokenRef: Record<string, unknown> } | { tokenFile: string } | undefined {
+  switch (choice.kind) {
+    case "skip":
+      return undefined;
+    case "reuse":
+      if (account.native || (!account.oauthTokenRef && !account.oauthTokenFile)) {
+        throw new Error(
+          `account "${account.id}" has no setup-token to reuse — a native or config-dir login needs its own \`claude setup-token\` for the direct route`,
+        );
+      }
+      return true;
+    case "ref":
+      if (!isSecretRefShape(choice.ref)) {
+        throw new Error('secret ref must be { "source": "...", "provider": "...", "id": "..." }');
+      }
+      return { tokenRef: choice.ref };
+    case "file": {
+      const path = choice.path?.trim();
+      if (!path) throw new Error("a token file path is required");
+      return { tokenFile: path };
+    }
+  }
+}
+
+/** Whether an account's CLI credential can double as its direct-route token. */
+export function canReuseCliTokenForDirect(account: SetupAccount): boolean {
+  return !account.native && Boolean(account.oauthTokenRef || account.oauthTokenFile);
+}
