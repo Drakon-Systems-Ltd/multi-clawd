@@ -912,6 +912,10 @@ export default definePluginEntry({
       "startup-pluginConfig",
     ];
     if (accounts.length === 0) {
+      // A full pass with no accounts ends any direct-route loop a previous
+      // config started; discovery-style passes must not touch it.
+      const mode = (api as { registrationMode?: unknown }).registrationMode;
+      if (mode === undefined || mode === "full") stopDirectOrderSync();
       api.logger.warn(
         `[multi-clawd] no accounts configured — nothing to register (sources: ${candidates
           .map(

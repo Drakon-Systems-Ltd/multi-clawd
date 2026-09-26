@@ -174,3 +174,21 @@ describe("the loop, end to end", () => {
     expect(warn.some((m) => m.includes('account "claw1" skipped') && m.includes("claude setup-token"))).toBe(true);
   });
 });
+
+describe("removing every account", () => {
+  test("a full pass with no accounts stops the loop; a discovery pass does not", async () => {
+    const config = {
+      accounts: [
+        { id: "claw1", oauthTokenRef: REF, direct: true },
+        { id: "claw2", configDir: "/tmp/x", oauthTokenRef: { ...REF, id: "op://Vault/Other/field" }, direct: true },
+      ],
+      pool: { id: "clawd", accounts: ["claw1", "claw2"] },
+      directRoute: { openclawCommand: FAKE },
+    };
+    plugin.register(makeApi(config).api as never);
+    plugin.register(makeApi({ accounts: [] }, "discovery").api as never);
+    expect(await runDirectOrderTickNow()).toBeDefined();
+    plugin.register(makeApi({ accounts: [] }).api as never);
+    expect(await runDirectOrderTickNow()).toBeUndefined();
+  });
+});
