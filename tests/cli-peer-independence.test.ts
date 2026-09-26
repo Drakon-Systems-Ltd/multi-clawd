@@ -14,7 +14,7 @@
  * "dist is missing" for an import that failed for any other reason.
  */
 import { describe, expect, test } from "vitest";
-import { readFileSync, existsSync, mkdtempSync, cpSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -70,6 +70,11 @@ const CLI_ENTRY_MODULES = [
   "shim-core.ts",
   "credential-state.ts",
   "watchdog-schedule.ts",
+  // v1.9 direct route (`direct`, explain, chain, doctor, update)
+  "direct-route.ts",
+  "direct-sync.ts",
+  "direct-report.ts",
+  "openclaw-runner.ts",
 ];
 
 describe("the CLI runs without the openclaw peer", () => {
@@ -134,6 +139,45 @@ describe("the CLI runs without the openclaw peer", () => {
         env,
       });
       expect(`${run.stdout}${run.stderr}`).toMatch(/chain-audit\.js is missing/);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+  });
+
+  test("`direct` runs where the openclaw peer does not resolve", () => {
+    const stage = mkdtempSync(join(tmpdir(), "mc-direct-peer-"));
+    try {
+      const env = stagedEnv(stage);
+      for (const part of ["dist", "scripts", "package.json"]) {
+        cpSync(join(ROOT, part), join(stage, part), { recursive: true });
+      }
+      const fakeDir = join(stage, "fake");
+      mkdirSync(fakeDir, { recursive: true });
+      mkdirSync(join(env.HOME, ".openclaw"), { recursive: true });
+      writeFileSync(
+        join(env.HOME, ".openclaw", ["openclaw", "json"].join(".")),
+        JSON.stringify({
+          plugins: {
+            entries: {
+              "multi-clawd": {
+                config: {
+                  accounts: [{ id: "claw1", native: true, direct: { profileId: "anthropic:claw1" } }],
+                  directRoute: { openclawCommand: join(ROOT, "tests", "fixtures", "fake-openclaw.mjs") },
+                },
+              },
+            },
+          },
+        }),
+      );
+      const run = spawnSync(process.execPath, [join(stage, "scripts", "cli.mjs"), "direct"], {
+        cwd: stage,
+        encoding: "utf8",
+        env: { ...env, FAKE_OPENCLAW_DIR: fakeDir, FAKE_OPENCLAW_PROFILES: "anthropic:claw1" },
+      });
+      const out = `${run.stdout}${run.stderr}`;
+      expect(out).toContain("DIRECT ROUTE");
+      expect(out).toContain("claw1 → anthropic:claw1");
+      expect(out).not.toMatch(/built dist|cannot load|openclaw.*not.*resolvable/i);
     } finally {
       rmSync(stage, { recursive: true, force: true });
     }

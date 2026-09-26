@@ -377,3 +377,47 @@ describe("createDirectOrderController", () => {
     expect(h.logs.filter((l) => l.includes("anthropic:claw2 is not stored"))).toHaveLength(1);
   });
 });
+
+describe("one bad agent cannot starve the rest", () => {
+  test("a throw for one agent is its own failure: others still written, backoff engages", async () => {
+    let order: string[] | null = null;
+    let throws = 0;
+    const runner: OpenclawRunner = async (args) => {
+      if (args.includes("broken")) {
+        throws++;
+        throw new Error("spawn exploded");
+      }
+      if (args[2] === "list") return { code: 0, stderr: "", stdout: listJson(["anthropic:claw1", "anthropic:claw2"]) };
+      if (args[3] === "get") return { code: 0, stderr: "", stdout: orderJson(order) };
+      if (args[3] === "set") {
+        order = args.slice(8);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: "" };
+    };
+    const warns: string[] = [];
+    let clock = NOW;
+    const controller = createDirectOrderController({
+      members: [member("claw1", { kind: "existing" }), member("claw2", { kind: "existing" })],
+      agents: ["broken", "main"],
+      runner,
+      readHealth: () => undefined,
+      healthOptions: {},
+      configOrder: () => undefined,
+      readSticky: () => undefined,
+      writeSticky: () => {},
+      logger: { info: () => {}, warn: (m) => warns.push(m) },
+      now: () => clock,
+    });
+    const first = await controller.tick();
+    expect(first.agents).toEqual([
+      expect.objectContaining({ agentId: "broken", outcome: "failed", detail: "spawn exploded" }),
+      expect.objectContaining({ agentId: "main", outcome: "written" }),
+    ]);
+    clock += 60_000;
+    const second = await controller.tick();
+    expect(second.agents[0]).toMatchObject({ agentId: "broken", outcome: "skipped" });
+    expect(throws).toBe(1);
+    expect(warns.filter((w) => w.includes("spawn exploded"))).toHaveLength(1);
+  });
+});

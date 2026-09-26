@@ -175,6 +175,34 @@ describe("the loop, end to end", () => {
   });
 });
 
+describe("directRoute.agents validation", () => {
+  test("an unusable agent id is dropped with a warning; the rest still run", async () => {
+    const logs: string[] = [];
+    const logger = { info: () => {}, warn: (m: string) => logs.push(m) };
+    const accounts = [
+      { id: "claw1", oauthTokenRef: REF, direct: true },
+      { id: "claw2", configDir: "/tmp/x", oauthTokenRef: { ...REF, id: "op://Vault/Other/field" }, direct: true },
+    ] as never;
+    const out = startDirectOrderSync({
+      accounts,
+      directRoute: { agents: ["main", "../evil", "has space"], openclawCommand: FAKE },
+      configOrder: () => undefined,
+      logger,
+    });
+    expect(out.active).toBe(true);
+    expect(logs.filter((m) => m.includes("ignoring agent id"))).toHaveLength(2);
+    const report = (await runDirectOrderTickNow()) as { agents: Array<{ agentId: string }> };
+    expect(report.agents.map((a) => a.agentId)).toEqual(["main"]);
+    const none = startDirectOrderSync({
+      accounts,
+      directRoute: { agents: ["bad id"], openclawCommand: FAKE },
+      configOrder: () => undefined,
+      logger,
+    });
+    expect(none.active).toBe(false);
+  });
+});
+
 describe("removing every account", () => {
   test("a full pass with no accounts stops the loop; a discovery pass does not", async () => {
     const config = {

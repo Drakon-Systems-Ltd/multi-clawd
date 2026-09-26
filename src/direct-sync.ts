@@ -113,6 +113,11 @@ export function parseUnusableProfiles(stdout: string): UnusableProfile[] | undef
 
 const AGENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
+/** Whether an agent id is safe to hand to the CLI as `--agent <id>`. */
+export function isValidAgentId(agentId: unknown): agentId is string {
+  return typeof agentId === "string" && AGENT_ID_RE.test(agentId);
+}
+
 export function assertAgentId(agentId: string): string {
   if (!AGENT_ID_RE.test(agentId)) throw new Error(`invalid agent id "${agentId}"`);
   return agentId;
@@ -415,57 +420,69 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
         const report: TickReport = { managedOrder: managed.order, agents: [] };
 
         for (const agentId of deps.agents) {
-          const done = applied.get(agentId);
-          if (done && done.key === key && nowMs - done.at < reassertMs) {
-            report.agents.push({ agentId, outcome: "skipped" });
-            continue;
-          }
-          const fail = failed.get(agentId);
-          if (fail && fail.key === key && nowMs - fail.at < backoffMs) {
-            report.agents.push({ agentId, outcome: "skipped", detail: "backing off after a failure" });
-            continue;
-          }
-          const read = await readDirectRouteSnapshot(deps.runner, agentId);
-          if (!read.snapshot) {
-            if (!fail || fail.key !== key) {
-              deps.logger.warn(`[multi-clawd] direct route: cannot read agent ${agentId}'s anthropic profiles (${read.error})`);
+          // One agent's failure must never starve the others or skip the
+          // backoff: anything thrown for this agent is recorded as its failure.
+          try {
+            const done = applied.get(agentId);
+            if (done && done.key === key && nowMs - done.at < reassertMs) {
+              report.agents.push({ agentId, outcome: "skipped" });
+              continue;
             }
-            failed.set(agentId, { key, at: nowMs });
-            report.agents.push({ agentId, outcome: "failed", detail: read.error });
-            continue;
-          }
-          const plan = planAgentOrder({
-            members: verdicts,
-            snapshot: read.snapshot,
-            configOrder: deps.configOrder(),
-            sticky,
-            nowMs,
-            minDwellMs: deps.minDwellMs,
-          });
-          for (const id of plan.missing) {
-            const k = `${agentId}:${id}`;
-            if (warnedMissing.has(k)) continue;
-            warnedMissing.add(k);
-            deps.logger.warn(
-              `[multi-clawd] direct route: profile ${id} is not stored for agent ${agentId} — run \`multi-clawd direct sync\``,
-            );
-          }
-          if (!plan.order) {
-            applied.set(agentId, { key, at: nowMs });
-            failed.delete(agentId);
-            report.agents.push({ agentId, outcome: "unchanged" });
-            continue;
-          }
-          const write = await deps.runner(orderSetArgs(agentId, plan.order), { timeoutMs: 60_000 });
-          if (write.code === 0) {
-            applied.set(agentId, { key, at: nowMs });
-            failed.delete(agentId);
-            deps.logger.info(
-              `[multi-clawd] direct route: agent ${agentId} anthropic order → ${plan.order.join(" → ")}`,
-            );
-            report.agents.push({ agentId, outcome: "written", order: plan.order });
-          } else {
-            const detail = `order set ${safeCliError(write)}`;
+            const fail = failed.get(agentId);
+            if (fail && fail.key === key && nowMs - fail.at < backoffMs) {
+              report.agents.push({ agentId, outcome: "skipped", detail: "backing off after a failure" });
+              continue;
+            }
+            const read = await readDirectRouteSnapshot(deps.runner, agentId);
+            if (!read.snapshot) {
+              if (!fail || fail.key !== key) {
+                deps.logger.warn(`[multi-clawd] direct route: cannot read agent ${agentId}'s anthropic profiles (${read.error})`);
+              }
+              failed.set(agentId, { key, at: nowMs });
+              report.agents.push({ agentId, outcome: "failed", detail: read.error });
+              continue;
+            }
+            const plan = planAgentOrder({
+              members: verdicts,
+              snapshot: read.snapshot,
+              configOrder: deps.configOrder(),
+              sticky,
+              nowMs,
+              minDwellMs: deps.minDwellMs,
+            });
+            for (const id of plan.missing) {
+              const k = `${agentId}:${id}`;
+              if (warnedMissing.has(k)) continue;
+              warnedMissing.add(k);
+              deps.logger.warn(
+                `[multi-clawd] direct route: profile ${id} is not stored for agent ${agentId} — run \`multi-clawd direct sync\``,
+              );
+            }
+            if (!plan.order) {
+              applied.set(agentId, { key, at: nowMs });
+              failed.delete(agentId);
+              report.agents.push({ agentId, outcome: "unchanged" });
+              continue;
+            }
+            const write = await deps.runner(orderSetArgs(agentId, plan.order), { timeoutMs: 60_000 });
+            if (write.code === 0) {
+              applied.set(agentId, { key, at: nowMs });
+              failed.delete(agentId);
+              deps.logger.info(
+                `[multi-clawd] direct route: agent ${agentId} anthropic order → ${plan.order.join(" → ")}`,
+              );
+              report.agents.push({ agentId, outcome: "written", order: plan.order });
+            } else {
+              const detail = `order set ${safeCliError(write)}`;
+              if (!fail || fail.key !== key) {
+                deps.logger.warn(`[multi-clawd] direct route: agent ${agentId}: ${detail}`);
+              }
+              failed.set(agentId, { key, at: nowMs });
+              report.agents.push({ agentId, outcome: "failed", detail });
+            }
+          } catch (err) {
+            const detail = String((err as Error)?.message ?? err).slice(0, 200);
+            const fail = failed.get(agentId);
             if (!fail || fail.key !== key) {
               deps.logger.warn(`[multi-clawd] direct route: agent ${agentId}: ${detail}`);
             }

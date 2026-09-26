@@ -94,7 +94,7 @@ import {
 } from "./login-health.js";
 import { execFileSync } from "node:child_process";
 import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
-import { createDirectOrderController } from "./direct-sync.js";
+import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
@@ -1458,9 +1458,18 @@ export function startDirectOrderSync(params: {
     stopDirectOrderSync();
     return { active: false, members: members.map((m) => m.accountId) };
   }
-  const agents = (params.directRoute?.agents?.length ? params.directRoute.agents : ["main"]).filter(
-    (a) => typeof a === "string" && a.trim(),
-  );
+  const requested = params.directRoute?.agents?.length ? params.directRoute.agents : ["main"];
+  const agents = requested.filter((a) => {
+    if (isValidAgentId(a)) return true;
+    logger.warn(
+      `[multi-clawd] direct route: ignoring agent id ${JSON.stringify(a)} in directRoute.agents — letters, digits, "_" and "-" only`,
+    );
+    return false;
+  });
+  if (agents.length === 0) {
+    stopDirectOrderSync();
+    return { active: false, members: members.map((m) => m.accountId) };
+  }
   const intervalMs = Math.max(15_000, params.directRoute?.intervalMs ?? 60_000);
   const healthOptions = {
     utilizationThreshold: params.pool?.utilizationThreshold,

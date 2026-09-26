@@ -213,7 +213,8 @@
           "agents": {
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
             },
             "description": "Agents whose anthropic auth order is managed. Default [\"main\"]."
           },
