@@ -41,7 +41,7 @@ try {
   console.error("setup: built dist/ modules are missing — run `npm run build` first (source checkout) or reinstall the plugin.");
   process.exit(1);
 }
-const { buildMainAccount, buildSecondAccount, buildPool, validateSecondConfigDir, planFromExisting, mergeSetupIntoConfig, existingAccountDefaults, looksLikeSecretRef } = core;
+const { buildMainAccount, buildSecondAccount, buildPool, validateSecondConfigDir, planFromExisting, mergeSetupIntoConfig, existingAccountDefaults, looksLikeSecretRef, buildDirectSetting, canReuseCliTokenForDirect } = core;
 
 // Line-queued prompts: interactive AND pipe-safe. With piped stdin, readline
 // emits every buffered line immediately — a plain question() would capture one
@@ -208,6 +208,70 @@ async function secondAccountFlow(id, prior) {
 if (accounts.length === 0 && state.accountIds.length === 0) {
   console.log("Nothing to set up — no accounts chosen. Bye.");
   process.exit(0);
+}
+
+// ── direct route (v1.9, optional) ────────────────────────────────────────────
+// The gateway's own anthropic/* models call the Anthropic API directly with an
+// OpenClaw auth profile. Opting accounts in lets the pool steer those turns too
+// (by keeping the auth-profile order in pool-health order). Default NO: an
+// account without `direct` behaves exactly as before.
+let directConfigured = false;
+if (typeof buildDirectSetting === "function" &&
+    (await yes("\nAlso serve anthropic/* models (OpenClaw's direct Anthropic route) from these accounts?", false))) {
+  const byId = new Map(accounts.map((a) => [a.id, a]));
+  const existingAccounts = existing?.plugins?.entries?.["multi-clawd"]?.config?.accounts ?? [];
+  for (const id of [...new Set([...accounts.map((a) => a.id), ...state.accountIds])]) {
+    const current = { ...(existingAccounts.find((a) => a?.id === id) ?? {}), ...(byId.get(id) ?? {}) };
+    if (current.direct !== undefined) {
+      console.log(`  ${id}: already has a direct-route setting — kept.`);
+      continue;
+    }
+    if (!(await yes(`  Add "${id}" to the direct route?`, true))) continue;
+    let setting;
+    if (canReuseCliTokenForDirect(current) && (await yes(`    reuse ${id}'s existing setup-token for it?`, true))) {
+      setting = buildDirectSetting(current, { kind: "reuse" });
+    } else {
+      const how = current.configDir
+        ? `CLAUDE_CONFIG_DIR=${current.configDir} claude setup-token`
+        : "claude setup-token";
+      console.log(`
+    ${id} needs a setup-token of its own for the direct route — its Claude login
+    is a rotating grant that multi-clawd never copies. In your own terminal, run:
+
+        ${how}
+
+    signed in as ${id}'s account (NOT your other one), and store the printed token:
+      1) in your secret manager (RECOMMENDED — OpenClaw stores only the reference)
+      2) in a token file (chmod 600)
+      3) it is ALREADY stored in OpenClaw as an anthropic profile (give its id)
+      4) skip ${id} for now`);
+      const choice = await ask("    choice (1/2/3/4):", "1");
+      try {
+        if (choice === "1") {
+          const provider = await ask("    gateway secret provider name:", "onepassword");
+          const refId = await ask("    secret reference (e.g. op://Vault/Item/field):");
+          if (refId) setting = buildDirectSetting(current, { kind: "ref", ref: { source: "exec", provider, id: refId } });
+        } else if (choice === "2") {
+          setting = buildDirectSetting(current, { kind: "file", path: await ask("    token file path:", `~/.${id}-direct-token`) });
+        } else if (choice === "3") {
+          const profileId = await ask("    existing profile id (see `openclaw models auth list --provider anthropic`):");
+          if (profileId.startsWith("anthropic:")) setting = { profileId };
+          else console.log("    ✗ profile ids for this route start with anthropic: — skipped");
+        }
+      } catch (err) {
+        console.log(`    ✗ ${err.message} — skipped`);
+      }
+    }
+    if (!setting) {
+      console.log(`    ${id}: not added.`);
+      continue;
+    }
+    const planned = byId.get(id);
+    if (planned) planned.direct = setting;
+    else accounts.push({ id, direct: setting });
+    directConfigured = true;
+    console.log(`    ✅ ${id} will serve anthropic/* as profile ${setting.profileId ?? `anthropic:${id}`}`);
+  }
 }
 
 // ── pool ─────────────────────────────────────────────────────────────────────
@@ -400,6 +464,15 @@ if (DRY_RUN || !wroteConfig) {
 }
 
 // ── next steps ───────────────────────────────────────────────────────────────
+if (directConfigured) {
+  console.log(`
+Direct route: store the profiles in OpenClaw and set the order now with
+
+  multi-clawd direct sync
+
+(refs are stored as SecretRefs — the token is never copied; the gateway then
+keeps the anthropic order in pool-health order on its own).`);
+}
 console.log(`
 Done. Finish with:
 

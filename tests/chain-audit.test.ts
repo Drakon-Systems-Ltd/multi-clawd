@@ -501,3 +501,24 @@ describe("2026.8.x agents.entries map form", () => {
     expect(auditChainShadowing(config).map((f) => f.agent)).not.toContain("entries");
   });
 });
+
+describe("v1.9: a pooled direct route is not a bypass", () => {
+  test("anthropic/* is pooled only when the direct route pools; claude-cli/* never", () => {
+    expect(offPoolClaudeRef("anthropic/claude-sonnet-5", "clawd")).toBe("strong");
+    expect(offPoolClaudeRef("anthropic/claude-sonnet-5", "clawd", { directPooled: true })).toBeNull();
+    expect(offPoolClaudeRef("Anthropic/claude-sonnet-5", "clawd", { directPooled: true })).toBeNull();
+    expect(offPoolClaudeRef("claude-cli/claude-sonnet-5", "clawd", { directPooled: true })).toBe("strong");
+    expect(offPoolClaudeRef("claw2/claude-sonnet-5", "clawd", { directPooled: true })).toBe("warn");
+  });
+
+  test("chain and session audits honour it", () => {
+    const config = { agents: { defaults: { model: { primary: "anthropic/claude-sonnet-5" } } } };
+    expect(auditEffectiveChain(config, "clawd").length).toBeGreaterThan(0);
+    expect(auditEffectiveChain(config, "clawd", { directPooled: true })).toEqual([]);
+    const sessions = {
+      "agent:main:main": { providerOverride: "anthropic", modelOverride: "claude-sonnet-5", modelOverrideSource: "user" },
+    };
+    expect(auditSessionOverrides(sessions, true)).toHaveLength(1);
+    expect(auditSessionOverrides(sessions, true, { directPooled: true })).toEqual([]);
+  });
+});

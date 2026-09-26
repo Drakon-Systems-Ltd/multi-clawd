@@ -31,6 +31,7 @@ multi-clawd setup     # guided wizard: accounts, isolated second login, pool, wa
 multi-clawd login claw2   # launch the right Claude sign-in for an account (or re-auth it)
 multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
 multi-clawd chain     # audit your model routing — what actually serves each turn
+multi-clawd direct    # the direct anthropic/* route: status, or `direct sync` (v1.9, optional)
 multi-clawd doctor    # health check (add --probe for a live end-to-end turn)
 ```
 
@@ -594,6 +595,77 @@ Notes:
   which runs on every launch on every turn path. Details in
   [`DESIGN.md`](./DESIGN.md).
 
+## Direct route: the pool for `anthropic/*` too (v1.9)
+
+OpenClaw reaches Claude two ways. The pool above drives **Claude Code CLI**
+backends (`clawd/…`). OpenClaw's own **`anthropic/*`** models skip the CLI and
+call the Anthropic API directly, with an auth profile. A `claude setup-token`
+works for both, and both use up the same account limits.
+
+From v1.9 the pool can steer both. Opt accounts in with `direct`:
+
+```jsonc
+"accounts": [
+  // native login: give it its own setup-token for the API route
+  { "id": "claw1", "native": true,
+    "direct": { "tokenRef": { "source": "exec", "provider": "onepassword",
+                              "id": "op://YourVault/claw1-setup-token/password" } } },
+  // already has a setup-token for the CLI: reuse it
+  { "id": "claw2", "configDir": "~/.claw2",
+    "oauthTokenRef": { "source": "exec", "provider": "onepassword",
+                       "id": "op://YourVault/claw2-setup-token/password" },
+    "direct": true }
+],
+"directRoute": { "agents": ["main"] }   // optional; default ["main"]
+```
+
+Then run `multi-clawd direct sync`. It does two things:
+
+1. **Stores one OpenClaw profile per account** (`anthropic:claw1`,
+   `anthropic:claw2`), using OpenClaw's own commands:
+   - A **secret reference** is stored as a reference (`openclaw secrets
+     apply`). OpenClaw resolves it at runtime, so the token is never copied.
+   - A **token file** is piped to `openclaw models auth paste-token` on stdin.
+   - Profiles that already exist are left alone; `--resync` rewrites them.
+2. **Sets the `anthropic` auth order** to match pool health.
+
+The plugin then keeps that order up to date inside the gateway, re-checking
+every minute:
+
+- The healthiest account goes first; a nearly-maxed one moves to the back
+  **before** it errors.
+- The rule is the same one the CLI pool uses, and it reads the same health
+  data, so both routes lean on the same account at the same time.
+- OpenClaw's own rotation covers the rest mid-turn: a 429 cools that profile
+  down and the turn moves to the next one.
+
+What to know:
+
+- **Why a native or config-dir login needs its own token.** That login is a
+  rotating one-time OAuth grant, and a copy of it breaks on the next refresh.
+  multi-clawd never reads Claude's own credential files. Run `claude
+  setup-token` signed in as that account and store the token. `setup` walks
+  you through it.
+- **Already stored a profile yourself?** Adopt it with
+  `"direct": { "profileId": "anthropic:<id>" }`. It gets ordered, never
+  rewritten.
+- **Existing sessions stay on their account.** OpenClaw pins a profile to
+  each session. A new order applies to new sessions, and to a session whose
+  profile cools down. A pinned session moves when its account actually hits
+  its limit, and the next account in line is by then the healthiest.
+- **Your own profiles are kept.** Anything in the `anthropic` order that
+  multi-clawd doesn't manage stays there, after the pool's accounts.
+  `"directRoute": { "manageOrder": false }` hands the order back to you.
+- **Health comes from CLI turns only.** Traffic that only uses the API route
+  doesn't update it. With no recent CLI turns an account counts as healthy,
+  and OpenClaw's reactive rotation does the work.
+- **Nothing changes without `direct`.** No timer, no OpenClaw calls, and the
+  same `explain`/`chain`/`doctor` output as before.
+
+`multi-clawd direct` shows, per account: the profile, whether it's stored,
+any cooldown, and the live order. `explain` shows the same, and `doctor
+--probe` makes one tiny live call per profile.
+
 ## How it works
 
 Three moves, all through the official plugin SDK (details in
@@ -737,6 +809,9 @@ Early but real — built for and dogfooded in production.
   for each account shape, verified afterwards (signed-in email shown, token
   values never touched); ClawHub package published under
   `@drakon-systems` ✅
+- **v1.9** — one pool, both transports: accounts can also serve OpenClaw's
+  direct `anthropic/*` route; the gateway keeps the `anthropic` auth order in
+  pool-health order; `multi-clawd direct` / `direct sync` ✅
 - **Next** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; true per-session affinity; local
   five-hour-window signal (turn counting); per-account lock for the shim

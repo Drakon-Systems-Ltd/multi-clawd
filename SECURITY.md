@@ -57,6 +57,7 @@ is listed here so you can check them yourself.
 | `dist/watchdog-schedule.js` | `node <bundled script>` | Runs the eviction watchdog on a timer. Path is the package's own script. |
 | `scripts/cli.mjs` | `node <bundled script>` | The CLI dispatching to its own subcommands. |
 | `scripts/setup.mjs` | `launchctl` / `systemctl` | Loads the watchdog timer during setup on macOS/Linux. |
+| `dist/openclaw-runner.js` | the `openclaw` CLI (or `directRoute.openclawCommand`) | Direct route only (v1.9, accounts with `direct`): reads and writes the `anthropic` auth profiles and order through OpenClaw's own subcommands (`models auth list`/`order get`/`order set`/`paste-token`, `secrets apply`, `models status`). A setup-token only ever travels on the child's stdin. Never spawned without `direct` configured. |
 
 None of these pass a string to a shell — they are direct process spawns with
 argument arrays, so there is no quoting or injection surface. Paths are

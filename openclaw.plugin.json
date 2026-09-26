@@ -1,7 +1,7 @@
 {
   "id": "multi-clawd",
   "name": "multi-clawd",
-  "version": "1.8.11",
+  "version": "1.9.0",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
   "cliBackends": [
     "claw1",
@@ -163,7 +163,72 @@
             "defaultModel": {
               "type": "string",
               "description": "Model id used for live probes (openclaw models status). Defaults to claude-fable-5."
+            },
+            "direct": {
+              "description": "Opt this account into the gateway's direct Anthropic route (anthropic/* models) as well as the CLI. `true` reuses the account's own setup-token (oauthTokenRef / oauthTokenFile). A native or config-dir login is a rotating grant that is never copied, so it needs an explicit setup-token: {\"tokenRef\": {...}} or {\"tokenFile\": \"...\"}. `multi-clawd update`/`setup` store it as the OpenClaw auth profile anthropic:<id>, and the plugin keeps auth.order.anthropic in pool-health order. Omit to leave the account CLI-only (unchanged behaviour).",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "tokenRef": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "description": "Secret reference resolving to a `claude setup-token` value for THIS account, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}.",
+                      "properties": {
+                        "source": {
+                          "type": "string"
+                        },
+                        "provider": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "tokenFile": {
+                      "type": "string",
+                      "description": "Path to a 0600 file holding a `claude setup-token` value for THIS account. Mutually exclusive with tokenRef."
+                    },
+                    "profileId": {
+                      "type": "string",
+                      "description": "OpenClaw auth profile id. Default anthropic:<account id>. Must start with anthropic:."
+                    }
+                  }
+                }
+              ]
             }
+          }
+        }
+      },
+      "directRoute": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The gateway's direct Anthropic route (anthropic/* models), active only when at least one account sets `direct`. The plugin keeps each listed agent's auth.order.anthropic in pool-health order (via `openclaw models auth order set`), so a nearly-maxed account is tried last before it errors; OpenClaw's own cooldowns and in-turn rotation handle the rest.",
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+            },
+            "description": "Agents whose anthropic auth order is managed. Default [\"main\"]."
+          },
+          "manageOrder": {
+            "type": "boolean",
+            "description": "Keep the order in pool-health order. Default true. false = credentials are still synced by setup/update, the order is left to you."
+          },
+          "intervalMs": {
+            "type": "number",
+            "description": "How often the order is re-planned from health files. Default 60000; minimum 15000. The CLI is only invoked when the plan changes (or hourly to re-assert)."
+          },
+          "openclawCommand": {
+            "type": "string",
+            "description": "OpenClaw CLI used for auth-store reads/writes. Default \"openclaw\" on PATH."
           }
         }
       }

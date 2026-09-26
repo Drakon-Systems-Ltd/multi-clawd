@@ -14,6 +14,7 @@ export interface ExplainAccount {
   configDir?: string;
   oauthTokenFile?: string;
   oauthTokenRef?: { provider?: string; [k: string]: unknown };
+  direct?: unknown;
 }
 
 export interface ExplainPool {
@@ -39,6 +40,33 @@ export interface ExplainModel {
   stickyAccount?: string;
   /** Clock for usage reset countdowns; defaults to Date.now() at render time. */
   nowMs?: number;
+  /** The direct `anthropic/*` route; absent when no account opted in. */
+  direct?: ExplainDirect;
+}
+
+/**
+ * What the gateway's direct Anthropic route looks like from the pool's side.
+ * Every field is observed (auth store, stored order, cooldown state) except
+ * `members`, which is the plugin config's intent.
+ */
+export interface ExplainDirect {
+  members: Array<{
+    accountId: string;
+    profileId: string;
+    /** Where the setup-token comes from, in words — never the value. */
+    source: string;
+    /** Whether OpenClaw's store holds the profile; undefined = not checked. */
+    stored?: boolean;
+    /** An adopted profile: the operator stores it; `direct sync` cannot. */
+    adopted?: boolean;
+    /** Epoch ms the profile is cooling down until, when it is. */
+    cooldownUntil?: number;
+    cooldownReason?: string;
+  }>;
+  problems: Array<{ accountId: string; reason: string }>;
+  /** Effective `anthropic` order, where it came from; undefined = not read. */
+  order?: string[];
+  orderSource?: string;
 }
 
 /** Human name for a shim window key. Unknown keys pass through as-is. */
@@ -89,7 +117,11 @@ export function describeAccount(acc: ExplainAccount): string {
 }
 
 /** Annotate one chain rung with what it MEANS. */
-export function annotateChainRef(ref: string, pool: ExplainPool | undefined): string {
+export function annotateChainRef(
+  ref: string,
+  pool: ExplainPool | undefined,
+  direct?: ExplainDirect,
+): string {
   const slash = ref.indexOf("/");
   const provider = slash > 0 ? ref.slice(0, slash) : undefined;
   if (pool && provider === pool.id) {
@@ -101,6 +133,10 @@ export function annotateChainRef(ref: string, pool: ExplainPool | undefined): st
   }
   if (provider && /^claw\d+$/.test(provider)) {
     return `pinned to only ${provider} — no cross-account failover on this rung`;
+  }
+  if (provider === "anthropic" && direct && direct.members.length > 0) {
+    const order = direct.members.map((m) => m.accountId).join(", then ");
+    return `direct to Anthropic — pooled by auth-profile order (${order}), health-sorted by the plugin`;
   }
   if (provider === "anthropic" || provider === "claude-cli") {
     return "direct to Anthropic — bypasses the pool (no cross-account failover)";
@@ -153,6 +189,11 @@ export function renderExplanation(model: ExplainModel): string {
   }
   lines.push("");
 
+  if (model.direct) {
+    lines.push(...renderDirectSection(model.direct, model.nowMs ?? Date.now()));
+    lines.push("");
+  }
+
   if (model.chain?.primary || model.chain?.fallbacks?.length) {
     lines.push("FAILOVER CHAIN  (agents.defaults)");
     const rungs = [model.chain.primary, ...(model.chain.fallbacks ?? [])].filter(
@@ -160,7 +201,7 @@ export function renderExplanation(model: ExplainModel): string {
     );
     rungs.forEach((ref, i) => {
       lines.push(`  ${i + 1}. ${ref}`);
-      lines.push(`       ${annotateChainRef(ref, model.pool)}`);
+      lines.push(`       ${annotateChainRef(ref, model.pool, model.direct)}`);
     });
   } else {
     lines.push("FAILOVER CHAIN  (none found under agents.defaults)");
@@ -186,4 +227,51 @@ export function renderExplanation(model: ExplainModel): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * The DIRECT ROUTE block: which OpenClaw profile serves `anthropic/*` for
+ * each account, whether it is actually stored, whether it is cooling down,
+ * and the order OpenClaw will try them in right now.
+ */
+export function renderDirectSection(direct: ExplainDirect, nowMs: number): string[] {
+  const lines: string[] = [];
+  lines.push("DIRECT ROUTE  anthropic/*  (gateway → Anthropic API with each account's setup-token)");
+  if (direct.members.length === 0) {
+    lines.push("  no account has a usable direct credential yet");
+  }
+  for (const m of direct.members) {
+    const bits = [m.source];
+    if (m.stored === true) bits.push("stored in OpenClaw");
+    else if (m.stored === false) {
+      bits.push(
+        m.adopted
+          ? "NOT STORED — this profile is yours to store (`openclaw models auth paste-token --provider anthropic --profile-id " +
+              `${m.profileId}\`) or fix direct.profileId`
+          : "NOT STORED — run `multi-clawd direct sync`",
+      );
+    }
+    if (m.cooldownUntil !== undefined && m.cooldownUntil > nowMs) {
+      bits.push(
+        `COOLING DOWN${m.cooldownReason ? ` (${m.cooldownReason})` : ""} for ${relativeUntil(m.cooldownUntil, nowMs)}`,
+      );
+    }
+    lines.push(`  ${m.accountId} → ${m.profileId}`);
+    lines.push(`      ${bits.join(" · ")}`);
+  }
+  for (const p of direct.problems) {
+    lines.push(`  ${p.accountId}: NOT on the direct route — ${p.reason}`);
+  }
+  if (direct.order) {
+    const managed = new Set(direct.members.map((m) => m.profileId));
+    const rendered = direct.order.map((id) => (managed.has(id) ? id : `${id} (not managed)`));
+    lines.push(
+      `  order${direct.orderSource ? ` (${direct.orderSource})` : ""}: ${
+        rendered.length > 0 ? rendered.join(" → ") : "none set — OpenClaw's round-robin decides"
+      }`,
+    );
+  }
+  lines.push("  The plugin keeps this order in pool-health order, so a nearly-maxed account");
+  lines.push("  drops back BEFORE it errors; OpenClaw's own rotation covers the rest in-turn.");
+  return lines;
 }

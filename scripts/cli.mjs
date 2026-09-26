@@ -18,6 +18,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, existsSync as existsSyncEarly } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { homedir as osHomedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
 
@@ -37,6 +38,7 @@ ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
   ${BOLD}login${RESET}     log a configured account in (or re-auth it) — right dir, right env
   ${BOLD}explain${RESET}   your setup in plain English — accounts, pool, fallback chain
   ${BOLD}chain${RESET}     audit your model routing — what actually serves each turn
+  ${BOLD}direct${RESET}    the direct anthropic/* route — status, or \`direct sync\` to store profiles
   ${BOLD}update${RESET}    update the plugin to the latest version
   ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
   ${BOLD}hermes${RESET}    sync or diagnose Hermes Agent's Anthropic credential pool
@@ -143,6 +145,195 @@ async function cliSkewNote(cli = cliVersion(), plugin = installedVersion()) {
   }
 }
 
+
+/** The OpenClaw config as parsed JSON, or undefined when unreadable. */
+function readOpenclawConfigSync() {
+  try {
+    return JSON.parse(readFileSync(join(osHomedir(), ".openclaw", "openclaw.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Everything the direct-route surfaces need, loaded from dist. None of these
+ * modules import the `openclaw` peer, so they load from a global install.
+ * Returns undefined when no account mentions `direct` — callers then print
+ * nothing new (the compatibility contract).
+ */
+async function loadDirect(config) {
+  const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
+  const accounts = Array.isArray(pc.accounts) ? pc.accounts : [];
+  if (!accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) return undefined;
+  let dr, ds, rep, run, shim;
+  try {
+    dr = await import(resolve(__dirname, "..", "dist", "direct-route.js"));
+    ds = await import(resolve(__dirname, "..", "dist", "direct-sync.js"));
+    rep = await import(resolve(__dirname, "..", "dist", "direct-report.js"));
+    run = await import(resolve(__dirname, "..", "dist", "openclaw-runner.js"));
+    shim = await import(resolve(__dirname, "..", "dist", "shim-core.js"));
+  } catch (err) {
+    console.error(distFailure("direct", "direct-report.js", err));
+    process.exit(1);
+  }
+  const { readFileSync: rf } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
+  const pool = pc.pool;
+  const directRoute = pc.directRoute ?? {};
+  const agents = Array.isArray(directRoute.agents) && directRoute.agents.length > 0 ? directRoute.agents : ["main"];
+  const configOrder = Array.isArray(config?.auth?.order?.anthropic) ? config.auth.order.anthropic : undefined;
+  const readHealth = (id) => {
+    try {
+      return shim.parseStoredState(rf(join(stateDir, `${id}.json`), "utf8"));
+    } catch {
+      return undefined;
+    }
+  };
+  let sticky;
+  try {
+    sticky = JSON.parse(rf(join(stateDir, "direct-order.sticky.json"), "utf8"));
+  } catch {
+    /* none */
+  }
+  const runner = run.createOpenclawRunner(directRoute.openclawCommand ?? "openclaw");
+  const healthOptions = {
+    utilizationThreshold: pool?.utilizationThreshold,
+    staleAfterMs: pool?.staleAfterMs,
+    rotateOnOverage: pool?.rotateOnOverage,
+  };
+  const gather = (agentId, opts = {}) =>
+    rep.gatherDirectStatus({
+      accounts,
+      poolAccounts: pool?.accounts ?? [],
+      agentId,
+      runner,
+      readHealth,
+      healthOptions,
+      configOrder,
+      sticky,
+      minDwellMs: pool?.minDwellMs,
+      nowMs: Date.now(),
+      ...opts,
+    });
+  return { dr, ds, rep, runner, accounts, pool, directRoute, agents, configOrder, readHealth, gather, healthOptions, sticky };
+}
+
+/**
+ * `direct` — status (default) or `direct sync`: store each opted-in account's
+ * setup-token as an OpenClaw `anthropic` profile through OpenClaw's own CLI
+ * (secrets apply for refs — no copy; paste-token on stdin for files), then
+ * put every managed agent's order in pool-health order right away instead of
+ * waiting for the gateway's next tick.
+ */
+async function direct(args = []) {
+  const { readFileSync: rf, mkdtempSync, writeFileSync, rmSync, statSync } = await import("node:fs");
+  const { homedir, tmpdir } = await import("node:os");
+  const config = readOpenclawConfigSync();
+  if (!config) {
+    console.error("direct: could not read your OpenClaw config");
+    process.exit(1);
+  }
+  const ctx = await loadDirect(config);
+  const sub = args.find((a) => !a.startsWith("--")) ?? "status";
+  console.log(`\n${BOLD}🦞 multi-clawd — direct anthropic/* route${RESET}\n`);
+  if (!ctx) {
+    console.log("  Not configured: no account sets `direct`, so anthropic/* turns use OpenClaw's own");
+    console.log("  anthropic profiles and the pool steers CLI turns only. See the README (\"Direct route\").\n");
+    return;
+  }
+  if (sub === "sync") {
+    const dryRun = args.includes("--dry-run");
+    const resync = args.includes("--resync");
+    const { members, problems } = ctx.dr.collectDirectMembers(ctx.accounts, ctx.pool?.accounts ?? []);
+    for (const p of problems) console.log(`  ⚠️  ${p.accountId}: skipped — ${p.reason}`);
+    if (members.length === 0) {
+      console.log("  nothing to sync.\n");
+      process.exit(problems.length > 0 ? 1 : 0);
+    }
+    const agentId = ctx.agents[0];
+    if (!dryRun && !args.includes("--yes")) {
+      console.log(`  Will store missing anthropic profiles for agent ${agentId}${resync ? " (and re-store existing ones)" : ""}:`);
+      for (const m of members) console.log(`    ${m.accountId} → ${m.profileId}  (${ctx.rep.describeDirectSource(m)})`);
+      console.log(`  ${DIM}Refs are stored as SecretRefs (secrets apply — the token is never copied). Token files go`);
+      console.log(`  through paste-token on stdin; OpenClaw also records those in its config (auth.profiles/auth.order).${RESET}`);
+      if (!(await askYes("  Proceed?"))) return;
+    }
+    const expand = (p) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
+    const { results, listError } = await ctx.ds.syncDirectProfiles({
+      members,
+      agentId,
+      runner: ctx.runner,
+      resync,
+      dryRun,
+      readTokenFile: (p) => {
+        const abs = expand(p);
+        const mode = statSync(abs).mode & 0o777;
+        if (mode & 0o077) console.log(`  ⚠️  ${abs} is mode ${mode.toString(8)} — chmod 600 it.`);
+        return rf(abs, "utf8");
+      },
+      writePlanFile: (plan) => {
+        const dir = mkdtempSync(join(tmpdir(), "multi-clawd-plan-"));
+        const path = join(dir, "plan.json");
+        writeFileSync(path, JSON.stringify(plan, null, 2), { mode: 0o600 });
+        return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+      },
+    });
+    if (listError) {
+      console.error(`  ❌ could not read OpenClaw's anthropic profiles: ${listError}`);
+      process.exit(1);
+    }
+    const icon = { present: "✅", adopted: "✅", stored: "✅", "would-store": "📝", "adopt-missing": "❌", failed: "❌" };
+    for (const r of results) {
+      console.log(`  ${icon[r.action] ?? "•"} ${r.accountId} → ${r.profileId}: ${r.action}${r.detail ? ` (${r.detail})` : ""}`);
+    }
+    const failed = results.filter((r) => r.action === "failed" || r.action === "adopt-missing");
+    if (!dryRun && ctx.directRoute.manageOrder !== false) {
+      for (const agent of ctx.agents) {
+        const status = await ctx.gather(agent, { skipCooldowns: true });
+        if (!status || status.errors.length > 0) {
+          console.log(`  ⚠️  agent ${agent}: order not checked (${status?.errors.join("; ") ?? "no status"})`);
+          continue;
+        }
+        if (!status.pendingOrder) {
+          console.log(`  ✅ agent ${agent}: anthropic order already in pool-health order`);
+          continue;
+        }
+        const r = await ctx.runner(ctx.ds.orderSetArgs(agent, status.pendingOrder), { timeoutMs: 60000 });
+        console.log(
+          r.code === 0
+            ? `  ✅ agent ${agent}: anthropic order → ${status.pendingOrder.join(" → ")}`
+            : `  ❌ agent ${agent}: order set ${ctx.ds.safeCliError(r)}`,
+        );
+        if (r.code !== 0) failed.push({ action: "failed" });
+      }
+    }
+    console.log("");
+    process.exit(failed.length > 0 ? 1 : 0);
+  }
+  // status
+  const ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
+  let problems = 0;
+  for (const agent of ctx.agents) {
+    const status = await ctx.gather(agent);
+    if (!status) continue;
+    console.log(`${DIM}agent ${agent}${RESET}`);
+    console.log(ec.renderDirectSection(status.explain, Date.now()).join("\n"));
+    for (const v of status.verdicts) console.log(`  health ${v.accountId}: ${v.verdict}`);
+    if (status.pendingOrder) {
+      console.log(`  ⏳ pending order (the gateway applies it within a minute, or run \`multi-clawd direct sync\`):`);
+      console.log(`     ${status.pendingOrder.join(" → ")}`);
+    }
+    for (const e of status.errors) {
+      problems++;
+      console.log(`  ⚠️  ${e}`);
+    }
+    problems += status.explain.problems.length + status.explain.members.filter((m) => m.stored === false).length;
+    console.log("");
+  }
+  process.exit(problems > 0 ? 1 : 0);
+}
+
 /**
  * `chain` — one place that answers "what actually serves my turns, and does it
  * match what I meant?".
@@ -178,6 +369,14 @@ async function chain(args = []) {
   const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
   const poolId = pc.pool?.id?.trim() || (pc.pool ? "clawd" : undefined);
   const chainCfg = config?.agents?.defaults?.model;
+  // v1.9: anthropic/* is pooled when the direct route serves two accounts.
+  let directPooled = false;
+  try {
+    const dr = await import(resolve(__dirname, "..", "dist", "direct-route.js"));
+    directPooled = dr.directRoutePools(Array.isArray(pc.accounts) ? pc.accounts : [], pc.directRoute);
+  } catch {
+    /* older dist: no direct route */
+  }
 
   console.log(`\n${BOLD}🦞 multi-clawd — model routing${RESET}\n`);
 
@@ -188,7 +387,10 @@ async function chain(args = []) {
   if (rungs.length === 0) console.log("  (none configured)");
   rungs.forEach((r, i) => {
     const pooled = poolId && r.startsWith(`${poolId}/`);
-    console.log(`  ${i + 1}. ${r}${pooled ? `  ${DIM}→ pooled${RESET}` : ""}`);
+    const directRung = directPooled && /^anthropic\//i.test(r);
+    console.log(
+      `  ${i + 1}. ${r}${pooled ? `  ${DIM}→ pooled${RESET}` : directRung ? `  ${DIM}→ pooled (direct route)${RESET}` : ""}`,
+    );
   });
   console.log("");
 
@@ -209,7 +411,7 @@ async function chain(args = []) {
     `${f.surface} → ${f.ref}`,
   );
 
-  const configFindings = ca.auditEffectiveChain(config, poolId);
+  const configFindings = ca.auditEffectiveChain(config, poolId, { directPooled });
   section(
     "OFF-POOL REFERENCES",
     configFindings.filter((f) => f.severity === "warn"),
@@ -236,7 +438,7 @@ async function chain(args = []) {
         console.log(`${DIM}  (session store ${location.path} not audited: ${read.error} — see doctor)${RESET}`);
         continue;
       }
-      sessionFindings.push(...ca.auditSessionOverrides(read.entries, Boolean(poolId)));
+      sessionFindings.push(...ca.auditSessionOverrides(read.entries, Boolean(poolId), { directPooled }));
     }
   } catch {
     /* no agents dir, or dist not built — doctor reports install health */
@@ -296,6 +498,7 @@ async function update() {
     console.log("  ⏳ remember: the new version loads on the next gateway restart.");
   }
   await healWatchdogUnit();
+  await offerDirectSync();
   await offerCliSelfUpdate(uc);
   console.log(`\n${BOLD}  health check${RESET}`);
   const doc = spawnSync(process.execPath, [join(__dirname, "doctor.mjs")], { stdio: "inherit" });
@@ -304,6 +507,24 @@ async function update() {
     process.exit(doc.status ?? 1);
   }
   console.log(`\n  ✅ done — now on v${installedVersion() ?? "?"}`);
+}
+
+/**
+ * v1.9: when any account opts into the direct route, store any profile that
+ * is missing and bring the order into health order as part of the update —
+ * the same `direct sync` the operator can run on its own. Skipped silently
+ * when nothing is configured, so updates for CLI-only users are unchanged.
+ */
+async function offerDirectSync() {
+  const config = readOpenclawConfigSync();
+  const accounts = config?.plugins?.entries?.["multi-clawd"]?.config?.accounts ?? [];
+  if (!accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) return;
+  if (!(await askYes("\n  Sync direct-route (anthropic/*) profiles and order now?"))) {
+    console.log(`  ${DIM}Skipped — run \`multi-clawd direct sync\` when you're ready.${RESET}`);
+    return;
+  }
+  const r = spawnSync(process.execPath, [join(__dirname, "cli.mjs"), "direct", "sync", "--yes"], { stdio: "inherit" });
+  if (r.status !== 0) console.log("  ⚠ direct sync reported problems — see above (`multi-clawd direct` for status).");
 }
 
 /**
@@ -475,9 +696,17 @@ async function explain() {
       /* no sticky state */
     }
   }
+  // v1.9: the direct anthropic/* route, when any account opted in.
+  let direct;
+  const dctx = await loadDirect(config);
+  if (dctx) {
+    const status = await dctx.gather(dctx.agents[0]);
+    direct = status?.explain;
+    for (const e of status?.errors ?? []) console.log(`${DIM}(direct route: ${e})${RESET}`);
+  }
   console.log(`\n${BOLD}🦞 multi-clawd — your setup, in plain English${RESET}\n`);
   console.log(
-    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, nowMs: now }),
+    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, nowMs: now, direct }),
   );
   console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
 }
@@ -598,6 +827,9 @@ switch (cmd) {
     break;
   case "chain":
     await chain(rest);
+    break;
+  case "direct":
+    await direct(rest);
     break;
   case "doctor":
     runSibling("doctor.mjs", rest);
