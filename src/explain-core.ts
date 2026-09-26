@@ -241,7 +241,7 @@ export function renderDirectSection(direct: ExplainDirect, nowMs: number): strin
   for (const m of direct.members) {
     const bits = [m.source];
     if (m.stored === true) bits.push("stored in OpenClaw");
-    else if (m.stored === false) bits.push("NOT STORED — run `multi-clawd update` (or setup) to sync it");
+    else if (m.stored === false) bits.push("NOT STORED — run `multi-clawd direct sync`");
     if (m.cooldownUntil !== undefined && m.cooldownUntil > nowMs) {
       bits.push(
         `COOLING DOWN${m.cooldownReason ? ` (${m.cooldownReason})` : ""} for ${relativeUntil(m.cooldownUntil, nowMs)}`,

@@ -527,6 +527,14 @@ if (!pool) {
     "cli",
   );
   const poolId = pool.id ?? "clawd";
+  // v1.9: anthropic/* rungs are pooled when the direct route serves two accounts.
+  let directPooled = false;
+  try {
+    const dr = await importDist("direct-route.js", ["directRoutePools"], "cli");
+    directPooled = dr.directRoutePools(accounts, pluginConfig.directRoute);
+  } catch {
+    /* dist predates the direct route */
+  }
   // Session keys embed the operator's private channel id (e.g. a Telegram chat
   // id). Mask the id tail by default so doctor output is safe to paste into
   // issues/support threads; `--raw` (hoisted, shared with the login identities
@@ -536,7 +544,7 @@ if (!pool) {
     RAW ? surface : surface.replace(/^session (.+)$/, (_m, k) => `session ${maskSessionKey(k)}`);
 
   // ── case 1: config-level refs ──────────────────────────────────────────────
-  const findings = auditEffectiveChain(config, poolId);
+  const findings = auditEffectiveChain(config, poolId, { directPooled });
   const warns = findings.filter((f) => f.severity === "warn");
   const notes = findings.filter((f) => f.severity === "note");
   for (const f of warns) warn(`${f.surface}: ${f.ref} ${f.reason}`);
@@ -593,7 +601,7 @@ if (!pool) {
       if (read.skippedRows > 0) {
         warn(`${location.path}: ${read.skippedRows} session row(s) unparseable — those sessions were not audited`);
       }
-      const sessionFindings = auditSessionOverrides(read.entries, true);
+      const sessionFindings = auditSessionOverrides(read.entries, true, { directPooled });
       for (const f of sessionFindings) {
         warn(`${renderSurface(f.surface)}: ${f.ref} ${f.reason}`);
         sessionWarns++;
@@ -700,6 +708,107 @@ console.log("chain auth");
       else if (f.severity === "warn") warn(line);
       else note(line);
     }
+  }
+}
+
+
+// ── 8b. direct route — anthropic/* served by the pool's accounts (v1.9) ────
+//
+// Only when an account opts in with `direct`; otherwise this prints nothing,
+// so doctor output for CLI-only setups is unchanged. Everything is read
+// through OpenClaw's own CLI (auth list / order get / models status); token
+// files are shape-checked without ever printing their contents.
+if (accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) {
+  console.log("direct route (anthropic/*)");
+  try {
+    const dr = await importDist("direct-route.js", ["collectDirectMembers"], "cli");
+    const rep = await importDist("direct-report.js", ["gatherDirectStatus", "parseProbeResults", "probeArgs"], "cli");
+    const run = await importDist("openclaw-runner.js", ["createOpenclawRunner"], "cli");
+    const shim = await importDist("shim-core.js", ["parseStoredState"], "cli");
+    const hc = await importDist("hermes-core.js", ["parseClaudeSetupToken"], "cli");
+    const directRoute = pluginConfig.directRoute ?? {};
+    const agents = Array.isArray(directRoute.agents) && directRoute.agents.length > 0 ? directRoute.agents : ["main"];
+    const runner = run.createOpenclawRunner(directRoute.openclawCommand ?? "openclaw");
+    const { members } = dr.collectDirectMembers(accounts, pool?.accounts ?? []);
+    // Credential sources, checked locally: present, private, setup-token shaped.
+    for (const m of members) {
+      if (m.source.kind !== "file") continue;
+      const path = expandHome(m.source.path);
+      try {
+        const mode = statSync(path).mode & 0o777;
+        hc.parseClaudeSetupToken(readFileSync(path, "utf8"));
+        if (mode & 0o077) warn(`${m.accountId}: direct token file ${path} is mode ${mode.toString(8)} — chmod 600 it`);
+        else ok(`${m.accountId}: direct token file present, 600, setup-token shaped`);
+      } catch (err) {
+        bad(`${m.accountId}: direct token file ${path} unusable — ${String(err?.message ?? err).slice(0, 160)}`);
+      }
+    }
+    const readHealth = (id) => {
+      try {
+        return shim.parseStoredState(readFileSync(join(STATE_DIR, `${id}.json`), "utf8"));
+      } catch {
+        return undefined;
+      }
+    };
+    for (const agentId of agents) {
+      const status = await rep.gatherDirectStatus({
+        accounts,
+        poolAccounts: pool?.accounts ?? [],
+        agentId,
+        runner,
+        readHealth,
+        healthOptions: {
+          utilizationThreshold: pool?.utilizationThreshold,
+          staleAfterMs: pool?.staleAfterMs,
+          rotateOnOverage: pool?.rotateOnOverage,
+        },
+        configOrder: Array.isArray(config?.auth?.order?.anthropic) ? config.auth.order.anthropic : undefined,
+        sticky: readJson(join(STATE_DIR, "direct-order.sticky.json")),
+        minDwellMs: pool?.minDwellMs,
+        nowMs: Date.now(),
+      });
+      if (!status) continue;
+      for (const p of status.explain.problems) bad(`${p.accountId}: asked for the direct route but cannot join it — ${p.reason}`);
+      for (const e of status.errors) warn(`agent ${agentId}: direct-route check partly SKIPPED — ${e}`);
+      for (const m of status.explain.members) {
+        const v = status.verdicts.find((x) => x.accountId === m.accountId)?.verdict ?? "no_data";
+        if (m.stored === false) bad(`${m.accountId}: ${m.profileId} is NOT stored for agent ${agentId} — run \`multi-clawd direct sync\``);
+        else if (m.stored === true) ok(`${m.accountId}: ${m.profileId} stored for agent ${agentId} (health: ${v})`);
+        if (m.cooldownUntil && m.cooldownUntil > Date.now()) {
+          note(`${m.profileId} is cooling down (${m.cooldownReason ?? "cooldown"}) for ~${Math.ceil((m.cooldownUntil - Date.now()) / 60000)}m — OpenClaw skips it until then`);
+        }
+      }
+      if (directRoute.manageOrder === false) {
+        note(`agent ${agentId}: order management is off (directRoute.manageOrder: false)`);
+      } else if (status.pendingOrder) {
+        warn(
+          `agent ${agentId}: anthropic order is not in pool-health order yet — the gateway applies ${status.pendingOrder.join(" → ")} within a minute once this version is loaded (or run \`multi-clawd direct sync\`)`,
+        );
+      } else if (status.errors.length === 0) {
+        ok(`agent ${agentId}: anthropic order is in pool-health order (${(status.explain.order ?? []).join(" → ")})`);
+      }
+      const unmanaged = (status.explain.order ?? []).filter((id) => !status.explain.members.some((m) => m.profileId === id));
+      if (unmanaged.length > 0) {
+        note(`agent ${agentId}: ${unmanaged.join(", ")} not managed by multi-clawd — kept after the pool's accounts`);
+      }
+      // Live probe: one tiny call per stored managed profile.
+      if (args.has("--probe") && !args.has("--probe-pool")) {
+        const ids = status.explain.members.filter((m) => m.stored).map((m) => m.profileId);
+        if (ids.length > 0) {
+          const r = await runner(rep.probeArgs(agentId, ids), { timeoutMs: 180000 });
+          const results = r.code === 0 ? rep.parseProbeResults(r.stdout) : undefined;
+          if (!results) warn(`agent ${agentId}: direct-route probe returned nothing parseable (exit ${r.code})`);
+          for (const id of ids) {
+            const res = results?.find((x) => x.profileId === id);
+            if (!res) continue;
+            if (res.status === "ok") ok(`${id}: live probe answered via the direct API`);
+            else bad(`${id}: live probe ${res.status}${res.error ? ` — ${res.error}` : ""}`);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    warn(`direct-route check SKIPPED — ${String(err?.message ?? err).split("\n")[0].slice(0, 160)}`);
   }
 }
 

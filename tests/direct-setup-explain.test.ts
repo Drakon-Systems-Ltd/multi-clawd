@@ -57,7 +57,7 @@ describe("explain: direct route", () => {
     const text = renderDirectSection(direct, NOW).join("\n");
     expect(text).toContain("claw1 → anthropic:claw1");
     expect(text).toContain("stored in OpenClaw");
-    expect(text).toMatch(/NOT STORED — run `multi-clawd update`/);
+    expect(text).toMatch(/NOT STORED — run `multi-clawd direct sync`/);
     expect(text).toMatch(/COOLING DOWN \(rate_limit\) for ~5m/);
     expect(text).toContain("claw3: NOT on the direct route — needs its own setup-token");
     expect(text).toContain(

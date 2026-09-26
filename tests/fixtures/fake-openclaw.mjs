@@ -13,7 +13,10 @@ process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
   appendFileSync(join(dir, "calls.jsonl"), JSON.stringify({ args, input }) + "\n");
   const orderFile = join(dir, "order.json");
-  const profiles = (process.env.FAKE_OPENCLAW_PROFILES ?? "").split(",").filter(Boolean);
+  const profilesFile = join(dir, "profiles.json");
+  const profiles = existsSync(profilesFile)
+    ? JSON.parse(readFileSync(profilesFile, "utf8"))
+    : (process.env.FAKE_OPENCLAW_PROFILES ?? "").split(",").filter(Boolean);
   if (args[0] === "models" && args[1] === "auth" && args[2] === "list") {
     process.stdout.write(
       JSON.stringify({ provider: "anthropic", profiles: profiles.map((id) => ({ id, provider: "anthropic", type: "token" })) }),
@@ -33,6 +36,21 @@ process.stdin.on("end", () => {
       process.exit(1);
     }
     writeFileSync(orderFile, JSON.stringify(ids));
+    return;
+  }
+  if (args[2] === "paste-token") {
+    const id = args[args.indexOf("--profile-id") + 1];
+    if (!/^sk-ant-oat01-.{80,}$/.test(input.trim())) {
+      process.stderr.write("Error: invalid setup token\n");
+      process.exit(1);
+    }
+    if (!profiles.includes(id)) profiles.push(id);
+    writeFileSync(profilesFile, JSON.stringify(profiles));
+    process.stdout.write(`Saved ${id}\n`);
+    return;
+  }
+  if (args[0] === "models" && args[1] === "status") {
+    process.stdout.write(JSON.stringify({ auth: { unusableProfiles: [], probes: { results: profiles.map((id) => ({ provider: "anthropic", profileId: id, status: "ok" })) } } }));
     return;
   }
   process.stderr.write(`fake-openclaw: unsupported ${args.join(" ")}\n`);
