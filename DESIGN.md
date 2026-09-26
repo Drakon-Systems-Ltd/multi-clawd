@@ -498,6 +498,174 @@ dimension:
   session per rung. Quota exhaustion and credential failure stay separate
   alerts throughout, because the operator's action differs: wait vs log back in.
 
+## v1.9: one pool, both Claude transports
+
+OpenClaw reaches Claude two ways, and until v1.9 the pool governed only one:
+
+| Transport | Model refs | Credential | Who picks the account |
+| --- | --- | --- | --- |
+| Claude Code CLI | `<pool>/*`, `claw<N>/*` | the account's own login, injected by `prepareExecution` | this plugin (health-aware, proactive) |
+| Direct Anthropic API | `anthropic/*` | an `anthropic:*` **auth profile** (a `claude setup-token` stores as `type: "token"`) | OpenClaw's auth-profile order, with reactive cooldowns |
+
+A setup-token authenticates both transports, and both spend the same account
+windows (the five-hour and weekly limits the CLI reports in `rate_limit_event`).
+So the health file the shim already writes is also the health of that
+account's direct-route profile. v1.9 uses that one signal to steer both.
+
+### What OpenClaw does on its own (read from the 2026.9.6 dist)
+
+These facts decide the design. All were read from the installed dist; see
+"What was not measured" for the limits of that.
+
+- **Profiles and order are per agent, layered.** Credentials written for the
+  default agent land in the shared auth store. `openclaw models auth order set`
+  writes a per-agent *stored order*, which wins over config `auth.order`. With
+  no explicit order, every eligible profile is tried round-robin. With one, an
+  omitted profile is **never** tried. The order is re-read on every run, and
+  the CLI publishes the change to the running gateway itself (`models.authRefresh`),
+  so no restart is needed. `order set` refuses ids missing from the store.
+- **Reactive rotation covers token profiles.** HTTP 429 and subscription limit
+  text ("reached your … limit", "usage limit", weekly/daily limits) classify as
+  `rate_limit`. That cools the profile down, model-scoped, whatever its type.
+  The same turn then rotates to the next profile in order before it falls back
+  to another model. That rotation is **capped at one** when model fallbacks are
+  configured (a hardcoded constant, no knob). Before rotating, a profile gets
+  bounded same-profile retries.
+- **Sessions pin their profile.** An automatically chosen profile is pinned
+  per session and survives an order change. It moves when the pinned profile
+  cools down, is disabled, is removed, or disappears from the order.
+- **No plugin can choose the profile per run.** `ProviderPlugin.resolveAuthProfileId`
+  runs only for the plugin that owns the provider (for `anthropic`, the bundled
+  one). `before_model_resolve` returns model/provider overrides and nothing
+  about auth. `api.runtime.modelAuth` is read-only.
+
+### Decision: keep the order in health order, from a gateway-side timer
+
+The only lever a third-party plugin has is the *order* (plus the credentials
+themselves). The plugin therefore keeps each managed agent's `anthropic`
+stored order in pool-health order:
+
+- **Leader:** chosen by exactly the rule the CLI pool uses (`decideStickySelection`).
+  Home comes first. The pool rotates away on `near_limit`/`exhausted` while a
+  healthier account exists, waits `minDwellMs` before returning home, and health
+  beats stickiness. Both transports lean on the same account at the same moment.
+- **The rest, by rank:** usable, then near-limit, then exhausted, then rejected
+  login, with ties in pool order. **Every managed profile stays in the order.**
+  OpenClaw never tries an omitted profile, so dropping an exhausted account
+  would also remove the last resort.
+- **Profiles the plugin does not manage are kept.** They go after the managed
+  ones in their existing relative order. When no explicit order existed, every
+  other stored `anthropic` profile is appended, so the plugin never removes a
+  profile OpenClaw would previously have tried.
+
+**Where it runs, and why not the alternatives:**
+
+- *`prepareExecution`* fires only on CLI launches. A gateway serving only
+  `anthropic/*` turns would never re-order. Rejected.
+- *Plugin hooks* do not work here: no hook exposes profile selection, and
+  `before_model_resolve` has already been measured not to fire for gateway RPC
+  turns (see "The decision point" above). Rejected.
+- *The eviction watchdog* is optional on OpenClaw ≥ 2026.8.1 and missing on
+  many hosts. Rejected as the primary path.
+- **A gateway-side timer (chosen).** It is started by `register()` like the
+  login probe, and ticks every `directRoute.intervalMs` (default 60 s). Each
+  tick is cheap: it reads the health files and plans the managed part of the
+  order. Only when that part differs from what was last applied (or the last
+  assertion is over an hour old) does it read the live order
+  (`openclaw models auth order get --json`, `models auth list --json`). It
+  writes with `openclaw models auth order set` only if the full plan differs.
+  The write goes through the supported CLI rather than the in-process SDK
+  writer for one reason: the CLI publishes the change to the running gateway
+  itself. The SDK writer only refreshes the runtime snapshot if the plugin's
+  `openclaw/plugin-sdk` import shares a module instance with the gateway's
+  store, and that is not something to rely on unmeasured. A failed write backs
+  off for 10 minutes per agent and logs once.
+
+**What proactive ordering buys, stated precisely:**
+
+- New sessions, and sessions whose pinned profile cools down, start on the
+  healthiest account. A nearly-maxed account is deprioritised **before** it
+  errors.
+- A session already pinned to a near-limit account keeps it until the account
+  actually rate-limits. At that point OpenClaw's in-turn rotation moves it to
+  the next profile, which is now the healthiest, because the plugin put it
+  second. With fallbacks configured only one rotation happens per turn, so the
+  order is what makes that single rotation land on the right account.
+- The plugin does **not** mark profiles cooled down or blocked itself. The SDK
+  writers exist, but their semantics (`source` typed for other providers,
+  `blockedUntil` pinning an account out until a weekly reset) would let a stale
+  health file take a working account out of service. Reactive cooldowns stay
+  OpenClaw's.
+- Health still comes only from CLI turns (the shim). Direct-route traffic
+  spends the same windows but produces no telemetry the plugin can read. A
+  host that sends most Claude traffic over `anthropic/*` therefore gets
+  mostly `no_data` verdicts (treated as healthy), and relies on OpenClaw's
+  reactive rotation until CLI turns refresh the picture.
+
+### Credentials: supplied explicitly, stored through supported paths
+
+An account opts in with `direct`:
+
+- `direct: true` reuses the account's own setup-token (`oauthTokenRef` /
+  `oauthTokenFile`).
+- `direct: { tokenRef }` / `{ tokenFile }` supply a setup-token for the direct
+  route only. This is the only option for a `native` or `configDir` login.
+  Those logins are rotating single-use OAuth grants, and duplicating one
+  invalidates a copy on the next refresh (the same rule as the Hermes adapter).
+  **Nothing is ever read from Claude's own credential store.** The wizard tells
+  the operator to run `claude setup-token` signed in as that account.
+- `direct: { profileId }` with no token *adopts* a profile the operator already
+  stored (for example with `paste-token`). It is ordered, never re-written.
+
+`multi-clawd setup`, `update` and `direct sync` store missing profiles:
+
+- **Ref source → `openclaw secrets apply`** with a plan targeting
+  `auth-profiles.token.token` (`profiles.anthropic:<id>.token`). OpenClaw
+  stores a `tokenRef` and resolves it at runtime, so **the secret is never
+  copied** out of the secret manager. The plan sets `scrubEnv: false` and
+  `scrubAuthProfilesForProviderTargets: false`: the default scrub pass would
+  clear plaintext from *other* `anthropic` profiles the operator owns. It is
+  dry-run first, with `--allow-exec` only for exec refs, which is what lets
+  OpenClaw prove the ref resolves.
+- **File source → `openclaw models auth paste-token`**, with the token piped on
+  stdin (never argv, never printed). OpenClaw validates the setup-token shape
+  itself. The CLI also records the profile in config `auth.profiles`, and puts
+  it first in config `auth.order.anthropic` when one exists. The plugin's stored
+  order supersedes that at runtime, and the command output says so.
+- Existing profiles are left alone unless `--resync` is given, so re-running
+  `update` does not churn the store or the config.
+
+The profile id is stable (`anthropic:<account id>`, overridable). Re-runs
+rewrite one profile per account instead of accumulating copies.
+
+### Surfaces
+
+- `explain` gains a DIRECT ROUTE block: each account's profile, whether it is
+  actually stored, any cooldown or disable (`models status --json`
+  `unusableProfiles`), and the effective order with unmanaged ids marked.
+  `anthropic/*` chain rungs read as pooled once two accounts serve them.
+- `chain` stops flagging `anthropic/*` rungs as off-pool when the direct route
+  pools at least two accounts. `claude-cli/*` stays flagged.
+- `doctor` checks each opted-in account: credential source, profile stored,
+  order in health order, cooldowns. `--probe` adds one live call per managed
+  profile (`models status --probe --probe-profile`).
+
+### Compatibility
+
+No `direct` key on any account means no timer, no CLI calls, no reads of the
+auth store, and unchanged `explain`/`chain`/`doctor` output. The CLI backends
+and the pool backend are untouched by this feature. `directRoute.manageOrder:
+false` keeps the credential sync but leaves the order to the operator.
+
+### What was not measured
+
+A host with an installed gateway service refuses auth writes to any other
+state directory, so the write paths (`paste-token`, `secrets apply`,
+`order set`) could not be exercised against a scratch store without touching
+the live one. They are covered by unit tests against a scripted `openclaw`
+and by the dist reading above. The first live run of each is the rollout
+verification step, not an assumption.
+
 ## Config (user-facing)
 
 ```jsonc
