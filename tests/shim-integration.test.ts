@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cleanShimEnv } from "./shim-env";
 
 const ROOT = join(__dirname, "..");
 const SHIM = join(ROOT, "dist", "shim.js");
@@ -17,7 +18,7 @@ function runShim(opts: {
   authFail?: boolean | "not_logged_in";
 }) {
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...cleanShimEnv(),
     MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
     MULTI_CLAWD_STATE_FILE: opts.stateFile,
     MULTI_CLAWD_ACCOUNT_ID: "claw2",
@@ -112,7 +113,7 @@ describe("shim reactive model-limit capture (v0.3.6)", () => {
         input: "the prompt\n",
         encoding: "utf8",
         env: {
-          ...process.env,
+          ...cleanShimEnv(),
           MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
           MULTI_CLAWD_STATE_FILE: stateFile,
           MULTI_CLAWD_ACCOUNT_ID: "claw1",
@@ -138,7 +139,7 @@ describe("shim reactive model-limit capture (v0.3.6)", () => {
         input: "x\n",
         encoding: "utf8",
         env: {
-          ...process.env,
+          ...cleanShimEnv(),
           MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
           MULTI_CLAWD_STATE_FILE: stateFile,
           MULTI_CLAWD_ACCOUNT_ID: "claw1",
@@ -226,7 +227,7 @@ describe("shim runtime auth-failure capture (#8)", () => {
         input: "x\n",
         encoding: "utf8",
         env: {
-          ...process.env,
+          ...cleanShimEnv(),
           MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
           MULTI_CLAWD_STATE_FILE: stateFile,
           MULTI_CLAWD_ACCOUNT_ID: "claw1",

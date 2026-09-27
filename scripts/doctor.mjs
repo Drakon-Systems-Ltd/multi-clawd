@@ -288,13 +288,17 @@ const { summarizeWindowUsage, classifyAccountHealth } = await importDist("health
   "summarizeWindowUsage",
   "classifyAccountHealth",
 ]);
+// "cli", like the chain audits: resolving WHICH login backs an account is
+// doctor's own diagnostic, not a description of the running plugin's
+// behaviour. Asking the installed copy meant a fix to the resolver could not
+// take effect until the plugin itself was reinstalled — so the CLI reported a
+// bug it had already been taught not to make.
 const { resolveAccountIdentity, describeIdentity, findDuplicateLogins, maskEmail } =
-  await importDist("account-identity.js", [
-    "resolveAccountIdentity",
-    "describeIdentity",
-    "findDuplicateLogins",
-    "maskEmail",
-  ]);
+  await importDist(
+    "account-identity.js",
+    ["resolveAccountIdentity", "describeIdentity", "findDuplicateLogins", "maskEmail"],
+    "cli",
+  );
 const { decideStickySelection } = await importDist("sticky.js", ["decideStickySelection"]);
 const io = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
@@ -322,6 +326,7 @@ const identityIo = {
   defaultConfigDir: process.env.CLAUDE_CONFIG_DIR
     ? expandHome(process.env.CLAUDE_CONFIG_DIR)
     : join(HOME, ".claude"),
+  homeDir: HOME,
 };
 const accounts = pluginConfig.accounts ?? [];
 const identities = [];
@@ -334,7 +339,7 @@ for (const account of accounts) {
   const identity = resolveAccountIdentity(account, identityIo);
   identities.push(identity);
   const source = account.native
-    ? `native login, ${identityIo.defaultConfigDir}`
+    ? `native login, ${identity.source ?? identityIo.defaultConfigDir}`
     : account.configDir
       ? `config dir ${account.configDir}`
       : account.oauthTokenFile

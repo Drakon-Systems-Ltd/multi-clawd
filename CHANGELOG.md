@@ -4,6 +4,44 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **A native account's identity was read from the wrong file.** With
+  `CLAUDE_CONFIG_DIR` set, the CLI keeps config and state together
+  (`<dir>/.claude.json`); with it unset, state lives in `~/.claude/` but the
+  config is `~/.claude.json` — at the home **root**. `doctor` only ever read
+  `<defaultConfigDir>/.claude.json`, so on one box it reported a login from a
+  two-month-stale copy (right answer, wrong provenance) and on another that file
+  had no `oauthAccount` at all and a perfectly healthy account came back as
+  `cannot tell which Claude login this is`. Both candidates are now read and the
+  freshest `profileFetchedAt` wins; an explicit `configDir` account still reads
+  only its own dir, because falling back to the home root would report the
+  DEFAULT login under that account's name.
+- **`session override present (source=default) but model field missing` was
+  never drift.** OpenClaw sets `modelOverrideSource: "default"` when a session
+  selects the default chain, and stores it with the source field alone —
+  `preserveNonAutoModelOverride` returns early for `"default"` without copying
+  `providerOverride`/`modelOverride`. Reading that as schema drift produced one
+  warning per session about the chain case 1 already audits (six on one box, two
+  on another). Model-less `default` entries are now skipped; a `default` entry
+  that *does* name a model is still audited, and a deliberate pin with a missing
+  model still reports drift.
+- **Shim tests inherited the live pool's environment.** Every harness spread
+  `...process.env`, which is harmless on a developer box and wrong on one where
+  the suite is run *by* a multi-clawd-managed Claude session: those processes
+  carry `MULTI_CLAWD_SESSION_DIRS`, `MULTI_CLAWD_RETRY_ACCOUNTS` and
+  `CLAUDE_CONFIG_DIR`, so the child under test was pointed at the operator's
+  real config dirs — `tests/session-handover.test.ts` failed because the shim
+  searched the live `~/.claude` and copied a genuine session transcript into a
+  temp dir. `tests/shim-env.ts` strips every steering variable, with a test that
+  fails if the stripping is removed.
+- **`doctor` asked the installed plugin whether its own diagnostics were
+  right.** Identity resolution is doctor's own logic, like the chain audits, so
+  it now runs from the CLI's copy. Previously a fix to the resolver could not
+  take effect until the plugin was reinstalled — the CLI kept reporting a bug it
+  had already been taught not to make.
+
 ## [1.9.3] - 2026-09-27
 
 ### Reverted

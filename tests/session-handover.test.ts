@@ -23,6 +23,7 @@ import {
   resumeSessionId,
   SESSION_DIRS_ENV,
 } from "../src/session-handover";
+import { cleanShimEnv } from "./shim-env";
 
 const SID = "e45941b9-adb9-4d98-9efc-a7be24d9ca27";
 const SLUG = "-home-ubuntu-clawd";
@@ -183,7 +184,7 @@ describe("shim resume handover (end-to-end)", () => {
       input: "next turn\n",
       encoding: "utf8",
       env: {
-        ...process.env,
+        ...cleanShimEnv(),
         MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
         MULTI_CLAWD_STATE_FILE: join(root, "state", "claw1.json"),
         MULTI_CLAWD_ACCOUNT_ID: "claw1",

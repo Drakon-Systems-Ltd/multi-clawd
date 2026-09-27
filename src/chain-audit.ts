@@ -478,13 +478,27 @@ export function auditSessionOverrides(
     //    (the standing surfaces) are still audited.
     if (/:subagent:/.test(sessionKey)) continue;
 
-    // 1. SOURCE GATE (first, mandatory). Consider ONLY deliberate overrides.
-    //    "user" is the known manual /model literal, but we test `!== "auto"`
-    //    (not `=== "user"`) so any future deliberate source — "api"/"operator"/…
-    //    — is still caught; auto-fallback is the ONLY thing to exclude. Absent
-    //    source = a config-level/cron/probe entry, never a session pin.
+    // 1. SOURCE GATE (first, mandatory). Consider ONLY deliberate overrides
+    //    that name a model. Everything excluded here is excluded because
+    //    upstream says it is not a pin:
+    //      - "auto"    → auto-fallback, re-resolved per run.
+    //      - "default" → the session selected THE DEFAULT CHAIN (set when
+    //        `selection.isDefault`), and OpenClaw stores it with the source
+    //        field alone: `preserveNonAutoModelOverride` returns early for
+    //        "default" without copying providerOverride/modelOverride. So a
+    //        model-less "default" entry is the documented shape, not drift —
+    //        treating it as drift made doctor warn once per session about the
+    //        chain case 1 already audits (found on two boxes, 27 Sep 2026).
+    //    Any other deliberate source — "user", or a future "api"/"operator" —
+    //    still passes, so a real pin cannot slip through. Absent source = a
+    //    config-level/cron/probe entry, never a session pin.
     const source = entry.modelOverrideSource;
     if (typeof source !== "string" || source === "auto") continue;
+    // A "default" entry with NO model is the documented shape and is skipped;
+    // one that names a model is not what upstream writes, so it is audited
+    // normally rather than trusted — the point of the gate is to stop crying
+    // wolf, not to create a hole a real pin could hide in.
+    if (source === "default" && !entry.modelOverride) continue;
 
     // 2. PROVIDER + MODEL. `providerOverride` is the manual pin; fall back to
     //    the resolved `modelProvider`. Passing the source gate with EITHER the

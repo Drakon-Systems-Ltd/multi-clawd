@@ -35,8 +35,10 @@ export interface IdentityIo {
   readFile: (path: string) => string;
   /** Expand a possibly `~`-relative config dir to an absolute path. */
   expandHome: (path: string) => string;
-  /** The config dir a child with no CLAUDE_CONFIG_DIR would use. */
+  /** The config dir a child with no CLAUDE_CONFIG_DIR would use (state, not config). */
   defaultConfigDir: string;
+  /** Home directory: where a CLAUDE_CONFIG_DIR-less CLI keeps its real `.claude.json`. */
+  homeDir: string;
 }
 
 export interface AccountIdentity {
@@ -52,27 +54,40 @@ export interface AccountIdentity {
   source?: string;
   /** Why an identity could not be established. */
   reason?: string;
+  /** When the CLI last refreshed this profile; picks the freshest of several files. */
+  profileFetchedAt?: number;
 }
 
 /**
- * The `.claude.json` an account's child process would authenticate against.
+ * The `.claude.json` files an account's child process might authenticate
+ * against, best candidate first.
+ *
+ * WHERE the CLI keeps that file depends on CLAUDE_CONFIG_DIR, and getting this
+ * wrong is silent: with the variable SET, config and state both live in that
+ * dir (`<dir>/.claude.json`); with it UNSET, state lives in `~/.claude/` but
+ * the config is `~/.claude.json` — at the home ROOT. Reading only
+ * `<defaultConfigDir>/.claude.json` therefore asked the wrong file for every
+ * native account. Measured 2026-09-27 on two boxes: on one, that path held a
+ * two-month-stale copy (right answer, wrong provenance); on the other it had
+ * no `oauthAccount` at all and the account reported as unidentifiable while
+ * being perfectly healthy. `~/.claude.json` was live and correct on both.
  *
  * A token-sourced account (oauthTokenFile / oauthTokenRef) has no such file:
  * its identity lives inside the token, and the only way to learn it is to
- * spend a turn. That is an honest `undefined`, not a failure.
+ * spend a turn. That is an honest empty list, not a failure.
  */
-export function identityFilePath(
-  account: IdentityAccountShape,
-  io: IdentityIo,
-): string | undefined {
-  const dir =
-    !account.native && account.configDir ? io.expandHome(account.configDir) : io.defaultConfigDir;
-  if (!dir) return undefined;
-  // A token overrides the config dir's own login for the child, so the file
-  // would describe an identity that is NOT the one being used. Better to
+export function identityFilePaths(account: IdentityAccountShape, io: IdentityIo): string[] {
+  // A token overrides the config dir's own login for the child, so any file
+  // here would describe an identity that is NOT the one being used. Better to
   // report unknown than to report the wrong login confidently.
-  if (account.oauthTokenFile || account.oauthTokenRef) return undefined;
-  return `${dir.replace(/\/+$/, "")}/.claude.json`;
+  if (account.oauthTokenFile || account.oauthTokenRef) return [];
+  const file = (dir: string) => `${dir.replace(/\/+$/, "")}/.claude.json`;
+  // An explicit config dir is authoritative and self-contained: never fall back
+  // to the home-root file, which belongs to the DEFAULT login and would report
+  // another account's identity under this account's name.
+  if (!account.native && account.configDir) return [file(io.expandHome(account.configDir))];
+  const candidates = [io.homeDir ? file(io.homeDir) : undefined, io.defaultConfigDir ? file(io.defaultConfigDir) : undefined];
+  return [...new Set(candidates.filter((c): c is string => Boolean(c)))];
 }
 
 /**
@@ -116,6 +131,8 @@ export function parseIdentityFile(text: string): Omit<AccountIdentity, "accountI
     email: str("emailAddress"),
     organizationName: str("organizationName"),
     plan: formatPlan(account),
+    profileFetchedAt:
+      typeof account.profileFetchedAt === "number" ? account.profileFetchedAt : undefined,
   };
   // A record with neither a uuid nor an email identifies nothing.
   if (!identity.accountUuid && !identity.email) return undefined;
@@ -126,8 +143,8 @@ export function resolveAccountIdentity(
   account: IdentityAccountShape,
   io: IdentityIo,
 ): AccountIdentity {
-  const path = identityFilePath(account, io);
-  if (!path) {
+  const paths = identityFilePaths(account, io);
+  if (paths.length === 0) {
     return {
       accountId: account.id,
       status: "unknown",
@@ -137,27 +154,42 @@ export function resolveAccountIdentity(
           : "no config dir to read",
     };
   }
-  let text: string;
-  try {
-    text = io.readFile(path);
-  } catch {
-    return {
+  let best: AccountIdentity | undefined;
+  const problems: string[] = [];
+  for (const path of paths) {
+    let text: string;
+    try {
+      text = io.readFile(path);
+    } catch {
+      problems.push(`no readable ${path}`);
+      continue;
+    }
+    const identity = parseIdentityFile(text);
+    if (!identity) {
+      problems.push(`${path} carries no oauthAccount record`);
+      continue;
+    }
+    const candidate: AccountIdentity = {
       accountId: account.id,
-      status: "unknown",
-      reason: `no readable ${path} — this account has never completed a login here`,
+      status: "resolved",
       source: path,
+      ...identity,
     };
+    // Several files can each hold a real record — one of them stale. Prefer the
+    // one the CLI refreshed most recently, so the reported login is the one in
+    // use rather than whichever path was checked first.
+    if (!best || (candidate.profileFetchedAt ?? 0) > (best.profileFetchedAt ?? 0)) best = candidate;
   }
-  const identity = parseIdentityFile(text);
-  if (!identity) {
-    return {
-      accountId: account.id,
-      status: "unknown",
-      reason: `${path} carries no oauthAccount record`,
-      source: path,
-    };
-  }
-  return { accountId: account.id, status: "resolved", source: path, ...identity };
+  if (best) return best;
+  return {
+    accountId: account.id,
+    status: "unknown",
+    reason:
+      problems.length === 1
+        ? `${problems[0]} — this account has never completed a login here`
+        : `${problems.join("; ")} — this account has never completed a login here`,
+    source: paths[0],
+  };
 }
 
 /**

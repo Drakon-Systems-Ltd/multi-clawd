@@ -3,7 +3,7 @@ import {
   describeIdentity,
   findDuplicateLogins,
   formatPlan,
-  identityFilePath,
+  identityFilePaths,
   maskEmail,
   parseIdentityFile,
   resolveAccountIdentity,
@@ -11,6 +11,7 @@ import {
 } from "../src/account-identity";
 
 const DEFAULT_DIR = "/home/u/.claude";
+const HOME = "/home/u";
 
 function io(files: Record<string, string>): IdentityIo {
   return {
@@ -21,6 +22,7 @@ function io(files: Record<string, string>): IdentityIo {
     },
     expandHome: (p) => (p.startsWith("~/") ? `/home/u/${p.slice(2)}` : p),
     defaultConfigDir: DEFAULT_DIR,
+    homeDir: HOME,
   };
 }
 
@@ -38,24 +40,32 @@ function claudeJson(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-describe("identityFilePath", () => {
-  test("native accounts read the default config dir", () => {
-    expect(identityFilePath({ id: "claw1", native: true }, io({}))).toBe(`${DEFAULT_DIR}/.claude.json`);
+describe("identityFilePaths", () => {
+  test("a native account checks the home-root config FIRST, then the state dir", () => {
+    // With CLAUDE_CONFIG_DIR unset the CLI writes `~/.claude.json`; `~/.claude/`
+    // is the state dir and its `.claude.json` is a leftover that may be stale or
+    // carry no oauthAccount at all (measured on two boxes, 27 Sep 2026).
+    expect(identityFilePaths({ id: "claw1", native: true }, io({}))).toEqual([
+      `${HOME}/.claude.json`,
+      `${DEFAULT_DIR}/.claude.json`,
+    ]);
   });
 
-  test("configDir accounts read their own dir, with ~ expanded", () => {
-    expect(identityFilePath({ id: "claw2", configDir: "~/.claude-second" }, io({}))).toBe(
+  test("configDir accounts read their own dir only, with ~ expanded", () => {
+    // Never the home-root file: that is the DEFAULT login, and reporting it here
+    // would name another account's identity under this account's id.
+    expect(identityFilePaths({ id: "claw2", configDir: "~/.claude-second" }, io({}))).toEqual([
       "/home/u/.claude-second/.claude.json",
-    );
+    ]);
   });
 
   test("token-sourced accounts have no on-disk identity", () => {
     // The token, not the config dir, decides who the child authenticates as —
     // reading the dir would report a login that is not the one being used.
     expect(
-      identityFilePath({ id: "claw3", configDir: "~/.claude-second", oauthTokenFile: "~/t" }, io({})),
-    ).toBeUndefined();
-    expect(identityFilePath({ id: "claw4", oauthTokenRef: { provider: "x" } }, io({}))).toBeUndefined();
+      identityFilePaths({ id: "claw3", configDir: "~/.claude-second", oauthTokenFile: "~/t" }, io({})),
+    ).toEqual([]);
+    expect(identityFilePaths({ id: "claw4", oauthTokenRef: { provider: "x" } }, io({}))).toEqual([]);
   });
 });
 
@@ -89,6 +99,52 @@ describe("formatPlan", () => {
 });
 
 describe("resolveAccountIdentity", () => {
+  test("a native account resolves from the home-root config", () => {
+    const identity = resolveAccountIdentity(
+      { id: "claw1", native: true },
+      io({ [`${HOME}/.claude.json`]: claudeJson({ accountUuid: "uuid-home" }) }),
+    );
+    expect(identity.status).toBe("resolved");
+    expect(identity.source).toBe(`${HOME}/.claude.json`);
+  });
+
+  test("the freshest record wins when both files hold one", () => {
+    // The state-dir copy outlived its usefulness on a real box by two months;
+    // preferring the newest profileFetchedAt reports the login in use rather
+    // than whichever path was read first.
+    const identity = resolveAccountIdentity(
+      { id: "claw1", native: true },
+      io({
+        [`${HOME}/.claude.json`]: claudeJson({
+          accountUuid: "uuid-fresh",
+          emailAddress: "fresh@example.com",
+          profileFetchedAt: 2000,
+        }),
+        [`${DEFAULT_DIR}/.claude.json`]: claudeJson({
+          accountUuid: "uuid-stale",
+          emailAddress: "stale@example.com",
+          profileFetchedAt: 1000,
+        }),
+      }),
+    );
+    expect(identity.accountUuid).toBe("uuid-fresh");
+    expect(identity.source).toBe(`${HOME}/.claude.json`);
+  });
+
+  test("a state-dir file with no oauthAccount falls through to the live one", () => {
+    // Exactly the Mac shape: ~/.claude/.claude.json exists and has no
+    // oauthAccount, which used to be reported as "cannot tell which login".
+    const identity = resolveAccountIdentity(
+      { id: "claw1", native: true },
+      io({
+        [`${DEFAULT_DIR}/.claude.json`]: JSON.stringify({ userID: "x", firstStartTime: "2026" }),
+        [`${HOME}/.claude.json`]: claudeJson({ accountUuid: "uuid-home" }),
+      }),
+    );
+    expect(identity.status).toBe("resolved");
+    expect(identity.accountUuid).toBe("uuid-home");
+  });
+
   test("resolves a configDir account", () => {
     const identity = resolveAccountIdentity(
       { id: "claw2", configDir: "~/.claude-second" },
@@ -122,7 +178,7 @@ describe("maskEmail / describeIdentity", () => {
   test("default display is masked; raw opts in to the full record", () => {
     const identity = resolveAccountIdentity(
       { id: "claw1", native: true },
-      io({ [`${DEFAULT_DIR}/.claude.json`]: claudeJson() }),
+      io({ [`${HOME}/.claude.json`]: claudeJson() }),
     );
     expect(describeIdentity(identity)).toBe("s…e@example.com · Max 20x");
     expect(describeIdentity(identity, { raw: true })).toContain("someone@example.com");

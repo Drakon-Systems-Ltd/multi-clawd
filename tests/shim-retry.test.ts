@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY_ROSTER_ENV } from "../src/retry-plan";
+import { cleanShimEnv } from "./shim-env";
 
 const ROOT = join(__dirname, "..");
 const SHIM = join(ROOT, "dist", "shim.js");
@@ -27,7 +28,7 @@ function scenario(opts: {
   const claw1State = join(dir, "claw1.json");
   const claw2State = join(dir, "claw2.json");
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...cleanShimEnv(),
     MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE]),
     MULTI_CLAWD_STATE_FILE: claw1State,
     MULTI_CLAWD_ACCOUNT_ID: "claw1",

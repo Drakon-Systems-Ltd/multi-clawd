@@ -522,3 +522,48 @@ describe("v1.9: a pooled direct route is not a bypass", () => {
     expect(auditSessionOverrides(sessions, true, { directPooled: true })).toEqual([]);
   });
 });
+
+describe("session source=default (2026.9.x)", () => {
+  // Upstream sets modelOverrideSource="default" when the session selects THE
+  // DEFAULT CHAIN, and stores it with the source field alone
+  // (`preserveNonAutoModelOverride` returns early without copying the model).
+  // Reading that as schema drift made doctor warn once per session about the
+  // chain case 1 already audits — six warnings on one box, two on another.
+  test("a model-less default entry is not a finding", () => {
+    expect(
+      auditSessionOverrides(
+        {
+          "agent:main:main": { modelOverrideSource: "default", modelProvider: "clawd" },
+          "agent:main:direct:michael": { modelOverrideSource: "default", modelProvider: "openai" },
+        },
+        true,
+      ),
+    ).toEqual([]);
+  });
+
+  test("a default entry that DOES name a model is still audited", () => {
+    // Not the shape upstream writes, so it is not trusted: a real off-pool pin
+    // must not be able to hide behind the source value.
+    const findings = auditSessionOverrides(
+      {
+        "agent:main:main": {
+          modelOverrideSource: "default",
+          providerOverride: "anthropic",
+          modelOverride: "claude-opus-5",
+        },
+      },
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].ref).toBe("anthropic/claude-opus-5");
+  });
+
+  test("the drift detector stays armed for a deliberate pin with no model", () => {
+    const findings = auditSessionOverrides(
+      { "agent:main:main": { modelOverrideSource: "user", providerOverride: "anthropic" } },
+      true,
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0].reason).toContain("schema drift");
+  });
+});
