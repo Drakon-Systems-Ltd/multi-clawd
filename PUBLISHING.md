@@ -28,6 +28,18 @@ distribution is automated separately: cutting a GitHub Release fires
 `.github/workflows/clawhub-publish.yml`, which publishes the plugin package to
 ClawHub with the release notes as changelog.
 
+## Trusted Publishing (from 27 Sep 2026) — the normal path
+
+Publishing now runs in GitHub Actions via **npm Trusted Publishing (OIDC)**: no stored token.
+`.github/workflows/npm-publish.yml` runs when a GitHub Release is published (tag `vX.Y.Z`),
+checks the tag matches `package.json`, builds, tests, and runs `npm publish --provenance`.
+npmjs.com trusts exactly `Drakon-Systems-Ltd/multi-clawd` + `npm-publish.yml`
+(package Settings → Trusted Publisher). Steps 4–5 below (whoami / `npm publish` by hand) are the
+**emergency-only** path; the account's 2FA-bypass tokens lose direct publishing around Jan 2027.
+Release = bump + sync + CHANGELOG + commit + tag + `gh release create` → the workflow publishes;
+verify with `npm view @drakon-systems/multi-clawd version`. ClawHub still publishes from the
+release event via `clawhub-publish.yml`.
+
 ## ⚠ Do not trust the `npm version` hook
 
 The `version` lifecycle script — which syncs `openclaw.plugin.json` and the
