@@ -4,6 +4,18 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **Pool resume loop after a rotation.** A Claude session written by one pool
+  member and later resumed on another failed with "No conversation found with
+  session ID" on every turn — OpenClaw keeps one binding per backend id and
+  never replaced it — so each turn lost ~10 s and moved off the home account.
+  The shim now copies the newest transcript into the launched account's config
+  dir before resuming (`MULTI_CLAWD_SESSION_DIRS`, paths only). See DESIGN.md
+  "Resume handover".
+
 ## [1.9.0] - 2026-09-26
 
 A minor release: one new opt-in feature, and no behaviour change without

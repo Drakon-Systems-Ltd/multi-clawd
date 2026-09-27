@@ -257,3 +257,14 @@ describe("credential-health failover wiring (#8)", () => {
     expect(exhausted.reason).not.toMatch(/re-authenticate/i);
   });
 });
+
+describe("resume handover wiring", () => {
+  test("every pooled launch tells the shim where each member keeps its sessions", async () => {
+    // The shim cannot find a session another member wrote unless the pool
+    // names that member's config dir; drop this and the 22–27 Sep
+    // session_expired loop comes back with every unit test still green.
+    const { prepare } = registerPool();
+    const { env } = await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
+    expect(JSON.parse(env.MULTI_CLAWD_SESSION_DIRS)).toEqual(["/tmp/claw1-login", "/tmp/claw2-login"]);
+  });
+});

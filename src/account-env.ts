@@ -98,3 +98,14 @@ export function validateAccountTokenSources(account: AccountEnvShape): string[] 
     `account "${account.id}" declares ${sources.join(" + ")} — token sources are mutually exclusive; precedence applied is ${sources.includes("native") ? "native" : "oauthTokenFile"} first. Remove the extras.`,
   ];
 }
+
+/**
+ * The Claude config dir an account's child actually runs in — where its
+ * sessions live. Native accounts and token accounts without a configDir both
+ * run in the CLI's default dir (the pool clears any inherited
+ * CLAUDE_CONFIG_DIR), so they share it.
+ */
+export function accountConfigDir(account: AccountEnvShape): string {
+  if (!account.native && account.configDir) return expandHomePath(account.configDir);
+  return resolve(homedir(), ".claude");
+}
