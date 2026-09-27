@@ -4,6 +4,25 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **Fresh CLI sessions started with no history (#23).** On every turn OpenClaw
+  logged `cli session history refused across auth boundary:
+  reason=auth-unknown` for `claw1/*`, `claw2/*` and `clawd/*`: core derives
+  the owner of a session's CLI history from an auth profile in its own store,
+  and this plugin's accounts are Claude logins, not OpenClaw profiles, so
+  there was none. Whenever a `--resume` failed, the new Claude session began
+  without the conversation. Each backend now declares `defaultAuthProfileId`
+  and, on a full registration, stores an identity-only OAuth profile
+  (`<id>:multi-clawd-identity`: a name, no token) that core hashes into the
+  history boundary and never uses as a login. Account selection is untouched;
+  the identity is per backend id, so a pool rotation keeps its session. One
+  `cli session reset … reason=auth-profile` per existing session is expected
+  right after upgrading. Opt out with `"historyIdentity": false`. See
+  DESIGN.md "CLI history identity".
+
 ## [1.9.1] - 2026-09-27
 
 ### Fixed

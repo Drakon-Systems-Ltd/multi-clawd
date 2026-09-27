@@ -231,6 +231,97 @@ absolute path. The handover is best-effort: any failure leaves the launch as
 it was before, so the worst case is the old behaviour. The in-turn retry
 (#19) stays disarmed for `--resume` launches.
 
+### CLI history identity (#23)
+
+Symptom: every pooled turn logged `cli session history refused across auth
+boundary: reason=auth-unknown`, and whenever a `--resume` failed the fresh
+Claude session started with no prior context.
+
+What core does (read from the 2026.9.6 dist, `prepare.runtime-*.mjs`,
+`prepareCliRunContextWithinReadFence`): before each CLI run it resolves an
+`authCredential` from ITS OWN auth-profile store — `params.authProfileId`,
+else the backend's `defaultAuthProfileId`, else the first profile in
+`resolveAuthProfileOrder` for the run's provider — and passes it to
+`prepareCliHistoryBoundary(params, { credential })`. That function derives the
+history OWNER only from an `oauth` credential with an `accountId`/`email` (or a
+static `api_key`/`token`), hashes it into a boundary fingerprint and stores it
+on the session. No owner → no boundary → `rawTranscriptReseedReason` is
+`"auth-unknown"` → `loadCliSessionPromptContext` refuses the reseed. Nothing a
+backend RETURNS reaches this: core consumes only `env`, `clearEnv`,
+`beforeExecution`, `cleanup`, `execute`, `secretInput` and the two enforcement
+acknowledgements from `prepareExecution`'s result. The credential is only
+passed INTO `prepareExecution` for backends with a bundled auth policy.
+
+Our accounts are Claude Code logins in their own config dirs, not OpenClaw
+auth profiles, so the credential was always undefined for `claw1/*`, `claw2/*`
+and `clawd/*`.
+
+Seam chosen — `CliBackendPlugin.defaultAuthProfileId` plus an identity-only
+profile in core's store:
+
+- Every backend sets `defaultAuthProfileId: "<id>:multi-clawd-identity"`. Core
+  looks that id up directly (`authStore.profiles[id]`), with NO eligibility
+  filter — which matters, because an identity-only profile is not "eligible"
+  (see below) and auto-selection would skip it.
+- On a full registration the plugin stores, through
+  `openclaw/plugin-sdk/provider-auth` (`ensureAuthProfileStore` to read,
+  `upsertAuthProfileWithLock` to write), one OAuth profile per backend id:
+  `{ type: "oauth", provider: <id>, accountId: "multi-clawd:<id>", access: "",
+  refresh: "", expires: 1 }` in the SHARED store (no agent dir), which core
+  merges into every agent's view. Blank token fields are dropped on load; the
+  name remains. Idempotent — a profile already carrying the identity is left
+  alone, so a config rebuild costs one read.
+- Core then: hashes `["oauth", provider, accountId, …]` into the history
+  boundary; adds `profile:oauth-identity:<hash>` to the CLI auth epoch (stable,
+  independent of the profile id); passes `authProfileId` into
+  `prepareExecution`, which the pool ignores. It never materializes, refreshes
+  or uses the credential: `resolveBundledCliBackendAuthPolicy` knows only
+  `claude-cli` and `google-gemini-cli`, and without a policy
+  `shouldResolveAuthProfileForExecution` is false. `hasUsableOAuthCredential`
+  is false and `evaluateStoredCredentialEligibility` says `missing_credential`
+  — which is the truth, and is also how `models status` will describe it.
+
+Account selection is unchanged: `prepareExecution` still picks the member and
+its login env; the identity is metadata core reads before that choice.
+
+Why per BACKEND ID and not per pool member (the obvious "two accounts, two
+owners" shape):
+
+- Core resolves the profile BEFORE `prepareExecution` runs, so a
+  member-derived identity would always describe the PREVIOUS turn's choice.
+- Core keys the stored CLI session binding on `authProfileId` + auth epoch
+  (`resolveCliSessionReuse`): a changed profile invalidates the session with
+  `reason=auth-profile`, and `loadCliSessionPromptContext` refuses the reseed
+  for that reason too. Every rotation would therefore lose the Claude session
+  AND its history — undoing the resume handover above.
+- The pool already treats its members' transcripts as one operator's
+  conversation (the handover copies them between config dirs). One owner per
+  pool is that same trust boundary, stated to core.
+
+Alternatives rejected:
+
+- **Return an identity from `prepareExecution`** — no such channel exists in
+  the 2026.9.6 dist or upstream `main`; see the consumed-fields list above.
+- **Rely on auto-selection** (`autoSelectAuthProfile`/`authEpochMode`) — the
+  order resolver filters by eligibility and an identity-only profile is
+  `missing_credential`; it would never be picked.
+- **A `token`-type profile** — eligible and stable, but it claims a credential
+  that does not exist and status surfaces would show a live token for the
+  provider. Core's own comment wants "a named OAuth account", which this is.
+- **Writing the store through the `openclaw` CLI** (the v1.9 route) — no CLI
+  command writes an OAuth profile without a login flow; `paste-token` writes
+  `token`. The in-process SDK writer publishes the runtime snapshot itself,
+  and the plugin's `openclaw/plugin-sdk/*` imports are aliased by the loader
+  to the running core.
+
+Expected one-off after upgrading: existing sessions carry a binding with no
+`authProfileId`, so their first turn logs `cli session reset: provider=<id>
+reason=auth-profile` and starts a fresh Claude session (reseed refused that
+once, exactly as every turn was before); from then on the boundary is `known`
+and the refusal line is gone. Not measured live before merge: the shared-store
+merge into non-default agents and the snapshot publication were read from the
+dist, not observed.
+
 ### Native accounts
 
 `"native": true` pools the machine's main login without copying credentials.

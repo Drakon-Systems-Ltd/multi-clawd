@@ -117,6 +117,17 @@ describe("current OpenClaw plugin SDK contract", () => {
     expect(ids).toEqual(expect.arrayContaining([expect.stringMatching(/^claude-/)]));
   });
 
+  test("the provider-auth SDK exposes the store writers the history identity (#23) relies on", async () => {
+    // Read-only contract check: names and types only, no store is opened.
+    const sdk = (await import("openclaw/plugin-sdk/provider-auth")) as Record<string, unknown>;
+    expect(typeof sdk.ensureAuthProfileStore).toBe("function");
+    expect(typeof sdk.upsertAuthProfileWithLock).toBe("function");
+    // And the backend contract carries the field core reads the identity from.
+    expect(buildBackend({ id: "claw1", native: true }).defaultAuthProfileId).toBe(
+      "claw1:multi-clawd-identity",
+    );
+  });
+
   test("the plugin avoids 2.0 private-local and deprecated SDK subpaths", () => {
     const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(
