@@ -4,6 +4,18 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.9.5] - 2026-09-27
+
+### Changed
+
+- **Releases are now published by GitHub Actions through npm Trusted Publishing
+  (OIDC).** No stored npm token anywhere: publishing a GitHub Release for a
+  `vX.Y.Z` tag runs `.github/workflows/npm-publish.yml`, which checks the tag
+  matches `package.json`, builds, tests and publishes with provenance. This
+  release is the first on that path; it carries no code change over 1.9.4.
+  PUBLISHING.md documents the new normal path and keeps the manual publish as
+  emergency-only.
+
 ## [1.9.4] - 2026-09-27
 
 ### Fixed
