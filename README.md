@@ -680,9 +680,11 @@ backend at it. The profile is a **name, not a credential**: no token, and
 OpenClaw never uses it to log in — `openclaw models status` shows it as
 `missing_credential`, which is correct. Which account runs is decided exactly
 as before. Right after upgrading, each existing conversation resets its Claude
-session once (`cli session reset … reason=auth-profile` in the log); from then
-on the refusal line is gone. `"historyIdentity": false` turns the feature
-off.
+session once (`cli session reset … reason=auth-profile` in the log). OpenClaw
+binds the owner only when a conversation is born, so conversations that
+already have history keep logging the refusal line until you start a new one
+(`/new`); every session started after the upgrade is covered from its first
+turn. `"historyIdentity": false` turns the feature off.
 
 ## How it works
 

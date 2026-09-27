@@ -317,8 +317,16 @@ Alternatives rejected:
 Expected one-off after upgrading: existing sessions carry a binding with no
 `authProfileId`, so their first turn logs `cli session reset: provider=<id>
 reason=auth-profile` and starts a fresh Claude session (reseed refused that
-once, exactly as every turn was before); from then on the boundary is `known`
-and the refusal line is gone. Not measured live before merge: the shared-store
+once, exactly as every turn was before). That reset does NOT bind the existing
+session: core only writes a `known` boundary when the OpenClaw transcript is
+still empty and no CLI session binding exists (`prepareCliHistoryBoundary`:
+`allowed` requires either a stored `known` boundary with this fingerprint or
+`!cliSessionId && !cliSessionBinding && messages.length === 0`). So a
+conversation that already has history keeps `state: "unknown"` and its
+`reason=auth-unknown` line for the rest of its life; sessions started after
+the upgrade (`/new`, isolated cron runs, fresh subagents) bind from their first
+turn and are reseeded on every later fresh Claude session. Read from the dist,
+to be confirmed live after install. Not measured live before merge: the shared-store
 merge into non-default agents and the snapshot publication were read from the
 dist, not observed.
 

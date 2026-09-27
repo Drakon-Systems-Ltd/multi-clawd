@@ -20,7 +20,10 @@ versioning from v1.0.
   history boundary and never uses as a login. Account selection is untouched;
   the identity is per backend id, so a pool rotation keeps its session. One
   `cli session reset … reason=auth-profile` per existing session is expected
-  right after upgrading. Opt out with `"historyIdentity": false`. See
+  right after upgrading. Core binds the owner only at session birth, so
+  conversations that already have history keep the refusal line until they
+  are started afresh (`/new`); sessions created after the upgrade are covered
+  from their first turn. Opt out with `"historyIdentity": false`. See
   DESIGN.md "CLI history identity".
 
 ## [1.9.1] - 2026-09-27
