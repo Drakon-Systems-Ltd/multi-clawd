@@ -1,0 +1,36 @@
+name: Publish to npm (trusted publishing)
+
+# npm Trusted Publishing (OIDC): no stored token. npmjs.com must trust
+# Drakon-Systems-Ltd/multi-clawd + this filename (npm-publish.yml).
+# Runs when a GitHub Release is published (tag vX.Y.Z); the package version
+# must match the tag. Also runnable by hand for a re-try of the same version.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Version must match the release tag
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          test "$TAG" = "$PKG" || { echo "tag v$TAG != package.json $PKG"; exit 1; }
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
+      - name: Publish (OIDC, provenance)
+        run: npm publish --access public --provenance
