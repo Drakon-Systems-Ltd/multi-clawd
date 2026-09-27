@@ -98,6 +98,15 @@ import { execFileSync } from "node:child_process";
 import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
 import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
+import {
+  HISTORY_IDENTITY_CONFIG_KEY,
+  describeEnsureResult,
+  ensureIdentityProfiles,
+  identityProfileId,
+  loadProviderAuthSdk,
+  type EnsureIdentityResult,
+  type ProviderAuthSdk,
+} from "./history-identity.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
 // declaration files. Derive the backend contract from the stable registration
@@ -696,6 +705,11 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
     resolveExecutionArgs: resolvePoolExecutionArgs,
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
+    // #23: the one field through which core learns WHO this backend runs as.
+    // Core looks the profile up in its own store and hashes its accountId
+    // into the CLI history boundary; nothing here touches account selection
+    // (see history-identity.ts). Absent profile = today's behaviour.
+    defaultAuthProfileId: identityProfileId(account.id),
     config: {
       // Spawn our transparent shim (which spawns `claude`) so the plugin can
       // observe rate_limit_event records for near-limit account rotation.
@@ -906,6 +920,8 @@ export default definePluginEntry({
       accounts?: AccountConfig[];
       pool?: PoolConfig;
       directRoute?: DirectRouteConfig;
+      /** #23: store per-backend history identity profiles. Default true. */
+      [HISTORY_IDENTITY_CONFIG_KEY]?: boolean;
     };
     const accounts = Array.isArray(cfg.accounts) ? cfg.accounts : [];
     const sourceNames = [
@@ -985,6 +1001,12 @@ export default definePluginEntry({
       api.registerProvider(buildCatalogProvider(normalized));
     }
     registerPoolBackend(api, cfg.pool, accounts, seen, execMode);
+    startHistoryIdentityEnsure({
+      backendIds: [...seen],
+      enabled: cfg[HISTORY_IDENTITY_CONFIG_KEY] !== false,
+      registrationMode: (api as { registrationMode?: unknown }).registrationMode,
+      logger: api.logger,
+    });
 
     // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
     {
@@ -1022,6 +1044,72 @@ export default definePluginEntry({
     );
   },
 });
+
+/**
+ * #23 history identity: module scope for the same reason as the other loops —
+ * register() re-runs on every config rebuild and must not stack writers. One
+ * ensure pass is in flight at a time; a re-run while one is pending reuses it.
+ * The SDK loader is injectable so the wiring test drives a fake store.
+ */
+let historyIdentitySdkLoader: () => Promise<ProviderAuthSdk | undefined> = loadProviderAuthSdk;
+let historyIdentityPending: Promise<EnsureIdentityResult | undefined> | undefined;
+
+/** Test seam: swap the SDK slice the ensure pass writes through. */
+export function setProviderAuthSdkLoaderForTests(
+  loader: (() => Promise<ProviderAuthSdk | undefined>) | undefined,
+): void {
+  historyIdentitySdkLoader = loader ?? loadProviderAuthSdk;
+  historyIdentityPending = undefined;
+}
+
+/** The ensure pass started by the last register(), if any (tests await it). */
+export function awaitHistoryIdentityEnsure(): Promise<EnsureIdentityResult | undefined> {
+  return historyIdentityPending ?? Promise.resolve(undefined);
+}
+
+/**
+ * Store one identity profile per registered backend id (see
+ * history-identity.ts). Full registrations only — discovery and setup passes
+ * must not write the auth store — and skipped entirely with
+ * `"historyIdentity": false`. Best-effort: every failure is logged and core
+ * simply keeps today's `auth-unknown` behaviour for that backend.
+ */
+function startHistoryIdentityEnsure(params: {
+  backendIds: string[];
+  enabled: boolean;
+  registrationMode?: unknown;
+  logger: { info: (m: string) => void; warn: (m: string) => void };
+}): void {
+  const { logger } = params;
+  if (params.registrationMode !== undefined && params.registrationMode !== "full") return;
+  if (!params.enabled) {
+    logger.info("[multi-clawd] history identity: disabled by config (historyIdentity: false)");
+    return;
+  }
+  if (params.backendIds.length === 0 || historyIdentityPending) return;
+  const ids = [...params.backendIds];
+  historyIdentityPending = (async () => {
+    try {
+      const sdk = await historyIdentitySdkLoader();
+      if (!sdk) {
+        logger.warn(
+          "[multi-clawd] history identity: this OpenClaw does not expose openclaw/plugin-sdk/provider-auth store writers — skipped (CLI history reseed stays auth-unknown)",
+        );
+        return undefined;
+      }
+      const result = await ensureIdentityProfiles(ids, sdk);
+      const line = `[multi-clawd] history identity: ${describeEnsureResult(result)}`;
+      if (result.failed.length > 0) logger.warn(line);
+      else logger.info(line);
+      return result;
+    } catch (err) {
+      logger.warn(`[multi-clawd] history identity: ${String(err)}`);
+      return undefined;
+    } finally {
+      historyIdentityPending = undefined;
+    }
+  })();
+}
 
 interface PoolConfig {
   /** Backend id for the pooled backend (e.g. "clawd"). */
