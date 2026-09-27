@@ -66,6 +66,7 @@ import {
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { resolvePoolExecutionArgs } from "./tool-cap.js";
 import { RETRY_ROSTER_ENV } from "./retry-plan.js";
+import { SESSION_DIRS_ENV } from "./session-handover.js";
 import {
   addAlert,
   alertKeysWithPrefix,
@@ -76,6 +77,7 @@ import {
 import { healthStateFile, clearAccountCredentialFailure } from "./credential-state.js";
 export { healthStateFile, clearAccountCredentialFailure };
 import {
+  accountConfigDir,
   buildAccountChildEnv,
   tokenFileModeWarning,
   validateAccountTokenSources,
@@ -1126,10 +1128,11 @@ function writeStickyEntry(
  * launch fails with a real limit error and OpenClaw's reactive chain drops
  * to the next provider (e.g. OpenAI → xAI), exactly as configured.
  *
- * Known limitation: switching accounts mid-conversation loses the Claude CLI
- * session (it lives in the previous account's config dir); OpenClaw's
- * fresh-session retry recovers the turn. Rotation only happens at limit
- * boundaries, so this is rare by construction.
+ * Switching accounts mid-conversation would lose the Claude CLI session (it
+ * lives in the previous account's config dir) — and because OpenClaw keeps
+ * one binding per backend id, it was lost on EVERY later turn, not once. The
+ * shim's resume handover (session-handover.ts) copies the transcript into the
+ * launched account's dir first; MULTI_CLAWD_SESSION_DIRS tells it where to look.
  */
 export function registerPoolBackend(
   api: Parameters<Parameters<typeof definePluginEntry>[0]["register"]>[0],
@@ -1351,6 +1354,10 @@ export function registerPoolBackend(
       const roster = buildRetryRoster(members, (launched ?? chosen).id);
       if (roster.length > 0) env[RETRY_ROSTER_ENV] = JSON.stringify(roster);
     }
+    // Resume handover: the stored CLI session for this backend may have been
+    // written by a different member. The shim sees the session id (argv) and
+    // copies the newest transcript into the launched account's dir. Paths only.
+    env[SESSION_DIRS_ENV] = JSON.stringify([...new Set(members.map(accountConfigDir))]);
     // Tier degradation: only when the whole pool is exhausted and the launch
     // is not a pinned (contractual) lane. The shim enforces the swap.
     if (ladder.length > 0) {

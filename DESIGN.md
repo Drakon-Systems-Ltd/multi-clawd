@@ -185,11 +185,51 @@ and injects the login env of the first usable one:
   (OpenAI → xAI), exactly as configured.
 
 Trade-off: `CliBackendPrepareExecutionContext` has no session id, so
-selection is stateless; a mid-conversation handover loses the Claude CLI's
-native session (it lives in the previous account's config dir) and OpenClaw's
-fresh-session retry recovers the turn. Rotation only happens at limit
-boundaries, so this is rare by construction. Sticky per-session selection is
-v0.3 material.
+selection is stateless per session. A mid-conversation rotation used to lose
+the Claude CLI's native session (it lives in the previous account's config
+dir); the resume handover below now carries it across.
+
+### Resume handover
+
+OpenClaw keeps ONE CLI session binding per backend id, and the pool is one
+backend id over several config dirs. When a session written by claw2 (during
+a rotation) is resumed after the pool returns home to claw1, the CLI answers
+"No conversation found with session ID", the gateway classifies it
+`session_expired` and moves the turn to the next chain rung. It does NOT run a
+fresh-session retry on the pool, so the pool never succeeds on that session,
+the binding is never replaced, and the failure repeats on EVERY turn — not once
+per rotation. Observed 22–27 Sep 2026: 60–90 failures a day, ~10 s each, every
+turn pushed off the home account, until the chat was reset.
+
+Fix: the shim (which sees `--resume <id>` in argv; `prepareExecution` does
+not) copies the newest `<id>.jsonl` found across every member's
+`projects/*/` into the launched account's config dir before spawning. The pool
+passes the member dirs in `MULTI_CLAWD_SESSION_DIRS` (paths only, never
+credentials). Verified live before shipping: a claw2-written session with a
+signed thinking block resumed correctly under claw1 after the copy, and
+failed with the exact production error without it.
+
+Options weighed:
+- **Pin selection to the account that owns the session** — impossible without
+  the session id in `prepareExecution`, and it would contradict HEALTH BEATS
+  STICKINESS: the owner is often the account that just hit its limit.
+- **Key the stored binding per account** — the binding is OpenClaw core
+  state keyed by provider id; a plugin cannot re-key it, and writing the
+  session store from a plugin is off-limits.
+- **Clear the binding after one `session_expired`** — also core state; it
+  would also discard the Claude-side conversation (a reseeded fresh session
+  replays a bounded, sanitized history, not the native transcript).
+- **Hand the transcript over (chosen)** — keeps the pool's health choice,
+  keeps the native session, and needs no core change.
+
+Trade-offs of the handover: each account ends up with its own copy of a
+rotated conversation (disk, not quota; one 8 MB copy per rotation, not per
+turn); newest-mtime wins, which is sound because the backend serializes turns
+so a conversation is linear; only the `.jsonl` moves — the sibling `<id>/`
+sidecar dir (subagent and tool-result files) stays put and is still read by
+absolute path. The handover is best-effort: any failure leaves the launch as
+it was before, so the worst case is the old behaviour. The in-turn retry
+(#19) stays disarmed for `--resume` launches.
 
 ### Native accounts
 
@@ -380,7 +420,8 @@ tested (`src/watchdog-core.ts`).
   across deployments), so proactive rotation can only fire on weekly windows; a
   locally-derived 5h signal (per-account turn counting) is v0.4 design work.
 - Sticky selection is per-pool, not per-session — OpenClaw's
-  `prepareExecution` context has no session id. True session affinity is
+  `prepareExecution` context has no session id. The shim's resume handover
+  moves the session to the chosen account instead; true session affinity is
   part of the v0.4 standalone-proxy track (Hermes runtimes).
 - **CLI-served turns are extension-tool-mute.** When a turn is served through
   a CLI backend (reseeded CLI harness rather than the native runtime), host

@@ -48,6 +48,7 @@ import {
   retryArming,
   RETRY_ROSTER_ENV,
 } from "./retry-plan.js";
+import { handoverForLaunch } from "./session-handover.js";
 
 function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
   const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
@@ -160,6 +161,13 @@ if (modelOverride) {
       `[multi-clawd shim] degrading model for this launch → ${modelOverride}\n`,
     );
   }
+}
+// Resume handover: a pooled launch may resume a session another member wrote.
+// Make the transcript present in THIS account's config dir before the CLI
+// looks for it. See session-handover.ts.
+{
+  const note = handoverForLaunch(childArgs, process.env);
+  if (note) process.stderr.write(`[multi-clawd shim] ${note}\n`);
 }
 // ── in-turn retry arming (#19) ──────────────────────────────────────────────
 // Decided before a byte exists, because whether the preamble must be held back

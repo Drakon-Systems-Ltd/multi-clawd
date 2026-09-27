@@ -1,8 +1,27 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Stand-in for the claude CLI in shim integration tests.
 // Emits stream-json lines (one split across two writes), echoes one stdin
 // line into an assistant record, and exits with FAKE_CLAUDE_EXIT.
+// Resume emulation (opt-in): the real CLI resolves `--resume <id>` ONLY in its
+// own config dir and fails before emitting anything else when it is absent.
+if (process.env.FAKE_CLAUDE_EMULATE_RESUME === "1") {
+  const idx = process.argv.indexOf("--resume");
+  if (idx >= 0) {
+    const id = process.argv[idx + 1];
+    const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+    const projects = join(configDir, "projects");
+    const found = existsSync(projects)
+      && readdirSync(projects).some((sub) => existsSync(join(projects, sub, `${id}.jsonl`)));
+    if (!found) {
+      process.stderr.write(`No conversation found with session ID: ${id}\n`);
+      process.exit(1);
+    }
+  }
+}
+
 const lines = [
   '{"type":"system","subtype":"init","session_id":"s1"}',
   '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]},"session_id":"s1"}',
