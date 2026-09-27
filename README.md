@@ -666,29 +666,9 @@ What to know:
 any cooldown, and the live order. `explain` shows the same, and `doctor
 --probe` makes one tiny live call per profile.
 
-## History identity for fresh Claude sessions
-
-OpenClaw only replays a conversation into a **fresh** Claude session when it
-knows which account owns the history. It learns that from an auth profile in
-its own store, and Claude logins aren't OpenClaw profiles, so it used to log
-`cli session history refused across auth boundary: reason=auth-unknown` on
-every turn and start fresh sessions blank.
-
-multi-clawd now stores one identity-only profile per backend
-(`claw1:multi-clawd-identity`, `clawd:multi-clawd-identity`, …) and points the
-backend at it. The profile is a **name, not a credential**: no token, and
-OpenClaw never uses it to log in — `openclaw models status` shows it as
-`missing_credential`, which is correct. Which account runs is decided exactly
-as before. Right after upgrading, each existing conversation resets its Claude
-session once (`cli session reset … reason=auth-profile` in the log). OpenClaw
-binds the owner only when a conversation is born, so conversations that
-already have history keep logging the refusal line until you start a new one
-(`/new`); every session started after the upgrade is covered from its first
-turn. `"historyIdentity": false` turns the feature off.
-
 ## How it works
 
-Four moves, all through the official plugin SDK (details in
+Three moves, all through the official plugin SDK (details in
 [`DESIGN.md`](./DESIGN.md)):
 
 1. **`registerCliBackend`** mirrors the bundled `claude-cli` backend — same
@@ -701,9 +681,6 @@ Four moves, all through the official plugin SDK (details in
 3. **`prepareExecution`** injects that account's own login
    (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`) into the child process
    env, after the host's ambient Claude credentials are stripped.
-4. **`defaultAuthProfileId`** names an identity-only auth profile per backend,
-   so OpenClaw's CLI history boundary binds and fresh sessions get the
-   conversation back (see "History identity" above).
 
 ## Legacy issue: idle backend eviction on OpenClaw ≤ 2026.7.1
 

@@ -4,6 +4,22 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.9.3] - 2026-09-27
+
+### Reverted
+
+- **1.9.2 is withdrawn; this release is 1.9.1 again.** The identity-only auth
+  profiles 1.9.2 stored (`<id>:multi-clawd-identity`) made OpenClaw 2026.9.6
+  report every `claw1/*`, `claw2/*` and `clawd/*` model as *"The selected
+  account or native runtime is unavailable"* to `sessions_spawn`, so subagent
+  and scheduled spawns on the pool were refused. Cause: for a plugin-owned CLI
+  backend, `evaluateCliRuntimeModelAuthAvailability` returns the provider's
+  generic auth evaluation as authoritative, and a provider whose only stored
+  profile has no usable credential evaluates as unavailable. A profile with no
+  credential is therefore not a usable seam for #23; the issue is reopened
+  with the evidence. If you installed 1.9.2, remove the three profiles with
+  `openclaw models auth logout <id>:multi-clawd-identity --agent <agent> --yes`.
+
 ## [1.9.2] - 2026-09-27
 
 ### Fixed

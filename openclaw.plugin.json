@@ -205,10 +205,6 @@
           }
         }
       },
-      "historyIdentity": {
-        "type": "boolean",
-        "description": "Store one identity-only OpenClaw auth profile per registered backend id (<id>:multi-clawd-identity — a name, no token) and point the backend's defaultAuthProfileId at it, so OpenClaw's CLI history boundary can bind and a fresh Claude session is reseeded with prior context instead of `cli session history refused across auth boundary: reason=auth-unknown`. Default true. false = no auth-store writes; the reseed refusal stays."
-      },
       "directRoute": {
         "type": "object",
         "additionalProperties": false,
