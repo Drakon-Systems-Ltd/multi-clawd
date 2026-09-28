@@ -51,7 +51,14 @@ import {
   retryArming,
   RETRY_ROSTER_ENV,
 } from "./retry-plan.js";
-import { handoverForLaunch } from "./session-handover.js";
+import {
+  effectiveConfigDir,
+  handoverForLaunch,
+  handoverSnapshotTo,
+  parseSessionDirs,
+  SESSION_DIRS_ENV,
+  snapshotResumeTranscript,
+} from "./session-handover.js";
 
 function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
   const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
@@ -176,7 +183,16 @@ if (modelOverride) {
 // Decided before a byte exists, because whether the preamble must be held back
 // is a property of the launch, not of what the stream turns out to contain.
 const retryRoster = parseRetryRoster(process.env[RETRY_ROSTER_ENV]);
-const arming = retryArming(childArgs, retryRoster);
+// #24: a resumed launch can be retried only if its conversation can follow it.
+// Snapshot the transcript NOW — after the ordinary handover, before the child
+// exists — because the child writes to it before it is ever refused. Pool
+// launches only: without the member-dir list this is not a launch whose
+// session the pool is responsible for moving.
+const resumeSnapshot =
+  retryRoster.length > 0 && parseSessionDirs(process.env[SESSION_DIRS_ENV]).length > 0
+    ? snapshotResumeTranscript(childArgs, process.env)
+    : undefined;
+const arming = retryArming(childArgs, retryRoster, { resumeReady: resumeSnapshot !== undefined });
 let retryArmed = arming.armed;
 if (!retryArmed && retryRoster.length > 0 && arming.reason) {
   // Only worth a line when a roster was actually supplied: otherwise every
@@ -398,11 +414,30 @@ function attemptRetry(): boolean {
     releaseHeldOutput();
     return false;
   }
+  // A resumed turn takes its conversation with it, as it stood before the
+  // refused attempt wrote to it. If that cannot be done the retry is off: a
+  // sibling launched without the transcript would answer a different question.
+  if (resumeSnapshot) {
+    try {
+      handoverSnapshotTo(resumeSnapshot, effectiveConfigDir(target.env));
+    } catch (err) {
+      process.stderr.write(
+        `[multi-clawd shim] model limit on ${accountId}, but session ` +
+          `${resumeSnapshot.sessionId.slice(0, 8)} could not be handed to ${target.id} ` +
+          `(${err instanceof Error ? err.message : String(err)}) — ` +
+          `passing the failure through to the host's chain\n`,
+      );
+      releaseHeldOutput();
+      return false;
+    }
+  }
   retryUsed = true;
   retryArmed = false;
   process.stderr.write(
     `[multi-clawd shim] model limit on ${accountId}${model ? ` for ${model}` : ""} — ` +
-      `retrying this turn on ${target.id} (nothing forwarded downstream yet)\n`,
+      `retrying this turn on ${target.id}${
+        resumeSnapshot ? `, session ${resumeSnapshot.sessionId.slice(0, 8)} handed over` : ""
+      } (nothing forwarded downstream yet)\n`,
   );
   // The failed attempt is never shown: its preamble described a session the
   // user will never see, and its error is the bug.

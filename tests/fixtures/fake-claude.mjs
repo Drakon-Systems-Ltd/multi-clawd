@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { join } from "node:path";
 // line into an assistant record, and exits with FAKE_CLAUDE_EXIT.
 // Resume emulation (opt-in): the real CLI resolves `--resume <id>` ONLY in its
 // own config dir and fails before emitting anything else when it is absent.
+let resumedTranscript;
 if (process.env.FAKE_CLAUDE_EMULATE_RESUME === "1") {
   const idx = process.argv.indexOf("--resume");
   if (idx >= 0) {
@@ -18,6 +19,18 @@ if (process.env.FAKE_CLAUDE_EMULATE_RESUME === "1") {
     if (!found) {
       process.stderr.write(`No conversation found with session ID: ${id}\n`);
       process.exit(1);
+    }
+    // The real CLI appends the incoming user message to the resumed transcript
+    // BEFORE the request is made — so a launch that is then refused has still
+    // written to it (captured from live transcripts: the user record, then a
+    // `<synthetic>` assistant record carrying the refusal).
+    if (process.env.FAKE_CLAUDE_WRITE_TRANSCRIPT === "1") {
+      const sub = readdirSync(projects).find((d) => existsSync(join(projects, d, `${id}.jsonl`)));
+      resumedTranscript = join(projects, sub, `${id}.jsonl`);
+      appendFileSync(
+        resumedTranscript,
+        JSON.stringify({ type: "user", by: process.env.MULTI_CLAWD_ACCOUNT_ID ?? null }) + "\n",
+      );
     }
   }
 }
@@ -46,6 +59,16 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
   // "init record, then nothing".
   const delayMs = Number(process.env.FAKE_CLAUDE_LIMIT_DELAY_MS ?? "0");
   if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  if (resumedTranscript) {
+    appendFileSync(
+      resumedTranscript,
+      JSON.stringify({
+        type: "assistant",
+        isApiErrorMessage: true,
+        message: { model: "<synthetic>", content: [{ type: "text", text: LIMIT_TEXT }] },
+      }) + "\n",
+    );
+  }
   process.stdout.write(
     JSON.stringify({
       type: "result",
@@ -117,14 +140,19 @@ process.stdin.on("end", () => {
             received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
             session_id: "s1",
           }
-        : {
+        : (resumedTranscript &&
+            appendFileSync(
+              resumedTranscript,
+              JSON.stringify({ type: "assistant", by: process.env.MULTI_CLAWD_ACCOUNT_ID ?? null }) + "\n",
+            ),
+          {
             type: "result",
             result: stdin.trim(),
             received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
             served_by: process.env.MULTI_CLAWD_ACCOUNT_ID ?? null,
             config_dir: process.env.CLAUDE_CONFIG_DIR ?? null,
             session_id: "s1",
-          },
+          }),
     ) + "\n",
   );
   process.stderr.write("fake-claude stderr noise\n");

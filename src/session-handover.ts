@@ -28,7 +28,18 @@
  * was before this module existed (the CLI reports the missing session and the
  * gateway recovers as it always has).
  */
-import { copyFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -185,5 +196,134 @@ export function handoverForLaunch(
     return `resume handover: session ${sessionId.slice(0, 8)} copied from ${plan.fromDir} into ${targetDir} (newer copy)`;
   } catch (err) {
     return `resume handover failed for session ${sessionId.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+/**
+ * The resumed transcript as it stood before a launch touched it (#24).
+ *
+ * The in-turn retry re-spawns a refused turn on a sibling account, and for a
+ * resumed session the sibling needs the conversation. The newest copy is the
+ * wrong one to give it: the CLI appends the incoming user message to the
+ * transcript before it makes the request, and appends the refusal after, so by
+ * the time a limit is known the refusing account's copy already holds both.
+ * Handing that over would resume a history containing the refusal, and then
+ * replay the same user message on top of it.
+ *
+ * Transcripts are append-only, so "before the attempt" is simply a length.
+ * The snapshot records it; `handoverSnapshotTo` copies exactly that many bytes.
+ */
+export interface ResumeSnapshot {
+  sessionId: string;
+  /** The `projects/<sub>` directory name the CLI uses for this workspace. */
+  sub: string;
+  /** Absolute path of the launched account's copy. */
+  path: string;
+  /** Length of that copy when the snapshot was taken. */
+  bytes: number;
+}
+
+const NEWLINE = 0x0a;
+
+function lastByte(path: string, length: number): number | undefined {
+  if (length <= 0) return undefined;
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(1);
+    return readSync(fd, buf, 0, 1, length - 1) === 1 ? buf[0] : undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Snapshot the launched account's copy of the session a launch resumes. Taken
+ * after the ordinary handover and before the child is spawned. Undefined —
+ * meaning "this launch cannot be retried elsewhere" — for a fresh launch, a
+ * transcript that is not here, or one that does not end on a record boundary
+ * (something is mid-write, and a prefix of it would not be a conversation).
+ * Never throws.
+ */
+export function snapshotResumeTranscript(
+  argv: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+): ResumeSnapshot | undefined {
+  try {
+    const sessionId = resumeSessionId(argv);
+    if (!sessionId) return undefined;
+    const projects = join(effectiveConfigDir(env), "projects");
+    let newest: { sub: string; path: string; mtime: number; bytes: number } | undefined;
+    for (const sub of nodeHandoverFs.listDirs(projects)) {
+      const path = join(projects, sub, `${sessionId}.jsonl`);
+      let st;
+      try {
+        st = statSync(path);
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      if (!newest || st.mtimeMs > newest.mtime) {
+        newest = { sub, path, mtime: st.mtimeMs, bytes: st.size };
+      }
+    }
+    if (!newest || newest.bytes === 0) return undefined;
+    if (lastByte(newest.path, newest.bytes) !== NEWLINE) return undefined;
+    return { sessionId, sub: newest.sub, path: newest.path, bytes: newest.bytes };
+  } catch {
+    return undefined;
+  }
+}
+
+const COPY_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Write the snapshotted prefix into another account's config dir, replacing
+ * whatever copy it holds. Throws when the prefix cannot be trusted or the
+ * write fails — the caller then forwards the refusal exactly as it would have
+ * before this existed. Temp file + rename, so the CLI never opens a partial
+ * transcript, and nothing is left behind on failure.
+ */
+export function handoverSnapshotTo(snapshot: ResumeSnapshot, targetConfigDir: string): string {
+  const size = statSync(snapshot.path).size;
+  if (size < snapshot.bytes) {
+    throw new Error("the transcript is shorter than when the launch began");
+  }
+  if (lastByte(snapshot.path, snapshot.bytes) !== NEWLINE) {
+    throw new Error("the transcript no longer ends on a record boundary at the snapshot point");
+  }
+  const to = join(targetConfigDir, "projects", snapshot.sub, `${snapshot.sessionId}.jsonl`);
+  if (to === snapshot.path) throw new Error("the sibling shares this account's config dir");
+  mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
+  const tmp = join(dirname(to), `.${basename(to)}.handover-${process.pid}`);
+  let src: number | undefined;
+  let dst: number | undefined;
+  try {
+    src = openSync(snapshot.path, "r");
+    dst = openSync(tmp, "w", 0o600);
+    const buf = Buffer.alloc(Math.min(COPY_CHUNK_BYTES, snapshot.bytes));
+    let copied = 0;
+    while (copied < snapshot.bytes) {
+      const want = Math.min(buf.length, snapshot.bytes - copied);
+      const got = readSync(src, buf, 0, want, copied);
+      if (got <= 0) throw new Error("the transcript ended before the snapshot point");
+      writeSync(dst, buf, 0, got);
+      copied += got;
+    }
+    closeSync(dst);
+    dst = undefined;
+    renameSync(tmp, to);
+    return to;
+  } catch (err) {
+    if (dst !== undefined) {
+      try {
+        closeSync(dst);
+      } catch {
+        /* already closed */
+      }
+    }
+    rmSync(tmp, { force: true });
+    throw err;
+  } finally {
+    if (src !== undefined) closeSync(src);
   }
 }

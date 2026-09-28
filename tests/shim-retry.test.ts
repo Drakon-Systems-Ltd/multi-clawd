@@ -91,7 +91,7 @@ describe("in-turn retry after a reactive model limit (#19)", () => {
     expect(res.status).toBe(1);
   });
 
-  test("a resumed launch is never retried — its session lives in this account's config dir", () => {
+  test("a resumed launch whose transcript cannot follow it is not retried (#24 covers the case where it can)", () => {
     const { res } = scenario({
       limitFor: "claw1",
       roster: rosterFor(join(mkdtempSync(join(tmpdir(), "mc-s2-")), "claw2.json")),
