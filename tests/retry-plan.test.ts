@@ -47,9 +47,10 @@ describe("retryArming", () => {
     expect(retryArming(STREAM_ARGS, [account("claw2")])).toEqual({ armed: true });
   });
 
-  test("never armed for a resumed session", () => {
-    // The session being resumed lives in THIS account's config dir; re-spawning
-    // it elsewhere either fails to resume or drops the conversation.
+  test("not armed for a resumed session unless the caller has a transcript to hand over", () => {
+    // The session being resumed lives in one account's config dir; re-spawning
+    // it elsewhere with nothing else done either fails to resume or drops the
+    // conversation. Arming it is opt-in (#24, tests/issue-24-resume-retry).
     const arming = retryArming([...STREAM_ARGS, "--resume", "abc"], [account("claw2")]);
     expect(arming.armed).toBe(false);
     expect(arming.reason).toContain("resumed session");

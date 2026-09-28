@@ -228,8 +228,16 @@ turn); newest-mtime wins, which is sound because the backend serializes turns
 so a conversation is linear; only the `.jsonl` moves — the sibling `<id>/`
 sidecar dir (subagent and tool-result files) stays put and is still read by
 absolute path. The handover is best-effort: any failure leaves the launch as
-it was before, so the worst case is the old behaviour. The in-turn retry
-(#19) stays disarmed for `--resume` launches.
+it was before, so the worst case is the old behaviour.
+
+The in-turn retry (#19) is armed for `--resume` launches too (#24), with one
+difference from the ordinary handover: it copies a PREFIX, not the newest
+file. The CLI appends the incoming user message to the transcript before it
+makes the request and appends the refusal after, so once a limit is known the
+refusing account's copy already contains both. The shim records the
+transcript's length before spawning and gives the sibling exactly that many
+bytes. The refusing account's copy keeps the stray tail until the next launch
+there, when the ordinary handover replaces it with the sibling's newer copy.
 
 ### Native accounts
 

@@ -15,12 +15,14 @@
  *
  * Three deliberate limits, each for a reason that is not a shortcut:
  *
- *   1. FRESH LAUNCHES ONLY. A `--resume` launch names a Claude CLI session
- *      that lives in the PREVIOUS account's config dir (index.ts says so where
- *      it sets reseedFromRawTranscriptWhenUncompacted), and its stdin carries
- *      only the new message. Re-spawning it elsewhere either fails to resume
- *      or silently drops the conversation — worse than the bug. The gateway's
- *      own fresh-session recovery already covers that path.
+ *   1. A RESUMED LAUNCH ONLY WHEN ITS CONVERSATION CAN FOLLOW IT. A `--resume`
+ *      launch names a Claude CLI session that lives in one account's config
+ *      dir, and its stdin carries only the new message: re-spawned elsewhere
+ *      with nothing else done, it fails to resume or silently drops the
+ *      conversation — worse than the bug. The shim can now hand the transcript
+ *      over (session-handover.ts), as it stood before the refused attempt
+ *      wrote to it, so a resumed launch is armed when that snapshot exists and
+ *      is refused exactly as before when it does not (#24).
  *   2. SECRET-FREE SIBLINGS ONLY. Retrying onto a token-bearing account would
  *      mean shipping that account's OAuth token into every child's environment,
  *      so one compromised child sees the whole pool instead of its own login.
@@ -36,6 +38,7 @@ import {
   type HealthOptions,
   type PoolVerdict,
 } from "./health.js";
+import { resumeSessionId } from "./session-handover.js";
 import type { AccountHealthState } from "./shim-core.js";
 
 /** One sibling the shim may re-spawn onto, as handed over by the plugin. */
@@ -95,14 +98,34 @@ export interface RetryArming {
  * of output exists, so the shim knows up front whether it must hold the
  * stream's preamble back.
  */
-export function retryArming(argv: string[], roster: RetryAccount[]): RetryArming {
+/** Whether argv resumes a session, in any spelling — including an id we would refuse to use. */
+export function isResumeLaunch(argv: readonly string[]): boolean {
+  return (
+    resumeSessionId(argv) !== undefined ||
+    argv.some((a) => a === "--resume" || a === "-r" || a.startsWith("--resume="))
+  );
+}
+
+export function retryArming(
+  argv: string[],
+  roster: RetryAccount[],
+  opts: {
+    /**
+     * The resumed transcript was snapshotted and can be handed to a sibling.
+     * Absent means no: a caller that has not checked gets the refusal.
+     */
+    resumeReady?: boolean;
+  } = {},
+): RetryArming {
   if (roster.length === 0) {
     return { armed: false, reason: "no secret-free sibling account to retry onto" };
   }
-  if (argv.includes("--resume")) {
+  if (isResumeLaunch(argv) && !opts.resumeReady) {
     return {
       armed: false,
-      reason: "resumed session — its Claude session lives in this account's config dir",
+      reason:
+        "resumed session — its transcript is not in this account's config dir in a state " +
+        "that can be handed to a sibling",
     };
   }
   // Line-wise classification is only sound on the JSONL stream; in any other

@@ -6,6 +6,20 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Changed
+- **The in-turn retry now covers resumed launches (#24).** A turn refused on a
+  model limit is re-spawned on a sibling account within the same turn; until now
+  that applied to fresh launches only, which left out every turn of an ongoing
+  conversation. The shim snapshots the resumed transcript's length before the
+  child is spawned and hands the sibling exactly that prefix — not the newest
+  copy, because the refused attempt has already appended the user's message and
+  the refusal to it. The prefix is fingerprinted when the snapshot is taken and
+  the copy is verified against it before it is put in place. If that fails, the
+  prefix cannot be written, or the transcript is not in a state that can be
+  handed over, the refusal is forwarded as before. Every
+  other bound is unchanged: one retry, never the refusing account, secret-free
+  siblings only, nothing already forwarded downstream.
+
 ### Fixed
 - **A model limit on the home account made every turn fail over (#26).** The
   home account was classified correctly — exhausted for the model. The turn was
