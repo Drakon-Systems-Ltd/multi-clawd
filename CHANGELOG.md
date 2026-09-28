@@ -13,8 +13,10 @@ versioning from v1.0.
   conversation. The shim snapshots the resumed transcript's length before the
   child is spawned and hands the sibling exactly that prefix — not the newest
   copy, because the refused attempt has already appended the user's message and
-  the refusal to it. If the prefix cannot be written, or the transcript is not
-  in a state that can be handed over, the refusal is forwarded as before. Every
+  the refusal to it. The prefix is fingerprinted when the snapshot is taken and
+  the copy is verified against it before it is put in place. If that fails, the
+  prefix cannot be written, or the transcript is not in a state that can be
+  handed over, the refusal is forwarded as before. Every
   other bound is unchanged: one retry, never the refusing account, secret-free
   siblings only, nothing already forwarded downstream.
 

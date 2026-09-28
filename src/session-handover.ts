@@ -28,6 +28,7 @@
  * was before this module existed (the CLI reports the missing session and the
  * gateway recovers as it always has).
  */
+import { createHash } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
@@ -210,8 +211,12 @@ export function handoverForLaunch(
  * Handing that over would resume a history containing the refusal, and then
  * replay the same user message on top of it.
  *
- * Transcripts are append-only, so "before the attempt" is simply a length.
- * The snapshot records it; `handoverSnapshotTo` copies exactly that many bytes.
+ * Transcripts are append-only, so "before the attempt" is a length — but that
+ * is an assumption about another program, so it is checked rather than
+ * trusted: the snapshot also fingerprints the prefix, and the copy is verified
+ * against it before it is put in place. A transcript rewritten in the meantime
+ * (compaction, say) can keep its length and still end on a record boundary at
+ * the same offset; it cannot keep its content.
  */
 export interface ResumeSnapshot {
   sessionId: string;
@@ -221,6 +226,44 @@ export interface ResumeSnapshot {
   path: string;
   /** Length of that copy when the snapshot was taken. */
   bytes: number;
+  /** Fingerprint of those bytes (see `fingerprintPrefix`). */
+  fingerprint: string;
+}
+
+const FINGERPRINT_HEAD_BYTES = 64 * 1024;
+const FINGERPRINT_TAIL_BYTES = 1024 * 1024;
+
+function readRegion(fd: number, position: number, length: number): Buffer {
+  const buf = Buffer.alloc(length);
+  let got = 0;
+  while (got < length) {
+    const n = readSync(fd, buf, got, length - got, position + got);
+    if (n <= 0) throw new Error("the transcript ended before the snapshot point");
+    got += n;
+  }
+  return buf;
+}
+
+/**
+ * A digest of the first `bytes` of a file: its length, its head and its tail.
+ * Not the whole prefix — a long conversation runs to tens of megabytes and this
+ * is paid on every resumed launch that could be retried — but the regions a
+ * rewrite cannot leave alone: the tail is where the conversation's latest
+ * records are, and the head is where a rewritten file starts again.
+ */
+export function fingerprintPrefix(path: string, bytes: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const hash = createHash("sha256");
+    hash.update(`${bytes}:`);
+    const head = Math.min(FINGERPRINT_HEAD_BYTES, bytes);
+    hash.update(readRegion(fd, 0, head));
+    const tail = Math.min(FINGERPRINT_TAIL_BYTES, bytes - head);
+    if (tail > 0) hash.update(readRegion(fd, bytes - tail, tail));
+    return hash.digest("hex");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const NEWLINE = 0x0a;
@@ -268,7 +311,13 @@ export function snapshotResumeTranscript(
     }
     if (!newest || newest.bytes === 0) return undefined;
     if (lastByte(newest.path, newest.bytes) !== NEWLINE) return undefined;
-    return { sessionId, sub: newest.sub, path: newest.path, bytes: newest.bytes };
+    return {
+      sessionId,
+      sub: newest.sub,
+      path: newest.path,
+      bytes: newest.bytes,
+      fingerprint: fingerprintPrefix(newest.path, newest.bytes),
+    };
   } catch {
     return undefined;
   }
@@ -311,6 +360,12 @@ export function handoverSnapshotTo(snapshot: ResumeSnapshot, targetConfigDir: st
     }
     closeSync(dst);
     dst = undefined;
+    // Verified on the COPY, not on the source: what matters is the bytes the
+    // sibling will actually resume, and checking them after they are written
+    // leaves no window for the source to change between check and copy.
+    if (fingerprintPrefix(tmp, snapshot.bytes) !== snapshot.fingerprint) {
+      throw new Error("the transcript was rewritten after the launch began");
+    }
     renameSync(tmp, to);
     return to;
   } catch (err) {

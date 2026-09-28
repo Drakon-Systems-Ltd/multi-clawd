@@ -17,6 +17,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -310,6 +311,51 @@ describe("#24 snapshot and prefix handover", () => {
     writeFileSync(b.claw1Transcript, "x".repeat(Buffer.byteLength(HISTORY)));
     expect(() => handoverSnapshotTo(snap, b.claw2Dir)).toThrow();
     expect(existsSync(b.claw2Transcript)).toBe(false);
+  });
+
+  test("a transcript rewritten to the same length, still valid JSONL, is refused", () => {
+    // The case length and boundary checks cannot see: every record intact,
+    // the cut still lands on a newline, and it is a different conversation.
+    const b = box();
+    const snap = snapshotResumeTranscript(["--resume", SESSION], { CLAUDE_CONFIG_DIR: b.claw1Dir })!;
+    const rewritten = HISTORY.replace("first question", "other question").replace(
+      "first answer",
+      "other answer",
+    );
+    expect(Buffer.byteLength(rewritten)).toBe(Buffer.byteLength(HISTORY));
+    writeFileSync(b.claw1Transcript, rewritten + '{"type":"user","late":true}\n');
+    expect(() => handoverSnapshotTo(snap, b.claw2Dir)).toThrow(/rewritten/);
+    expect(existsSync(b.claw2Transcript)).toBe(false);
+    // ...and nothing is left behind in the sibling's dir.
+    expect(existsSync(join(b.claw2Dir, "projects", SLUG))
+      ? readdirSync(join(b.claw2Dir, "projects", SLUG))
+      : []).toEqual([]);
+  });
+
+  test("a sibling's existing copy survives a refused handover untouched", () => {
+    const b = box();
+    mkdirSync(join(b.claw2Dir, "projects", SLUG), { recursive: true });
+    writeFileSync(b.claw2Transcript, "older copy\n");
+    const snap = snapshotResumeTranscript(["--resume", SESSION], { CLAUDE_CONFIG_DIR: b.claw1Dir })!;
+    writeFileSync(b.claw1Transcript, HISTORY.replace("first", "other"));
+    expect(() => handoverSnapshotTo(snap, b.claw2Dir)).toThrow();
+    expect(readFileSync(b.claw2Transcript, "utf8")).toBe("older copy\n");
+  });
+
+  test("the fingerprint covers a long transcript's tail, where a rewrite would land", () => {
+    const b = box();
+    const long = (JSON.stringify({ type: "user", pad: "x".repeat(900) }) + "\n").repeat(3000);
+    writeFileSync(b.claw1Transcript, long);
+    const snap = snapshotResumeTranscript(["--resume", SESSION], { CLAUDE_CONFIG_DIR: b.claw1Dir })!;
+    expect(snap.bytes).toBeGreaterThan(2 * 1024 * 1024);
+    // One byte changed in the last record.
+    const changed = long.slice(0, long.length - 20) + "y" + long.slice(long.length - 19);
+    writeFileSync(b.claw1Transcript, changed);
+    expect(() => handoverSnapshotTo(snap, b.claw2Dir)).toThrow(/rewritten/);
+    // Unchanged, it copies byte for byte.
+    writeFileSync(b.claw1Transcript, long);
+    handoverSnapshotTo(snap, b.claw2Dir);
+    expect(readFileSync(b.claw2Transcript, "utf8")).toBe(long);
   });
 
   test("a snapshot that does not end on a record boundary is never taken", () => {
