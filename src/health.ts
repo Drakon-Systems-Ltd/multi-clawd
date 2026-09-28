@@ -16,7 +16,7 @@
  * - A fully exhausted pool returns no choice: the hook then stays silent and
  *   OpenClaw's reactive chain drops to the next provider (OpenAI → xAI).
  */
-import { modelWindowKey, type AccountHealthState } from "./shim-core.js";
+import { modelWindowApplies, modelWindowKey, type AccountHealthState } from "./shim-core.js";
 
 export type HealthVerdict =
   | "ok"
@@ -29,6 +29,12 @@ export interface AccountHealth {
   verdict: HealthVerdict;
   /** Epoch ms when an exhausted account is expected back. */
   resumeAt?: number;
+  /**
+   * Epoch ms of the observation an `exhausted` verdict rests on. A verdict is
+   * only as good as its evidence is recent, and when the whole pool is
+   * exhausted the age is what picks the account to spend the launch on (#26).
+   */
+  observedAt?: number;
   reason?: string;
   /**
    * Set when paid spill-over is nearly spent but real quota is not, i.e. the
@@ -106,6 +112,14 @@ export const CREDENTIAL_FAILED_TTL_MS = 15 * 60 * 1000;
  * of the failover chain rather than costing the account, and shortening it here
  * would reverse fix A on speculation. Widen when a model-scoped phantom is
  * actually observed, not before.
+ *
+ * One has since been observed (#26) and the rule still stands, because ageing
+ * the rejection out was the wrong remedy for it: a genuine model cap would
+ * then cost one refused launch an hour, on the account the pool most wants to
+ * avoid. The phantom is ended by evidence instead — a successful turn on the
+ * model clears the record (shim), and a wholly exhausted pool spends its
+ * unavoidable launch re-testing the oldest rejection (`overdueProbeAccount`),
+ * which uses this constant only as the age past which a re-test is due.
  */
 export const REJECTION_REVALIDATE_AFTER_MS = 60 * 60 * 1000;
 
@@ -362,8 +376,9 @@ export function classifyAccountHealth(
       // disk state without going through mergeHealthStates, so a legacy
       // stock-v0.3.6 prefixed key (`model:clawd/claude-fable-5`) must still
       // match here or it silently stops gating on that path post-upgrade.
-      const canonicalWindow = modelWindowKey(window.slice(MODEL_WINDOW_PREFIX.length));
-      if (!requestedWindowKey || canonicalWindow !== requestedWindowKey) continue;
+      // A family-wide rejection gates every version of the family, not only
+      // the version it happened to be recorded on (#26).
+      if (requestedModel === undefined || !modelWindowApplies(window, w, requestedModel)) continue;
       if (w.status !== "rejected") continue;
       if (resetMs !== undefined) {
         // NOT bounded by REJECTION_REVALIDATE_AFTER_MS, deliberately — see the
@@ -377,6 +392,7 @@ export function classifyAccountHealth(
           return {
             verdict: "exhausted",
             resumeAt: resetMs,
+            observedAt: w.seenAt,
             reason: `${requestedModel} limit rejected until ${new Date(resetMs).toISOString()}`,
           };
         }
@@ -385,6 +401,7 @@ export function classifyAccountHealth(
       return {
         verdict: "exhausted",
         resumeAt: w.seenAt + MODEL_REJECTED_TTL_MS,
+        observedAt: w.seenAt,
         reason: `${requestedModel} limit hit ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; TTL block)`,
       };
     }
@@ -428,6 +445,7 @@ export function classifyAccountHealth(
       return {
         verdict: "exhausted",
         resumeAt: resetMs,
+        observedAt: w.seenAt,
         reason: `${window} rejected until ${new Date(resetMs!).toISOString()}`,
       };
     }
@@ -458,6 +476,7 @@ export function classifyAccountHealth(
       return {
         verdict: "exhausted",
         resumeAt: w.seenAt + resetLessBlockMs(window),
+        observedAt: w.seenAt,
         reason: `${window} rejected ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; ${Math.round(resetLessBlockMs(window) / 3600000)}h block)`,
       };
     }
@@ -567,6 +586,14 @@ export function summarizeWindowUsage(
   return usage.sort((a, b) => (b.resetsAt ?? 0) - (a.resetsAt ?? 0));
 }
 
+/** One pool member as the selectors see it. */
+export interface PoolVerdict {
+  id: string;
+  verdict: HealthVerdict;
+  /** When the evidence behind an `exhausted` verdict was observed (epoch ms). */
+  observedAt?: number;
+}
+
 /**
  * Pick the account that should serve the next turn, in pool order:
  * healthy/no-data first, then near-limit, never exhausted and never
@@ -578,9 +605,7 @@ export function summarizeWindowUsage(
  * whereas a rejected login cannot serve a single token. It is therefore in
  * neither pass here.
  */
-export function choosePoolAccount(
-  pool: Array<{ id: string; verdict: HealthVerdict }>,
-): string | undefined {
+export function choosePoolAccount(pool: PoolVerdict[]): string | undefined {
   const usable = pool.find((a) => a.verdict === "ok" || a.verdict === "no_data");
   if (usable) return usable.id;
   return pool.find((a) => a.verdict === "near_limit")?.id;
@@ -592,34 +617,68 @@ export function choosePoolAccount(
  * re-authentication (#8) instead of relaunching a dead account down every rung.
  * Empty pools are never "all broken".
  */
-export function allCredentialFailed(
-  pool: Array<{ id: string; verdict: HealthVerdict }>,
-): boolean {
+export function allCredentialFailed(pool: PoolVerdict[]): boolean {
   return pool.length > 0 && pool.every((a) => a.verdict === "credential_failed");
 }
 
 /**
- * Last-resort account when nothing is usable: the first member that can at
- * least AUTHENTICATE, so an unusable-pool launch fails with the real quota
- * error (which the chain and the degrade ladder both understand) rather than
- * with an auth error from a dead login that a healthier-credentialled member
- * would not have produced. Falls back to the home account when every member is
- * credential-broken — the caller raises the hard auth error in that case.
+ * The exhausted member most overdue a re-probe, if any is overdue at all (#26).
+ *
+ * A model-scoped rejection is honoured until the reset it quoted, however old
+ * the observation — deliberately, because a model cap that resets in two days
+ * must survive an idle account. The cost of that trust is a phantom: a limit
+ * the provider lifted early stays on the books until the quoted reset, and
+ * nothing re-tests it, because an exhausted account is never launched. One
+ * live pool held such a record for four days on an account that was serving
+ * the model through its own backend the whole time; with the home account
+ * then genuinely limited, the pool read as wholly exhausted and every turn
+ * was launched on home, refused, and surrendered to the host's chain.
+ *
+ * The launch is going to be spent regardless — a wholly exhausted pool still
+ * launches, so that the failure is real and the chain moves on. So spend it
+ * where it can also answer a question: on the account whose rejection is
+ * oldest, provided it is older than the bound past which we already decline to
+ * keep asserting an account-level rejection (REJECTION_REVALIDATE_AFTER_MS).
+ * This costs no launch that would not have happened, and the bound keeps two
+ * genuinely limited accounts from trading turns: a failed probe re-records the
+ * rejection with a fresh observation, which takes that account out of the
+ * running for the next hour.
  */
-export function fallbackPoolAccount(
-  pool: Array<{ id: string; verdict: HealthVerdict }>,
-): string {
+export function overdueProbeAccount(pool: PoolVerdict[], nowMs: number): string | undefined {
+  let oldest: PoolVerdict | undefined;
+  for (const a of pool) {
+    if (a.verdict !== "exhausted" || a.observedAt === undefined) continue;
+    if (nowMs - a.observedAt <= REJECTION_REVALIDATE_AFTER_MS) continue;
+    if (!oldest || a.observedAt < oldest.observedAt!) oldest = a;
+  }
+  return oldest?.id;
+}
+
+/**
+ * Last-resort account when nothing is usable: an exhausted member overdue a
+ * re-probe if there is one (see `overdueProbeAccount`), otherwise the first
+ * member that can at least AUTHENTICATE, so an unusable-pool launch fails with
+ * the real quota error (which the chain and the degrade ladder both
+ * understand) rather than with an auth error from a dead login that a
+ * healthier-credentialled member would not have produced. Falls back to the
+ * home account when every member is credential-broken — the caller raises the
+ * hard auth error in that case.
+ *
+ * `nowMs` is optional so callers that hold no evidence ages keep the previous
+ * answer exactly.
+ */
+export function fallbackPoolAccount(pool: PoolVerdict[], nowMs?: number): string {
+  const probe = nowMs === undefined ? undefined : overdueProbeAccount(pool, nowMs);
+  if (probe) return probe;
   return (pool.find((a) => a.verdict !== "credential_failed") ?? pool[0]).id;
 }
 
 /**
  * The account a pooled-backend launch should run on. Unlike choosePoolAccount
- * this always answers: when the whole pool is exhausted the home account is
- * returned anyway, so the launch fails for real and OpenClaw's reactive chain
- * drops to the next provider.
+ * this always answers: when the whole pool is exhausted an account is returned
+ * anyway, so the launch fails for real and OpenClaw's reactive chain drops to
+ * the next provider.
  */
-export function pickPoolAccountForLaunch(
-  pool: Array<{ id: string; verdict: HealthVerdict }>,
-): string {
-  return choosePoolAccount(pool) ?? fallbackPoolAccount(pool);
+export function pickPoolAccountForLaunch(pool: PoolVerdict[], nowMs?: number): string {
+  return choosePoolAccount(pool) ?? fallbackPoolAccount(pool, nowMs);
 }

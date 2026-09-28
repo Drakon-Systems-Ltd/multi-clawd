@@ -30,7 +30,12 @@
  *   3. ONE RETRY. The second account's own limit is a real answer about the
  *      pool, not something to keep spending turns on.
  */
-import { classifyAccountHealth, type HealthOptions } from "./health.js";
+import {
+  classifyAccountHealth,
+  overdueProbeAccount,
+  type HealthOptions,
+  type PoolVerdict,
+} from "./health.js";
 import type { AccountHealthState } from "./shim-core.js";
 
 /** One sibling the shim may re-spawn onto, as handed over by the plugin. */
@@ -113,6 +118,13 @@ export function retryArming(argv: string[], roster: RetryAccount[]): RetryArming
  * The sibling to retry onto: roster order (the pool's own preference order),
  * first one whose CURRENT state does not already bar it for this model. The
  * failing account is not in the roster, so it cannot be chosen.
+ *
+ * With no healthy sibling, a sibling whose rejection is overdue a re-probe is
+ * taken instead (#26, see `overdueProbeAccount`). The turn is otherwise lost to
+ * the host's chain on the strength of evidence we have already stopped
+ * trusting elsewhere; if the sibling really is still limited the user gets its
+ * refusal instead of the first account's, which is the same outcome one
+ * launch later. Still one retry, still never the refusing account.
  */
 export function chooseRetryAccount(params: {
   roster: RetryAccount[];
@@ -121,20 +133,23 @@ export function chooseRetryAccount(params: {
   nowMs: number;
   options?: HealthOptions;
 }): RetryAccount | undefined {
+  const verdicts: PoolVerdict[] = [];
   for (const account of params.roster) {
     const state = params.readState(account.stateFile);
-    const verdict = classifyAccountHealth(
+    const health = classifyAccountHealth(
       state,
       params.options ?? {},
       params.nowMs,
       params.modelId,
-    ).verdict;
+    );
     // `no_data` is eligible on purpose: an account that has never run is the
     // normal state of a standby, and refusing it would leave the pool with
     // nothing to fail over to on the very first limit it meets.
-    if (verdict === "ok" || verdict === "no_data") return account;
+    if (health.verdict === "ok" || health.verdict === "no_data") return account;
+    verdicts.push({ id: account.id, verdict: health.verdict, observedAt: health.observedAt });
   }
-  return undefined;
+  const probe = overdueProbeAccount(verdicts, params.nowMs);
+  return probe ? params.roster.find((a) => a.id === probe) : undefined;
 }
 
 /**

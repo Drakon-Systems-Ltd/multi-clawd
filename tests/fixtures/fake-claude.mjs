@@ -22,6 +22,13 @@ if (process.env.FAKE_CLAUDE_EMULATE_RESUME === "1") {
   }
 }
 
+// The refusal wording is the provider's and has changed between CLI versions
+// (a version-scoped "Fable 5 limit", a family-wide "Fable limit"); tests that
+// care which one they get say so.
+const LIMIT_TEXT =
+  process.env.FAKE_CLAUDE_LIMIT_TEXT ??
+  "You've reached your Fable 5 limit. /model to switch models.";
+
 const lines = [
   '{"type":"system","subtype":"init","session_id":"s1"}',
   '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]},"session_id":"s1"}',
@@ -44,7 +51,7 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
       type: "result",
       subtype: "error_during_execution",
       is_error: true,
-      result: "You've reached your Fable 5 limit. /model to switch models.",
+      result: LIMIT_TEXT,
       session_id: "s1",
     }) + "\n",
   );
@@ -106,7 +113,7 @@ process.stdin.on("end", () => {
             type: "result",
             subtype: "error_during_execution",
             is_error: true,
-            result: "You've reached your Fable 5 limit. /model to switch models.",
+            result: LIMIT_TEXT,
             received_model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
             session_id: "s1",
           }

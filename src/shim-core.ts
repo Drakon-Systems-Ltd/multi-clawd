@@ -46,6 +46,14 @@ export interface WindowHealth {
    * before, so no migration is required.
    */
   model?: string;
+  /**
+   * Set on a `model:` window when the provider's refusal named a model FAMILY
+   * rather than one version ("You've reached your Fable limit"). The limit
+   * then covers every version of that family, so the reader gates on the
+   * family instead of on the key's exact model id (#26). Absent means the
+   * rejection is scoped to the one model the key names, as before.
+   */
+  family?: string;
 }
 
 /**
@@ -215,6 +223,7 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
       // Tolerant round-trip: keep a string rawInfo, drop anything else.
       rawInfo: typeof w.rawInfo === "string" ? w.rawInfo : undefined,
       model: typeof w.model === "string" ? w.model : undefined,
+      family: typeof w.family === "string" ? w.family : undefined,
     };
   }
   // Tolerant round-trip of the credential record: a malformed one is dropped,
@@ -370,6 +379,36 @@ export function canonicalizeModelWindowKeys(
   return out;
 }
 
+const MODEL_FAMILY_RE = /^claude-([a-z]+)-/;
+
+/**
+ * The family a Claude model id belongs to (`claude-fable-5-1` → `fable`), or
+ * undefined for anything that is not recognisably a Claude model id. Read off
+ * the id rather than looked up, so a family shipped tomorrow needs no table.
+ */
+export function modelFamily(modelId: string): string | undefined {
+  return MODEL_FAMILY_RE.exec(canonicalizeModelIdForWindow(modelId))?.[1];
+}
+
+/**
+ * Whether a refusal covers the whole family of the model that was launched.
+ *
+ * The provider words the two cases differently: a version-scoped cap names the
+ * version ("Fable 5 limit"), a family-wide one names only the family ("Fable
+ * limit"). Observed on one account: the refusal named the family, and a launch
+ * of the family's other version was refused identically seconds later while
+ * the pool still believed that version was free (#26).
+ *
+ * Conservative in both directions: the name must be exactly the launched
+ * model's family, so a refusal about anything else — another family, a
+ * "weekly" limit — is never widened on a guess.
+ */
+export function limitFamilyFor(displayName: string, modelId: string): string | undefined {
+  const family = modelFamily(modelId);
+  if (!family) return undefined;
+  return displayName.trim().toLowerCase() === family ? family : undefined;
+}
+
 const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;
 
 /**
@@ -425,6 +464,7 @@ export function recordModelLimit(
   modelId: string,
   now: number,
   resetsAt?: number,
+  family?: string,
 ): AccountHealthState {
   return {
     ...state,
@@ -435,9 +475,80 @@ export function recordModelLimit(
         status: "rejected",
         resetsAt,
         seenAt: now,
+        ...(family ? { family } : {}),
       },
     },
   };
+}
+
+/**
+ * Does a recorded `model:` window apply to a request for `requestedModel`?
+ * Exact (canonical) model, or — for a family-wide rejection — any version of
+ * that family. Shared by the reader and by the success-clear so the two can
+ * never disagree about which records a given model touches.
+ */
+export function modelWindowApplies(
+  windowKey: string,
+  w: { family?: string },
+  requestedModel: string,
+): boolean {
+  if (!windowKey.startsWith("model:")) return false;
+  if (modelWindowKey(windowKey.slice("model:".length)) === modelWindowKey(requestedModel)) {
+    return true;
+  }
+  return w.family !== undefined && w.family === modelFamily(requestedModel);
+}
+
+/**
+ * End every model rejection that a successful turn on `modelId` contradicts
+ * (#26). A rejection used to be ended only by its own reset passing: nothing
+ * a successful launch wrote could displace it, so an account that the provider
+ * had quietly un-limited stayed benched for that model until the quoted reset
+ * — four days, in the case that prompted this — while serving the model
+ * through its own backend the whole time.
+ *
+ * Writes an `allowed` record rather than deleting the key, for the reason
+ * `clearCredentialFailure` does: persistence is read-merge-write with the
+ * newer `seenAt` winning per key, so a deleted key loses to the rejection
+ * still on disk and the clear undoes itself.
+ */
+export function clearModelRejection(
+  state: AccountHealthState,
+  modelId: string,
+  now: number,
+): { state: AccountHealthState; changed: boolean } {
+  const windows = { ...state.windows };
+  let changed = false;
+  for (const [key, w] of Object.entries(state.windows)) {
+    if (w.status !== "rejected") continue;
+    if (!modelWindowApplies(key, w, modelId)) continue;
+    windows[key] = { status: "allowed", seenAt: now };
+    changed = true;
+  }
+  if (!changed) return { state, changed };
+  return { state: { ...state, updatedAt: now, windows }, changed };
+}
+
+/**
+ * Recognise the record that ends a turn that actually worked: a `result` that
+ * is not an error. The exit code is not enough — the CLI can exit 0 having
+ * delivered a refusal as its result — and neither is the absence of an error
+ * line, which a launch in any other output mode also satisfies.
+ */
+export function parseSuccessResult(line: string): boolean {
+  if (!line.includes('"result"')) return false;
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return false;
+  }
+  if (typeof record !== "object" || record === null) return false;
+  const r = record as { type?: unknown; is_error?: unknown; subtype?: unknown };
+  if (r.type !== "result") return false;
+  if (r.is_error === true) return false;
+  if (typeof r.subtype === "string" && r.subtype.startsWith("error")) return false;
+  return true;
 }
 
 /**

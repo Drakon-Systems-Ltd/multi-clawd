@@ -4,6 +4,36 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **A model limit on the home account made every turn fail over (#26).** The
+  home account was classified correctly — exhausted for the model. The turn was
+  launched there anyway because the *other* account also read as exhausted, on
+  a model rejection four days old whose quoted reset was still ahead, while that
+  account was serving the same model through its own backend. A wholly
+  exhausted pool falls back to home, so every turn was launched on the one
+  account known to refuse it, and surrendered to the host's chain. Three
+  changes:
+  - **A successful turn ends the rejection it contradicts.** The shim now
+    writes an `allowed` record over a model rejection when a launch on that
+    model ends in a non-error result. Until now nothing a successful launch
+    wrote could displace one; it stood until the reset it had quoted.
+  - **A wholly exhausted pool re-tests its oldest rejection.** The launch
+    happens regardless, so it is spent on the account whose rejection is oldest
+    and more than an hour old, instead of unconditionally on home. The same rule
+    lets the in-turn retry take an overdue sibling when no healthy one exists.
+    A failed re-test re-records the rejection, so two genuinely limited
+    accounts do not trade turns.
+  - **Family-wide limits are recorded as such.** When the refusal names a
+    family ("Fable limit") rather than a version, the rejection gates every
+    version of that family on the account. Previously each version had to be
+    refused once before the pool stopped launching it.
+- **`doctor` reported `health ok` for an account refusing every turn of one
+  model.** The serving line is account-wide by design; model limits are now
+  listed beneath it per model, and a model limited on every account is a
+  failure that names which account the next launch will re-test.
+
 ## [1.9.5] - 2026-09-27
 
 ### Changed

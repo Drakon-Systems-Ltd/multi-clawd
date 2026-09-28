@@ -29,11 +29,14 @@ import { dirname } from "node:path";
 import {
   classifyStateReadFailure,
   clearCredentialFailure,
+  clearModelRejection,
   createLineScanner,
+  limitFamilyFor,
   mergeHealthStates,
   parseAuthFailure,
   parseRateLimitEvent,
   parseStoredState,
+  parseSuccessResult,
   recordCredentialFailure,
   updateHealthState,
   type AccountHealthState,
@@ -247,9 +250,19 @@ function guessLimitResetsAt(): number | undefined {
  */
 let sawAuthFailure = false;
 
+/**
+ * Whether this launch was refused on a model limit, and whether it ended in a
+ * result that was not an error (#26). Together they decide if the turn counts
+ * as evidence that the model is being served: a refusal never does, and
+ * neither does a launch whose outcome the shim could not read.
+ */
+let sawModelLimit = false;
+let sawSuccessResult = false;
+
 /** Telemetry for one stream line. Runs whether or not the line is forwarded. */
 function observeLine(line: string): void {
   try {
+    if (parseSuccessResult(line)) sawSuccessResult = true;
     const event = parseRateLimitEvent(line);
     if (event) {
       state = updateHealthState(state, event, Date.now(), effectiveModelId());
@@ -262,12 +275,16 @@ function observeLine(line: string): void {
     // account that just refused must already be excluded when it does.
     const limitHit = parseModelLimitError(line);
     if (limitHit) {
+      sawModelLimit = true;
       const model = effectiveModelId();
       if (model) {
-        state = recordModelLimit(state, model, Date.now(), guessLimitResetsAt());
+        // A refusal that names the family, not a version, covers the family.
+        const family = limitFamilyFor(limitHit.displayName, model);
+        state = recordModelLimit(state, model, Date.now(), guessLimitResetsAt(), family);
         persistState();
         process.stderr.write(
-          `[multi-clawd shim] model limit hit recorded: ${model} (reported as "${limitHit.displayName}")\n`,
+          `[multi-clawd shim] model limit hit recorded: ${model} (reported as "${limitHit.displayName}"` +
+            `${family ? `, applies to every ${family} model` : ""})\n`,
         );
       }
     }
@@ -407,6 +424,10 @@ function attemptRetry(): boolean {
   stateFile = target.stateFile;
   state = { accountId, windows: {} };
   sawAuthFailure = false;
+  // The refusal belonged to the account that was left; what the sibling does
+  // from here is judged on its own.
+  sawModelLimit = false;
+  sawSuccessResult = false;
   child = spawn(command, childArgs, {
     stdio: ["pipe", "pipe", "inherit"],
     env: buildRetryEnv(process.env, target),
@@ -505,6 +526,44 @@ function clearRecordedAuthFailureOnSuccess(): void {
   }
 }
 
+/**
+ * A turn that ended in a real result proves this account is serving this model
+ * right now, so any rejection recorded against the model is stale (#26). Until
+ * this existed nothing a successful launch wrote could displace a model
+ * rejection — it stood until the reset it had quoted, and an account the
+ * provider had un-limited early stayed benched for days.
+ *
+ * Three conditions, all required: a clean exit, a non-error result actually
+ * seen in the stream, and no limit refusal in the same launch. Conditional on
+ * a rejection being on disk, so the common path adds no write.
+ */
+function clearRecordedModelRejectionOnSuccess(): void {
+  if (!stateFile || !sawSuccessResult || sawModelLimit) return;
+  try {
+    const model = effectiveModelId();
+    if (!model) return;
+    const disk = readPersistedState();
+    if (!disk) return;
+    const now = Date.now();
+    const cleared = clearModelRejection(disk, model, now);
+    if (!cleared.changed) return;
+    // Carry only the rewritten records into the live state and let the normal
+    // read-merge-write persist them: newest-seenAt-wins is what makes the
+    // clear stick, and everything else on disk is left to the merge.
+    const windows = { ...state.windows };
+    for (const [key, w] of Object.entries(cleared.state.windows)) {
+      if (disk.windows[key] !== w) windows[key] = w;
+    }
+    state = { ...state, updatedAt: now, windows };
+    persistState();
+    process.stderr.write(
+      `[multi-clawd shim] ${model} served by ${accountId} — model rejection cleared\n`,
+    );
+  } catch {
+    // clearing is best-effort; the rejection's own reset is the backstop
+  }
+}
+
 function onChildClose(code: number | null, signal: NodeJS.Signals | null): void {
   if (signal) {
     process.kill(process.pid, signal);
@@ -512,7 +571,10 @@ function onChildClose(code: number | null, signal: NodeJS.Signals | null): void 
   }
   // flush() on stdout 'end' already ran for a normal close; this only covers
   // the state write, which must happen before we hand over the exit code.
-  if ((code ?? 0) === 0) clearRecordedAuthFailureOnSuccess();
+  if ((code ?? 0) === 0) {
+    clearRecordedAuthFailureOnSuccess();
+    clearRecordedModelRejectionOnSuccess();
+  }
   process.exit(code ?? 0);
 }
 
