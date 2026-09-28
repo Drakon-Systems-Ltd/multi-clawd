@@ -612,7 +612,7 @@ if (!pool) {
         sessionWarns++;
       }
     }
-    if (readable > 0 && sessionWarns === 0) ok("session overrides: no off-pool /model pins");
+    if (readable > 0 && sessionWarns === 0) ok("session overrides: no off-pool model pins");
   }
 }
 

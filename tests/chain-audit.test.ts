@@ -227,6 +227,30 @@ describe("auditSessionOverrides", () => {
     expect(findings[0].reason).toContain("single pool account");
   });
 
+  // OpenClaw's inbound inline-directive parser (get-reply: MODEL_*_DIRECTIVE_PATTERN)
+  // matches "/model" anywhere in a message when preceded by whitespace or start.
+  // On 28 Sep 2026 a doctor report pasted into a Telegram topic contained
+  // "… /model pin to a single pool account (claw2)"; OpenClaw applied
+  // `/model pin` to that session and its next two turns failed on model "pin".
+  // Every emitted reason must therefore be un-parseable as a directive.
+  const OPENCLAW_INLINE_MODEL_DIRECTIVE = /(?<!\S)\/model(?=$|\s|:)/;
+
+  test("REGRESSION: emitted reasons never contain a parseable /model directive", () => {
+    expect(OPENCLAW_INLINE_MODEL_DIRECTIVE.test("claw2/claude-fable-5-1 /model pin to")).toBe(true); // the regex is armed
+    expect(OPENCLAW_INLINE_MODEL_DIRECTIVE.test("a `/model` pin")).toBe(false); // backtick-adjacent is safe
+    const findings = auditSessionOverrides(
+      store({
+        "agent:main:strong": { providerOverride: "anthropic", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" },
+        "agent:main:account": { providerOverride: "claw2", modelOverride: "claude-opus-4-8", modelOverrideSource: "user" },
+      }),
+      true,
+    );
+    expect(findings).toHaveLength(2);
+    for (const f of findings) {
+      expect(`${f.surface}: ${f.ref} ${f.reason}`).not.toMatch(OPENCLAW_INLINE_MODEL_DIRECTIVE);
+    }
+  });
+
   test("EPHEMERAL: subagent session with off-pool user pin → ZERO (per-run, not a standing bypass)", () => {
     // Live shape: a spawned coding subagent pinned to anthropic/opus.
     // Ephemeral per-run routing, re-resolved every spawn — must not warn, or

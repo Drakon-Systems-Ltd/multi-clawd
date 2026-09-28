@@ -525,10 +525,17 @@ export function auditSessionOverrides(
     if (!severity) continue; // clawd/ (in-pool) or non-Claude → fine
 
     // 4. Emit — all `warn` for doctor (informational; never flips READY).
+    //
+    // NEVER write "/model" after whitespace in emitted text. OpenClaw parses
+    // inline directives anywhere in an inbound chat message with
+    // `(?<!\S)\/model(?=$|\s|:)`, so a doctor report pasted into a chat that
+    // contained "… /model pin to a single pool account" set that session's
+    // model to the literal "pin" and killed its next two turns (28 Sep 2026).
+    // tests/chain-audit.test.ts guards every emitted reason against that regex.
     const reason =
       severity === "strong"
-        ? `off-pool /model pin — routes direct to ${provider}, bypassing the ${POOL_PROVIDER} pool; no cross-account failover`
-        : `/model pin to a single pool account (${provider}); cross-account failover won't fire — use ${POOL_PROVIDER}/ for the pool`;
+        ? `off-pool model pin — routes direct to ${provider}, bypassing the ${POOL_PROVIDER} pool; no cross-account failover`
+        : `model pin to a single pool account (${provider}); cross-account failover won't fire — use ${POOL_PROVIDER}/ for the pool`;
     findings.push({ surface: `session ${sessionKey}`, ref, severity: "warn", reason });
   }
   return findings;
