@@ -10,7 +10,7 @@
  * a launch on an account that is near-limit or exhausted while a healthier
  * account exists.
  */
-import { choosePoolAccount, fallbackPoolAccount, type HealthVerdict } from "./health.js";
+import { choosePoolAccount, fallbackPoolAccount, type PoolVerdict } from "./health.js";
 
 export interface StickyEntry {
   account: string;
@@ -26,7 +26,7 @@ export interface StickyDecision {
 export const DEFAULT_MIN_DWELL_MS = 10 * 60 * 1000;
 
 export function decideStickySelection(params: {
-  verdicts: Array<{ id: string; verdict: HealthVerdict }>;
+  verdicts: PoolVerdict[];
   sticky?: StickyEntry;
   nowMs: number;
   minDwellMs?: number;
@@ -40,8 +40,10 @@ export function decideStickySelection(params: {
   // failure is the REAL one (a quota error the chain and the degrade ladder
   // understand), not an auth error borrowed from a dead login. With every
   // member credential-broken this is still home, and the pool raises the hard
-  // auth error instead of launching. Nothing to stick to either way.
-  if (!healthChoice) return { account: fallbackPoolAccount(verdicts) };
+  // auth error instead of launching. Nothing to stick to either way — and
+  // that includes a re-probe of an overdue rejection (#26): it is a question,
+  // not a rotation, and if the answer is no there is nothing to dwell on.
+  if (!healthChoice) return { account: fallbackPoolAccount(verdicts, nowMs) };
 
   const stickyVerdict = sticky
     ? verdicts.find((v) => v.id === sticky.account)?.verdict

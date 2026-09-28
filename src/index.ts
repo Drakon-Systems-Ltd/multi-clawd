@@ -49,7 +49,12 @@ import {
 import { decideDegradation, matchesPin } from "./degrade.js";
 import { resolveExecMode, permissionModeArgs } from "./exec-policy.js";
 import { resolveBaseModelIds } from "./catalog-source.js";
-import { allCredentialFailed, classifyAccountHealth, pickPoolAccountForLaunch } from "./health.js";
+import {
+  allCredentialFailed,
+  classifyAccountHealth,
+  overdueProbeAccount,
+  pickPoolAccountForLaunch,
+} from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
 import {
   clearCredentialFailure,
@@ -1218,15 +1223,35 @@ export function registerPoolBackend(
       throw new Error(`[multi-clawd] ${text}`);
     }
     const previousSticky = readStickyEntry(stickyFile);
+    const poolVerdicts = verdicts.map((v) => ({
+      id: v.id,
+      verdict: v.health.verdict,
+      observedAt: v.health.observedAt,
+    }));
     const decision = decideStickySelection({
-      verdicts: verdicts.map((v) => ({ id: v.id, verdict: v.health.verdict })),
+      verdicts: poolVerdicts,
       sticky: previousSticky,
       nowMs: now,
       minDwellMs,
     });
     const chosen = members.find((a) => a.id === decision.account) ?? members[0];
     const previousAccount = previousSticky?.account ?? members[0].id;
-    if (decision.account !== previousAccount) {
+    // A wholly exhausted pool launching somewhere other than home is a
+    // re-probe of an overdue rejection (#26), not a rotation: say which
+    // account and how old the evidence is, and raise no rotation alert — if
+    // the probe fails nothing has moved, and if it succeeds the next launch
+    // reports the rotation itself.
+    const probing =
+      overdueProbeAccount(poolVerdicts, now) === decision.account &&
+      poolVerdicts.every((v) => v.verdict === "exhausted" || v.verdict === "credential_failed");
+    if (probing) {
+      const observedAt = poolVerdicts.find((v) => v.id === decision.account)?.observedAt ?? now;
+      logger.info(
+        `[multi-clawd] pool ${poolId}: every account is exhausted for ${requestedModel} — ` +
+          `launching on ${decision.account} to re-test a rejection last seen ` +
+          `${Math.round((now - observedAt) / 3600000)}h ago`,
+      );
+    } else if (decision.account !== previousAccount) {
       const home = verdicts[0];
       const line =
         decision.account === members[0].id

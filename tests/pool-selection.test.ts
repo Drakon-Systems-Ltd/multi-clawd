@@ -268,3 +268,65 @@ describe("resume handover wiring", () => {
     expect(JSON.parse(env.MULTI_CLAWD_SESSION_DIRS)).toEqual(["/tmp/claw1-login", "/tmp/claw2-login"]);
   });
 });
+
+describe("wholly exhausted pool re-probes the oldest rejection (#26)", () => {
+  const HOUR = 60 * 60 * 1000;
+  const fableKey = "model:claude-fable-5-1";
+
+  function writeIncident(siblingAgeMs: number): void {
+    // Home: refused minutes ago. Sibling: a rejection `siblingAgeMs` old whose
+    // quoted reset is still ahead — the record that outlived the limit.
+    writeState("claw1", {
+      seven_day: {
+        status: "allowed_warning",
+        utilization: 0.8,
+        resetsAt: NOW_S() + 23 * 3600,
+        seenAt: Date.now() - 8 * 60 * 1000,
+      },
+      [fableKey]: {
+        status: "rejected",
+        resetsAt: NOW_S() + 23 * 3600,
+        seenAt: Date.now() - 6 * 60 * 1000,
+      },
+    });
+    writeState("claw2", {
+      five_hour: { status: "allowed", resetsAt: NOW_S() + 4 * 3600, seenAt: Date.now() },
+      [fableKey]: {
+        status: "rejected",
+        resetsAt: NOW_S() + 4 * 3600,
+        seenAt: Date.now() - siblingAgeMs,
+      },
+    });
+  }
+
+  test("the launch is spent on the sibling, and the log says why", async () => {
+    writeIncident(99 * HOUR);
+    const { prepare, logs } = registerPool();
+    const { env } = await prepare({ modelId: "clawd/claude-fable-5-1", workspaceDir: "/tmp/ws" });
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/tmp/claw2-login");
+    expect(logs.info.join("\n")).toMatch(/every account is exhausted for (clawd\/)?claude-fable-5-1/);
+    expect(logs.info.join("\n")).toMatch(/launching on claw2 to re-test a rejection last seen 99h ago/);
+    // A probe is not a rotation and must not be announced as one.
+    expect(logs.info.join("\n")).not.toMatch(/rotated to claw2/);
+  });
+
+  test("a recent sibling rejection keeps the launch on home", async () => {
+    writeIncident(20 * 60 * 1000);
+    const { prepare } = registerPool();
+    const { env } = await prepare({ modelId: "clawd/claude-fable-5-1", workspaceDir: "/tmp/ws" });
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/tmp/claw1-login");
+  });
+
+  test("other models are untouched: home still serves what it is not limited for", async () => {
+    writeIncident(99 * HOUR);
+    expect(await chosenAccount("clawd/claude-opus-5-5")).toContain("claw1");
+  });
+
+  test("the failed attempt's roster still excludes the launched account", async () => {
+    writeIncident(99 * HOUR);
+    const { prepare } = registerPool();
+    const { env } = await prepare({ modelId: "clawd/claude-fable-5-1", workspaceDir: "/tmp/ws" });
+    const roster = JSON.parse(env.MULTI_CLAWD_RETRY_ACCOUNTS) as Array<{ id: string }>;
+    expect(roster.map((r) => r.id)).toEqual(["claw1"]);
+  });
+});

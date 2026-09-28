@@ -284,9 +284,10 @@ const { checkAccountCredential, keychainServiceForConfigDir } = await importDist
   "checkAccountCredential",
   "keychainServiceForConfigDir",
 ]);
-const { summarizeWindowUsage, classifyAccountHealth } = await importDist("health.js", [
+const { summarizeWindowUsage, classifyAccountHealth, overdueProbeAccount } = await importDist("health.js", [
   "summarizeWindowUsage",
   "classifyAccountHealth",
+  "overdueProbeAccount",
 ]);
 // "cli", like the chain audits: resolving WHICH login backs an account is
 // doctor's own diagnostic, not a description of the running plugin's
@@ -458,17 +459,15 @@ else {
   // sticky can be about to expire, and health outranks both.
   if (members.length > 0) {
     const now = Date.now();
+    const healthOptions = {
+      staleAfterMs: pool.staleAfterMs,
+      utilizationThreshold: pool.utilizationThreshold,
+      rotateOnOverage: pool.rotateOnOverage,
+    };
     const verdicts = members.map((id) => ({
       id,
-      verdict: classifyAccountHealth(
-        readJson(join(STATE_DIR, `${id}.json`)),
-        {
-          staleAfterMs: pool.staleAfterMs,
-          utilizationThreshold: pool.utilizationThreshold,
-          rotateOnOverage: pool.rotateOnOverage,
-        },
-        now,
-      ).verdict,
+      verdict: classifyAccountHealth(readJson(join(STATE_DIR, `${id}.json`)), healthOptions, now)
+        .verdict,
     }));
     const decision = decideStickySelection({
       verdicts,
@@ -499,8 +498,54 @@ else {
       );
     }
     // The launch decision is model-aware (a 429 can bench one account for one
-    // model only); doctor has no model in hand, so this is the account-wide
-    // answer. Say so rather than let a model-scoped exception read as a lie.
+    // model only); doctor has no model in hand, so the line above is the
+    // account-wide answer. A model limit is therefore reported separately, per
+    // model, from the same classifier the launch uses — "health ok" beside an
+    // account that refuses every turn for one model read as a clean bill of
+    // health during the very outage it should have named (#26).
+    const limitedModels = new Set();
+    for (const id of members) {
+      const state = readJson(join(STATE_DIR, `${id}.json`));
+      for (const key of Object.keys(state?.windows ?? {})) {
+        if (key.startsWith("model:")) limitedModels.add(key.slice("model:".length));
+      }
+    }
+    for (const model of [...limitedModels].sort()) {
+      const perAccount = members.map((id) => {
+        const health = classifyAccountHealth(
+          readJson(join(STATE_DIR, `${id}.json`)),
+          healthOptions,
+          now,
+          model,
+        );
+        return { id, verdict: health.verdict, observedAt: health.observedAt, resumeAt: health.resumeAt };
+      });
+      const limited = perAccount.filter((v) => v.verdict === "exhausted");
+      if (limited.length === 0) continue;
+      const detail = limited
+        .map((v) => {
+          const ageMin = typeof v.observedAt === "number" ? Math.round((now - v.observedAt) / 60000) : undefined;
+          const seen =
+            ageMin === undefined
+              ? ""
+              : `, seen ${ageMin < 90 ? `${ageMin}m` : `${Math.round(ageMin / 60)}h`} ago`;
+          const until =
+            typeof v.resumeAt === "number" ? ` until ${new Date(v.resumeAt).toISOString()}` : "";
+          return `${v.id}${until}${seen}`;
+        })
+        .join("; ");
+      if (limited.length === perAccount.length) {
+        const probe = overdueProbeAccount(perAccount, now);
+        bad(
+          `${model}: EVERY account is limited (${detail}) — turns for this model fall through to ` +
+            `the host's chain${
+              probe ? `; the next launch re-tests ${probe}, whose rejection is the oldest` : ""
+            }`,
+        );
+      } else {
+        warn(`${model}: limited on ${detail} — served by the remaining account(s)`);
+      }
+    }
     if (VERBOSE) {
       note(`account-wide verdicts: ${verdicts.map((v) => `${v.id}:${v.verdict}`).join(" ")}`);
     }
