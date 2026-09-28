@@ -4,7 +4,7 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.9.7] - 2026-09-28
 
 ### Changed
 - **The in-turn retry now covers resumed launches (#24).** A turn refused on a
