@@ -4,6 +4,14 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.9.6] - 2026-09-28
+
+### Added
+
+- **Claude Sonnet 5.5 is a known model.** `claude-sonnet-5-5` (released 28 Sep 2026) now
+  advertises its real 1M context window and 128k output. Before this the pool offered it at
+  the 200k default. The `sonnet-5.5` alias resolves to it.
+
 ## [1.9.5] - 2026-09-27
 
 ### Changed

@@ -43,6 +43,7 @@ export const MODEL_ALIASES: Record<string, string> = {
   "opus-4.7": "claude-opus-4-7",
   "opus-4.6": "claude-opus-4-6",
   sonnet: "sonnet",
+  "sonnet-5.5": "claude-sonnet-5-5",
   "sonnet-4.6": "claude-sonnet-4-6",
   haiku: "haiku",
 };
@@ -56,6 +57,8 @@ const KNOWN_SPECS: Record<string, Omit<ModelSpec, "imageMaxSidePx">> = {
   "claude-opus-4-7": { name: "Claude Opus 4.7", contextWindow: 1048576, maxTokens: 64000 },
   "claude-opus-4-6": { name: "Claude Opus 4.6", contextWindow: 1048576, maxTokens: 64000 },
   "claude-sonnet-4-6": { name: "Claude Sonnet 4.6", contextWindow: 1048576, maxTokens: 64000 },
+  // Sonnet 5.5 (released 28 Sep 2026): 1M context, 128k output per the models overview.
+  "claude-sonnet-5-5": { name: "Claude Sonnet 5.5", contextWindow: 1000000, maxTokens: 128000 },
   // Sonnet 5 ships a 1M window (OpenClaw's bundled anthropic catalog: 1000000).
   "claude-sonnet-5": { name: "Claude Sonnet 5", contextWindow: 1000000, maxTokens: 64000 },
   "claude-fable-5-1": { name: "Claude Fable 5.1", contextWindow: 1000000, maxTokens: 128000 },
