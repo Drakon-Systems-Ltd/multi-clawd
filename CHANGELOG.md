@@ -4,6 +4,21 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.9.8] - 2026-09-29
+
+### Fixed
+- **Every Claude turn failed over once OpenClaw pruned its plugin capture (#31).**
+  OpenClaw 2026.9.6+ loads plugins from a per-generation copy under
+  `~/.openclaw/tmp/plugin-captures/`, and the shim path was taken from that load
+  location, so the registered `clawd`/`claw2` backends pointed into a temporary
+  directory. The gateway holds no handle on `shim.js`, which is only spawned per
+  request, so removing the capture left the backends pointing at a missing file
+  for the life of the process (1,200+ failed runs in a day on one box). The
+  plugin now copies its `dist/*.js` into a content-addressed directory under
+  `~/.openclaw/state/multi-clawd/runtime/` when it loads and registers the shim
+  from there. If that copy fails, it logs an error and falls back to the load
+  path, as before.
+
 ## [1.9.7] - 2026-09-28
 
 ### Changed
