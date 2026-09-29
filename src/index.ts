@@ -103,6 +103,7 @@ import { execFileSync } from "node:child_process";
 import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
 import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
+import { materialiseRuntime } from "./runtime-home.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
 // declaration files. Derive the backend contract from the stable registration
@@ -604,8 +605,22 @@ function buildRuntimeModel(
   };
 }
 
-/** dist/shim.js sits next to dist/index.js in the installed extension. */
-const SHIM_PATH = fileURLToPath(new URL("./shim.js", import.meta.url));
+/**
+ * The backend shim, copied to a stable content-addressed dir (issue #31).
+ * The load path (import.meta.url) can be OpenClaw's ephemeral plugin-capture
+ * copy, which gets pruned while the registered backend still points at it.
+ */
+const SHIM_RUNTIME = materialiseRuntime(
+  dirname(fileURLToPath(import.meta.url)),
+  join(homedir(), ".openclaw", "state", "multi-clawd"),
+);
+if (!SHIM_RUNTIME.stable) {
+  console.error(
+    `[multi-clawd] could not copy the shim to a stable dir (${SHIM_RUNTIME.error}); ` +
+      `using the load path, which dies if OpenClaw prunes its plugin capture (issue #31)`,
+  );
+}
+const SHIM_PATH = SHIM_RUNTIME.shimPath;
 
 
 /** Catalog ids observed on previous runs — the baseline for "this model is new". */
