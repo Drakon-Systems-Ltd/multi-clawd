@@ -74,6 +74,9 @@ const WINDOW_LABELS: Record<string, string> = {
   five_hour: "5-hour",
   seven_day: "weekly",
   seven_day_overage_included: "weekly incl. overage",
+  // v1.10 live usage poll — the provider's own figures, not stream telemetry.
+  "usage:five_hour": "5-hour (live)",
+  "usage:seven_day": "weekly (live)",
 };
 
 /** "~42m" / "~7h" / "~3d" until an epoch-ms timestamp. */

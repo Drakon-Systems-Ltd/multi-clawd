@@ -4,6 +4,36 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [1.10.0] - 2026-10-04
+
+### Added
+- **Live usage polling.** The pool now reads each pooled account's current
+  usage from the provider on a timer (default every 2 minutes) using the OAuth
+  session the Claude CLI already holds — the same figures the CLI's `/usage`
+  shows. Both windows arrive as percentages with reset times, which closes the
+  two gaps stream telemetry left open: the 5-hour session window never carried
+  a number (so the 85% hand-over could not fire on the window that actually
+  runs out), and nothing was observed between turns. Polled records are
+  written under `usage:<window>` keys so they coexist with the shim's and feed
+  the existing selection rules unchanged: 86% on the session window rotates
+  the next launch, 100% is `exhausted` until the provider's own reset.
+- **Operator alert at 95%.** Any window at or past `pool.usagePoll.warnThreshold`
+  raises an alert (via the heartbeat, like the others) naming the account, the
+  window, the reset time, and whether launches have already moved; when every
+  pooled account is past the line, a pool-wide alert says the next stop is the
+  degrade ladder or the host's chain, with the soonest reset. Scoped model
+  limits warn too. Alerts clear themselves when the number falls.
+- **`multi-clawd usage`** — the live figures per account next to the pool's
+  verdict and the account the next launch would run on (`--json` available).
+- `pool.usagePoll` config: `enabled` (default true), `intervalMs` (default
+  120000, floor 60000), `warnThreshold` (default 0.95).
+
+### Notes
+- Read-only on credentials: the poll never refreshes, rewrites or copies a
+  token; an expired token is a skipped tick. Native and `configDir` accounts
+  are polled; token-based accounts keep stream telemetry only.
+- `explain` labels polled windows "(live)".
+
 ## [1.9.8] - 2026-09-29
 
 ### Fixed

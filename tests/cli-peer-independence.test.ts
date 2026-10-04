@@ -75,6 +75,9 @@ const CLI_ENTRY_MODULES = [
   "direct-sync.ts",
   "direct-report.ts",
   "openclaw-runner.ts",
+  // v1.10 live usage (`usage`)
+  "usage-poll.ts",
+  "account-env.ts",
 ];
 
 describe("the CLI runs without the openclaw peer", () => {

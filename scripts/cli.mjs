@@ -39,6 +39,7 @@ ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
   ${BOLD}explain${RESET}   your setup in plain English — accounts, pool, fallback chain
   ${BOLD}chain${RESET}     audit your model routing — what actually serves each turn
   ${BOLD}direct${RESET}    the direct anthropic/* route — status, or \`direct sync\` to store profiles
+  ${BOLD}usage${RESET}     live usage per account from the provider — what is left, and what the pool will do
   ${BOLD}update${RESET}    update the plugin to the latest version
   ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
   ${BOLD}hermes${RESET}    sync or diagnose Hermes Agent's Anthropic credential pool
@@ -712,6 +713,115 @@ async function explain() {
 }
 
 /**
+ * `usage` — ask the provider for each account's live usage (the figures the
+ * Claude CLI's own /usage shows), print them next to the pool's verdict, and
+ * say which account the next pooled launch would run on. Read-only: uses the
+ * login the CLI already holds and never refreshes or copies it. `--json` for
+ * machines.
+ */
+async function usageCommand(args) {
+  const { readFileSync: rf } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  let up, health, shim, env;
+  try {
+    up = await import(resolve(__dirname, "..", "dist", "usage-poll.js"));
+    health = await import(resolve(__dirname, "..", "dist", "health.js"));
+    shim = await import(resolve(__dirname, "..", "dist", "shim-core.js"));
+    env = await import(resolve(__dirname, "..", "dist", "account-env.js"));
+  } catch (err) {
+    console.error(distFailure("usage", "usage-poll.js", err));
+    process.exit(1);
+  }
+  const config = readOpenclawConfigSync();
+  if (!config) {
+    console.error("usage: could not read ~/.openclaw/openclaw.json");
+    process.exit(1);
+  }
+  const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
+  const accounts = Array.isArray(pc.accounts) ? pc.accounts : [];
+  const pool = pc.pool ? { ...pc.pool, id: pc.pool.id?.trim() || "clawd", accounts: pc.pool.accounts ?? [] } : undefined;
+  const healthOptions = {
+    utilizationThreshold: pool?.utilizationThreshold,
+    staleAfterMs: pool?.staleAfterMs,
+    rotateOnOverage: pool?.rotateOnOverage,
+  };
+  const warnThreshold = up.effectiveUsageWarnThreshold(pool?.usagePoll);
+  const rotateAt = pool?.utilizationThreshold ?? 0.85;
+  const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
+  const now = Date.now();
+  const rows = [];
+  for (const a of accounts) {
+    const row = { id: a.id, label: a.label };
+    if (a.oauthTokenFile || a.oauthTokenRef) {
+      row.skipped = "token-based login — not polled (stream telemetry only)";
+    } else if (!a.native && !a.configDir) {
+      row.skipped = "no login dir";
+    } else {
+      let raw;
+      try {
+        raw = rf(join(env.accountConfigDir(a), ".credentials.json"), "utf8");
+      } catch {
+        raw = undefined;
+      }
+      const token = up.readOAuthAccessToken(raw, now);
+      if ("skip" in token) row.skipped = token.skip;
+      else {
+        const r = await up.fetchUsage(token.token, (url, init) => fetch(url, init));
+        if (r.ok) row.snapshot = r.snapshot;
+        else row.failure = r.reason;
+      }
+    }
+    let state;
+    try {
+      state = shim.parseStoredState(rf(join(stateDir, `${a.id}.json`), "utf8"));
+    } catch {
+      /* no telemetry yet */
+    }
+    const h = health.classifyAccountHealth(state, healthOptions, now);
+    row.verdict = h.verdict;
+    row.reason = h.reason;
+    rows.push(row);
+  }
+  let next;
+  if (pool) {
+    const verdicts = pool.accounts.map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data" }));
+    next = health.choosePoolAccount(verdicts);
+  }
+  if (args.includes("--json")) {
+    console.log(JSON.stringify({ at: new Date(now).toISOString(), rotateAt, warnThreshold, pool: pool?.id, nextLaunch: next, accounts: rows }, null, 2));
+    return;
+  }
+  const pct = (u) => `${Math.round(u * 100)}%`;
+  const until = (resetsAt) => {
+    if (resetsAt === undefined) return "";
+    const mins = Math.max(0, Math.round((resetsAt * 1000 - now) / 60000));
+    return mins < 90 ? ` (resets in ~${mins}m)` : mins < 36 * 60 ? ` (resets in ~${Math.round(mins / 60)}h)` : ` (resets in ~${Math.round(mins / 1440)}d)`;
+  };
+  const mark = (u) => (u >= 1 ? "⛔" : u >= warnThreshold ? "🔴" : u >= rotateAt ? "🟠" : "🟢");
+  console.log(`\n${BOLD}🦞 multi-clawd — live usage${RESET}  ${DIM}(rotate at ${pct(rotateAt)}, warn at ${pct(warnThreshold)})${RESET}\n`);
+  for (const r of rows) {
+    console.log(`  ${BOLD}${r.id}${RESET}${r.label ? ` ${DIM}— ${r.label}${RESET}` : ""}   pool verdict: ${r.verdict}${r.reason ? ` ${DIM}(${r.reason})${RESET}` : ""}`);
+    if (r.snapshot) {
+      for (const [w, u] of Object.entries(r.snapshot.windows)) {
+        console.log(`     ${mark(u.utilization)} ${up.usageWindowLabel(w).padEnd(12)} ${pct(u.utilization).padStart(4)}${until(u.resetsAt)}`);
+      }
+      for (const s of r.snapshot.scoped) {
+        console.log(`     ${mark(s.utilization)} ${`${s.label} model`.padEnd(12)} ${pct(s.utilization).padStart(4)}${until(s.resetsAt)}`);
+      }
+    } else if (r.failure) {
+      console.log(`     ⚠️  ${r.failure}`);
+    } else {
+      console.log(`     ${DIM}not polled: ${r.skipped}${RESET}`);
+    }
+    console.log("");
+  }
+  if (pool) {
+    console.log(next ? `  next pooled launch (${pool.id}/…) runs on ${BOLD}${next}${RESET}` : `  ${BOLD}every pooled account is exhausted${RESET} — turns degrade or fall through the chain`);
+  }
+  console.log(`\n${DIM}(the gateway polls this every ${Math.round(up.effectiveUsagePollInterval(pool?.usagePoll) / 1000)}s and alerts via the heartbeat; see "Live usage" in the README)${RESET}`);
+}
+
+/**
  * `login <account>` — launch the RIGHT Claude login flow for a configured
  * account: correct config-dir environment, dir created if missing, verified
  * afterwards (shows which email is signed in). The human does the OAuth; this
@@ -830,6 +940,9 @@ switch (cmd) {
     break;
   case "direct":
     await direct(rest);
+    break;
+  case "usage":
+    await usageCommand(rest);
     break;
   case "doctor":
     runSibling("doctor.mjs", rest);

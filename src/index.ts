@@ -80,6 +80,17 @@ import {
   type AlertState,
 } from "./alerts.js";
 import { healthStateFile, clearAccountCredentialFailure } from "./credential-state.js";
+import {
+  createUsagePollController,
+  effectiveUsagePollInterval,
+  effectiveUsageWarnThreshold,
+  usageAlertPrefix,
+  usagePoolAlertKey,
+  type FetchLike,
+  type UsagePollConfig,
+  type UsagePollMember,
+  type UsagePollReport,
+} from "./usage-poll.js";
 export { healthStateFile, clearAccountCredentialFailure };
 import {
   accountConfigDir,
@@ -1035,6 +1046,12 @@ export default definePluginEntry({
         },
         logger,
       });
+      startUsagePoll({
+        accounts: accounts.filter((a) => seen.has(a.id.trim())),
+        pool: cfg.pool,
+        registrationMode: (api as { registrationMode?: unknown }).registrationMode,
+        logger,
+      });
     }
 
     api.logger.info(
@@ -1059,6 +1076,11 @@ interface PoolConfig {
   rotateOnOverage?: boolean;
   /** Minimum ms to stay on a rotated-to account before returning home. Default 600000. */
   minDwellMs?: number;
+  /**
+   * v1.10: poll each pooled account's live usage from the provider on a timer
+   * and warn when a window nears its limit. On by default; `{ "enabled": false }` disables.
+   */
+  usagePoll?: UsagePollConfig;
   models?: string[];
   defaultModel?: string;
   /** Tier-aware degradation (v0.3.5): step down a model tier when the whole pool is exhausted. */
@@ -1570,3 +1592,147 @@ export function startDirectOrderSync(params: {
 export async function runDirectOrderTickNow(): Promise<unknown> {
   return directController?.tick();
 }
+
+/**
+ * Live usage polling (v1.10) — see usage-poll.ts for the why. Module scope
+ * like the other two loops: register() re-runs on every config rebuild, and a
+ * rebuild must neither stack timers nor restart the transition log.
+ */
+let usageTimer: ReturnType<typeof setInterval> | undefined;
+let usageInitial: ReturnType<typeof setTimeout> | undefined;
+let usageController:
+  | { signature: string; fetchImpl: FetchLike | undefined; tick: () => Promise<UsagePollReport> }
+  | undefined;
+
+export function stopUsagePoll(): void {
+  if (usageTimer) clearInterval(usageTimer);
+  if (usageInitial) clearTimeout(usageInitial);
+  usageTimer = undefined;
+  usageInitial = undefined;
+  usageController = undefined;
+}
+
+/**
+ * The `.credentials.json` the poll may read for an account, or the reason it
+ * may not. Only a login the CLI keeps in a config dir of its own is readable
+ * AND attributable: a token-based account (`oauthTokenFile` / `oauthTokenRef`)
+ * runs in the default dir on a token of its own, so the file there belongs to
+ * a different account and must not be read as this one.
+ */
+export function usagePollCredentialsFile(account: AccountConfig): { file: string } | { reason: string } {
+  if (account.oauthTokenFile || account.oauthTokenRef) {
+    return { reason: "token-based login — usage is read from its own stream telemetry only" };
+  }
+  if (!account.native && !account.configDir) {
+    return { reason: "no login dir to read credentials from" };
+  }
+  return { file: join(accountConfigDir(account), ".credentials.json") };
+}
+
+export function startUsagePoll(params: {
+  accounts: AccountConfig[];
+  pool?: PoolConfig;
+  registrationMode?: unknown;
+  logger: { info: (m: string) => void; warn: (m: string) => void };
+  /** Test seam; defaults to the global fetch. */
+  fetchImpl?: FetchLike;
+}): { active: boolean; members: string[] } {
+  const { logger, pool } = params;
+  const mode = params.registrationMode;
+  if (mode !== undefined && mode !== "full") return { active: false, members: [] };
+  if (!pool || pool.usagePoll?.enabled === false) {
+    stopUsagePoll();
+    return { active: false, members: [] };
+  }
+  const poolId = pool.id?.trim() || "clawd";
+  const members: UsagePollMember[] = [];
+  const skipped: string[] = [];
+  for (const id of pool.accounts ?? []) {
+    const account = params.accounts.find((a) => a.id.trim() === id);
+    if (!account) continue;
+    const source = usagePollCredentialsFile(account);
+    if ("file" in source) members.push({ id: account.id.trim(), credentialsFile: source.file });
+    else skipped.push(`${account.id.trim()} (${source.reason})`);
+  }
+  if (members.length === 0) {
+    stopUsagePoll();
+    if (skipped.length > 0) logger.info(`[multi-clawd] usage poll: no pollable account — ${skipped.join("; ")}`);
+    return { active: false, members: [] };
+  }
+  const intervalMs = effectiveUsagePollInterval(pool.usagePoll);
+  const warnThreshold = effectiveUsageWarnThreshold(pool.usagePoll);
+  const healthOptions = {
+    utilizationThreshold: pool.utilizationThreshold,
+    staleAfterMs: pool.staleAfterMs,
+    rotateOnOverage: pool.rotateOnOverage,
+  };
+  const signature = JSON.stringify({ poolId, members, intervalMs, warnThreshold, healthOptions });
+  if (usageController?.signature === signature && usageController.fetchImpl === params.fetchImpl && usageTimer) {
+    return { active: true, members: members.map((m) => m.id) };
+  }
+  stopUsagePoll();
+  const fetchImpl: FetchLike = params.fetchImpl ?? ((url, init) => fetch(url, init));
+  const controller = createUsagePollController({
+    poolId,
+    members,
+    healthOptions,
+    warnThreshold,
+    io: {
+      readFile: (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch (err) {
+          if ((err as { code?: string }).code === "ENOENT") return undefined;
+          throw err;
+        }
+      },
+      readHealth: (id) => {
+        let raw: string;
+        try {
+          raw = readFileSync(healthStateFile(id), "utf8");
+        } catch (err) {
+          if ((err as { code?: string }).code === "ENOENT") return undefined;
+          throw err;
+        }
+        const parsed = parseStoredState(raw);
+        if (!parsed) throw new Error("not valid health-state JSON");
+        return parsed;
+      },
+      writeHealth: (id, state) => {
+        const file = healthStateFile(id);
+        mkdirSync(dirname(file), { recursive: true });
+        const tmp = `${file}.tmp-${process.pid}-usage`;
+        writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+        renameSync(tmp, file);
+      },
+      fetchImpl,
+      raiseAlert: (alert) => raiseAlert(alert),
+      clearAlert: (key) => {
+        alertState = clearAlert(alertState, key);
+      },
+      alertKeysWithPrefix: (prefix) => alertKeysWithPrefix(alertState, prefix),
+      logger,
+    },
+  });
+  usageController = { signature, fetchImpl: params.fetchImpl, tick: controller.tick };
+  const tick = () => void controller.tick().catch((err) => logger.warn(`[multi-clawd] usage poll tick failed: ${String(err)}`));
+  usageInitial = setTimeout(tick, Math.min(20_000, intervalMs));
+  usageInitial.unref?.();
+  usageTimer = setInterval(tick, intervalMs);
+  usageTimer.unref?.();
+  logger.info(
+    `[multi-clawd] usage poll: reading live usage for ${members.map((m) => m.id).join(", ")} every ${Math.round(
+      intervalMs / 1000,
+    )}s — rotate at ${Math.round((pool.utilizationThreshold ?? 0.85) * 100)}%, warn at ${Math.round(warnThreshold * 100)}%${
+      skipped.length > 0 ? `; not polled: ${skipped.join("; ")}` : ""
+    }`,
+  );
+  return { active: true, members: members.map((m) => m.id) };
+}
+
+/** Run the usage poll once, now (diagnostics and tests). Undefined when inactive. */
+export async function runUsagePollTickNow(): Promise<UsagePollReport | undefined> {
+  return usageController?.tick();
+}
+
+export { usageAlertPrefix, usagePoolAlertKey };
