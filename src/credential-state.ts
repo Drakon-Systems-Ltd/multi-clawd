@@ -26,6 +26,16 @@ export function healthStateFile(accountId: string): string {
 }
 
 /**
+ * The usage poll's own per-account file (v1.10.1). Written ONLY by the poll,
+ * as a whole snapshot each tick; readers merge it with the shim's health file
+ * newest-wins. Keeping the poll out of the shim's file is what removes the
+ * lost-update race between the two read-merge-write paths.
+ */
+export function usageStateFile(accountId: string): string {
+  return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.usage.json`);
+}
+
+/**
  * Clear a recorded credential failure for one account. Returns true only when
  * a failure was actually present and has been cleared, so callers can stay
  * silent on the common no-op.

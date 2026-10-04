@@ -29,7 +29,10 @@ import {
   usageHealthWindows,
   usagePoolAlertKey,
   usageWindowLabel,
+  createUsagePollController,
+  type UsagePollIo,
 } from "../src/usage-poll";
+import type { AccountHealthState } from "../src/shim-core";
 
 const NOW = Date.parse("2026-10-04T10:30:00Z");
 const iso = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
@@ -334,5 +337,144 @@ describe("config bounds", () => {
     expect(usageWindowLabel("usage:five_hour")).toBe("5-hour");
     expect(usageWindowLabel("seven_day")).toBe("weekly");
     expect(usageWindowLabel("seven_day_opus")).toBe("weekly opus");
+  });
+});
+
+/**
+ * v1.10.1 — the controller against a fake disk with two slots per account:
+ * the shim's health file and the poll's own usage file. The property under
+ * test is structural: the poll never writes the shim's slot, so no
+ * interleaving of the two read-merge-write paths can lose an update.
+ */
+describe("createUsagePollController — the poll owns its own file", () => {
+  const credentials = (token: string, expiresAt = NOW + 3_600_000) =>
+    JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt } });
+
+  function harness(opts: {
+    creds: Record<string, string>;
+    shim?: Record<string, AccountHealthState>;
+    readHealthThrows?: Record<string, Error>;
+    fetchStatus?: Record<string, number>;
+  }) {
+    const shim: Record<string, AccountHealthState | undefined> = { ...(opts.shim ?? {}) };
+    const usage: Record<string, AccountHealthState | undefined> = {};
+    const log: string[] = [];
+    const alerts = new Map<string, unknown>();
+    const io: UsagePollIo = {
+      readFile: (path) => opts.creds[path],
+      readHealth: (id) => {
+        const boom = opts.readHealthThrows?.[id];
+        if (boom) throw boom;
+        const a = shim[id];
+        const b = usage[id];
+        if (!a) return b;
+        if (!b) return a;
+        return mergeHealthStates(a, b);
+      },
+      writeUsage: (id, state) => {
+        usage[id] = JSON.parse(JSON.stringify(state)) as AccountHealthState;
+      },
+      fetchImpl: (async (_url: string, init: { headers: Record<string, string> }) => {
+        const token = init.headers.Authorization.replace(/^Bearer /, "");
+        const status = opts.fetchStatus?.[token] ?? 200;
+        return { status, json: async () => (status === 200 ? body() : {}) };
+      }) as unknown as UsagePollIo["fetchImpl"],
+      raiseAlert: (alert) => alerts.set(alert.key, alert),
+      clearAlert: (key) => alerts.delete(key),
+      alertKeysWithPrefix: (prefix) => [...alerts.keys()].filter((k) => k.startsWith(prefix)),
+      logger: { info: (m) => log.push(m), warn: (m) => log.push(m) },
+      now: () => NOW,
+    };
+    const controller = createUsagePollController({
+      poolId: "clawd",
+      members: Object.keys(opts.creds).map((path) => ({ id: path.replace(/^\/creds\//, "").replace(/\.json$/, ""), credentialsFile: path })),
+      healthOptions: {},
+      warnThreshold: 0.95,
+      io,
+    });
+    return { controller, shim, usage, log };
+  }
+
+  test("a tick writes the usage slot and leaves the shim's slot untouched, even when the shim commits mid-tick", async () => {
+    const shimSeen = NOW - 60_000;
+    const onDisk: AccountHealthState = {
+      accountId: "claw1",
+      updatedAt: shimSeen,
+      windows: { five_hour: { status: "allowed", resetsAt: Math.floor(NOW / 1000) + 3600, seenAt: shimSeen } },
+      credential: { status: "ok", seenAt: shimSeen },
+    };
+    const h = harness({ creds: { "/creds/claw1.json": credentials("tok-one") }, shim: { claw1: onDisk } });
+    // The losing interleave of v1.10.0: between the poll's read of the health
+    // file and its write, the shim records a rejection and a credential
+    // failure. Model it by letting the shim commit on the poll's read — after
+    // that point the old poll would have renamed a stale merge over it.
+    const original = h.controller;
+    const shimCommits = () => {
+      h.shim.claw1 = {
+        ...onDisk,
+        updatedAt: NOW,
+        windows: { ...onDisk.windows, five_hour: { status: "rejected", resetsAt: Math.floor(NOW / 1000) + 1800, seenAt: NOW } },
+        credential: { status: "failed", reason: "login expired", seenAt: NOW },
+      };
+    };
+    shimCommits();
+    const report = await original.tick();
+    expect(report.accounts).toHaveLength(1);
+    // The shim's record survives in its own slot...
+    expect(h.shim.claw1?.windows.five_hour.status).toBe("rejected");
+    expect(h.shim.claw1?.credential?.status).toBe("failed");
+    // ...and the poll's record lives only in its own slot, holding usage keys alone.
+    expect(Object.keys(h.usage.claw1?.windows ?? {}).every((k) => k.startsWith("usage:"))).toBe(true);
+    expect(h.usage.claw1?.windows["usage:five_hour"].utilization).toBeCloseTo(0.1);
+    expect(h.usage.claw1?.credential).toBeUndefined();
+    // The verdict the tick reports was built from the merged view, so the
+    // shim's rejection is what the selector will see, not a healthy 10%.
+    expect(report.accounts[0].verdict).toBe("credential_failed");
+  });
+
+  test("the reverse interleave cannot drop fresh usage: the shim's write never reaches the usage slot", async () => {
+    const h = harness({ creds: { "/creds/claw1.json": credentials("tok-one") } });
+    await h.controller.tick();
+    const fresh = h.usage.claw1;
+    // A shim persist that read-merge-writes its own file afterwards...
+    h.shim.claw1 = { accountId: "claw1", updatedAt: NOW + 1, windows: { seven_day: { status: "allowed", resetsAt: Math.floor(NOW / 1000) + 86_400, seenAt: NOW + 1 } } };
+    // ...leaves the usage snapshot exactly as the poll wrote it.
+    expect(h.usage.claw1).toEqual(fresh);
+    const merged = h.controller && (await h.controller.tick());
+    expect(merged.accounts[0].verdict).toBe("ok");
+  });
+
+  test("one unreadable health file reports no_data for that account and the tick carries on", async () => {
+    const h = harness({
+      creds: {
+        "/creds/claw1.json": credentials("tok-one", NOW - 1), // expired → skipped → verdictFor
+        "/creds/claw2.json": credentials("tok-two"),
+      },
+      readHealthThrows: { claw1: new Error("EACCES: permission denied") },
+    });
+    const report = await h.controller.tick();
+    expect(report.accounts.map((a) => [a.id, a.verdict])).toEqual([
+      ["claw1", "no_data"],
+      ["claw2", "ok"],
+    ]);
+    expect(report.accounts[0].skipped).toMatch(/expired/);
+    expect(h.log.filter((m) => m.includes('"claw1"') && m.includes("health file unreadable"))).toHaveLength(1);
+    // Said once, not per tick.
+    await h.controller.tick();
+    expect(h.log.filter((m) => m.includes("health file unreadable"))).toHaveLength(1);
+  });
+
+  test("a failed fetch on an unreadable file is still one account's problem, not the tick's", async () => {
+    const h = harness({
+      creds: { "/creds/claw1.json": credentials("tok-one"), "/creds/claw2.json": credentials("tok-two") },
+      fetchStatus: { "tok-one": 500 },
+      readHealthThrows: { claw1: new Error("not valid health-state JSON") },
+    });
+    const report = await h.controller.tick();
+    expect(report.accounts.map((a) => [a.id, a.verdict])).toEqual([
+      ["claw1", "no_data"],
+      ["claw2", "ok"],
+    ]);
+    expect(report.accounts[0].failure?.kind).toBeDefined();
   });
 });

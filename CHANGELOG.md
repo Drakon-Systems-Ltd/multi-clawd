@@ -4,6 +4,27 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **The usage poll no longer races the shim for the health file.** v1.10.0's
+  poll did a read-merge-write of the same per-account file the shim (and the
+  credential-failure paths) read-merge-write, so an interleaving — poll reads,
+  shim commits a rejection or credential failure, poll renames its stale merge
+  over it — silently erased that evidence, and the next pooled turn could elect
+  the account that had just failed; the reverse interleave dropped the fresh
+  usage figures. The poll now writes its own `<account>.usage.json` as a whole
+  snapshot each tick and never opens the shim's file for writing; the selector
+  and the poll read the two files merged newest-wins, exactly as the single
+  merged file read before. The shim-versus-shim race for one account is
+  unchanged and still documented in `shim.ts`.
+- **One unreadable health file no longer aborts a whole poll tick.** The
+  skipped and failed-fetch paths read the health file for the report's verdict
+  without a guard; a present-but-unreadable file threw out of the tick, the
+  timer's catch logged it, and every account after it went unpolled that cycle.
+  Those reads now report `no_data` for that account (warned once, not per
+  tick) and the tick carries on.
+
 ## [1.10.0] - 2026-10-04
 
 ### Added
