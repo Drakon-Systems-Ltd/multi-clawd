@@ -4,7 +4,7 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
-## [Unreleased]
+## [1.10.1] - 2026-10-04
 
 ### Fixed
 - **The usage poll no longer races the shim for the health file.** v1.10.0's
