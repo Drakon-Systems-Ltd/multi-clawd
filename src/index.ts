@@ -79,7 +79,7 @@ import {
   pendingAlertText,
   type AlertState,
 } from "./alerts.js";
-import { healthStateFile, clearAccountCredentialFailure } from "./credential-state.js";
+import { healthStateFile, usageStateFile, clearAccountCredentialFailure } from "./credential-state.js";
 import {
   createUsagePollController,
   effectiveUsagePollInterval,
@@ -91,7 +91,7 @@ import {
   type UsagePollMember,
   type UsagePollReport,
 } from "./usage-poll.js";
-export { healthStateFile, clearAccountCredentialFailure };
+export { healthStateFile, usageStateFile, clearAccountCredentialFailure };
 import {
   accountConfigDir,
   buildAccountChildEnv,
@@ -1093,13 +1093,33 @@ interface PoolConfig {
 }
 
 function readHealthState(accountId: string): AccountHealthState | undefined {
+  return mergeStoredHealth(
+    readStateFileLenient(healthStateFile(accountId)),
+    readStateFileLenient(usageStateFile(accountId)),
+  );
+}
+
+function readStateFileLenient(file: string): AccountHealthState | undefined {
   try {
-    return JSON.parse(
-      readFileSync(healthStateFile(accountId), "utf8"),
-    ) as AccountHealthState;
+    return JSON.parse(readFileSync(file, "utf8")) as AccountHealthState;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The reader's half of v1.10.1: the shim's health file and the poll's usage
+ * file, merged newest-wins per key. With only one side present the state is
+ * returned untouched, so a fleet that never polls reads exactly as before.
+ * No `now` is passed: expiring windows stays the classifier's job.
+ */
+function mergeStoredHealth(
+  shim: AccountHealthState | undefined,
+  usage: AccountHealthState | undefined,
+): AccountHealthState | undefined {
+  if (!shim) return usage;
+  if (!usage) return shim;
+  return mergeHealthStates(shim, usage);
 }
 
 /**
@@ -1687,21 +1707,28 @@ export function startUsagePoll(params: {
         }
       },
       readHealth: (id) => {
-        let raw: string;
+        let shim: AccountHealthState | undefined;
         try {
-          raw = readFileSync(healthStateFile(id), "utf8");
+          shim = parseStoredState(readFileSync(healthStateFile(id), "utf8"));
+          if (!shim) throw new Error("not valid health-state JSON");
         } catch (err) {
-          if ((err as { code?: string }).code === "ENOENT") return undefined;
-          throw err;
+          if ((err as { code?: string }).code !== "ENOENT") throw err;
+          shim = undefined;
         }
-        const parsed = parseStoredState(raw);
-        if (!parsed) throw new Error("not valid health-state JSON");
-        return parsed;
+        // The poll's own file: absent or unusable both read as "no usage yet".
+        // Nothing is at stake — the next tick rewrites it in full.
+        let usage: AccountHealthState | undefined;
+        try {
+          usage = parseStoredState(readFileSync(usageStateFile(id), "utf8"));
+        } catch {
+          usage = undefined;
+        }
+        return mergeStoredHealth(shim, usage);
       },
-      writeHealth: (id, state) => {
-        const file = healthStateFile(id);
+      writeUsage: (id, state) => {
+        const file = usageStateFile(id);
         mkdirSync(dirname(file), { recursive: true });
-        const tmp = `${file}.tmp-${process.pid}-usage`;
+        const tmp = `${file}.tmp-${process.pid}`;
         writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
         renameSync(tmp, file);
       },

@@ -14,7 +14,7 @@
  *   (token-based accounts, expired tokens) and keeps the shim's own records;
  * - off by config, off outside a full registration, no stacked timers.
  */
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -33,6 +33,7 @@ const {
   startUsagePoll,
   stopUsagePoll,
   usagePollCredentialsFile,
+  usageStateFile,
 } = await import("../src/index.js");
 const { parseStoredState } = await import("../src/shim-core.js");
 
@@ -136,10 +137,13 @@ describe("the poll feeds the selector", () => {
     expect(endpoint.calls.map((c) => c.auth).sort()).toEqual(["Bearer tok-one", "Bearer tok-two"]);
     expect(endpoint.calls.every((c) => c.beta === "oauth-2025-04-20")).toBe(true);
 
-    const state = parseStoredState(readFileSync(healthStateFile("claw1"), "utf8"))!;
+    // The poll writes its OWN file (v1.10.1); the shim's health file is never
+    // created or rewritten by a tick.
+    const state = parseStoredState(readFileSync(usageStateFile("claw1"), "utf8"))!;
     expect(state.windows["usage:five_hour"].utilization).toBeCloseTo(0.9);
     expect(state.windows["usage:five_hour"].status).toBe("allowed");
-    expect(statSync(healthStateFile("claw1")).mode & 0o777).toBe(0o600);
+    expect(statSync(usageStateFile("claw1")).mode & 0o777).toBe(0o600);
+    expect(existsSync(healthStateFile("claw1"))).toBe(false);
 
     // THE point: the next launch runs on the spare, before any turn was refused.
     expect(await prepare()).toContain("claw2");
@@ -155,12 +159,14 @@ describe("the poll feeds the selector", () => {
     });
     const second = await runUsagePollTickNow();
     expect(second?.accounts[0].verdict).toBe("exhausted");
-    const exhausted = parseStoredState(readFileSync(healthStateFile("claw1"), "utf8"))!;
+    const exhausted = parseStoredState(readFileSync(usageStateFile("claw1"), "utf8"))!;
     expect(exhausted.windows["usage:five_hour"].status).toBe("rejected");
     expect(await prepare("clawd/claude-sonnet-5-5")).toContain("claw2");
   });
 
   test("the shim's own records survive the poll's write, and the poll's survive the shim's", async () => {
+    const { api, prepare } = makeApi({ accounts: accounts(), pool: pool() });
+    plugin.register(api as never);
     // A shim-written weekly observation on disk...
     const file = healthStateFile("claw1");
     mkdirSync(join(file, ".."), { recursive: true });
@@ -184,14 +190,35 @@ describe("the poll feeds the selector", () => {
       logger,
       fetchImpl: fakeEndpoint({ "tok-one": usageBody(40), "tok-two": usageBody(5) }).fetchImpl,
     });
+    const shimBytes = readFileSync(file, "utf8");
     await runUsagePollTickNow();
-    const state = parseStoredState(readFileSync(file, "utf8"))!;
-    // ...is still there, untouched, next to the polled records.
-    expect(state.windows.seven_day).toMatchObject({ status: "allowed_warning", utilization: 0.3, seenAt: shimSeen });
-    expect(state.windows.five_hour).toMatchObject({ status: "allowed", seenAt: shimSeen });
-    expect(state.credential).toMatchObject({ status: "ok" });
-    expect(state.windows["usage:five_hour"].utilization).toBeCloseTo(0.4);
-    expect(state.windows["usage:seven_day"].utilization).toBeCloseTo(0.2);
+    // ...is byte-for-byte untouched: the poll never opens the shim's file for
+    // writing, so there is no read-merge-write of it to lose an update against.
+    expect(readFileSync(file, "utf8")).toBe(shimBytes);
+    const usage = parseStoredState(readFileSync(usageStateFile("claw1"), "utf8"))!;
+    expect(usage.windows["usage:five_hour"].utilization).toBeCloseTo(0.4);
+    expect(usage.windows["usage:seven_day"].utilization).toBeCloseTo(0.2);
+    expect(usage.windows.seven_day).toBeUndefined();
+    // Both records reach the selector at once: 40% usage keeps claw1 home...
+    expect(await prepare()).toContain("claw1");
+    // ...and the race's losing interleave — the shim commits a rejection AFTER
+    // the poll took its read — is now harmless: the shim's write lands in its
+    // own file and the next launch sees it next to the fresh usage figures.
+    const shimRejected = Date.now();
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...JSON.parse(shimBytes),
+        updatedAt: shimRejected,
+        windows: {
+          ...JSON.parse(shimBytes).windows,
+          five_hour: { status: "rejected", resetsAt: Math.floor(Date.now() / 1000) + 3600, seenAt: shimRejected },
+        },
+      }),
+    );
+    expect(await prepare()).toContain("claw2");
+    const stillFresh = parseStoredState(readFileSync(usageStateFile("claw1"), "utf8"))!;
+    expect(stillFresh.windows["usage:five_hour"].utilization).toBeCloseTo(0.4);
   });
 });
 
@@ -215,7 +242,7 @@ describe("the warn threshold reaches the operator", () => {
     expect(text).toContain("new launches route to claw2");
     // The token reached the endpoint and nothing else: not the alert, not the
     // journal, not the health file, not the tick report.
-    for (const surface of [text, lines.join("\n"), readFileSync(healthStateFile("claw1"), "utf8"), JSON.stringify(report)]) {
+    for (const surface of [text, lines.join("\n"), readFileSync(usageStateFile("claw1"), "utf8"), JSON.stringify(report)]) {
       expect(surface).not.toContain("tok-one");
     }
 
@@ -267,8 +294,9 @@ describe("what the poll must not do", () => {
     // Said once, not per tick.
     await runUsagePollTickNow();
     expect(warn.filter((m) => m.includes("expired"))).toHaveLength(1);
-    // The skipped account got no health write (no file at all here).
+    // The skipped account got no write of either file (no file at all here).
     expect(() => readFileSync(healthStateFile("claw1"))).toThrow();
+    expect(() => readFileSync(usageStateFile("claw1"))).toThrow();
   });
 
   test("a token-based account is not polled: its credentials file is another login's", () => {
@@ -330,7 +358,7 @@ describe("what the poll must not do", () => {
     expect(pendingOperatorAlerts(Date.now()) ?? "").not.toContain("EVERY account");
   });
 
-  test("a present but unreadable health file is left alone — the shim's evidence is not overwritten for two numbers", async () => {
+  test("a present but unreadable health file is left alone; the poll still writes its own file and reports UNKNOWN", async () => {
     const file = healthStateFile("claw1");
     mkdirSync(join(file, ".."), { recursive: true });
     writeFileSync(file, "{ this is not json");
@@ -344,10 +372,15 @@ describe("what the poll must not do", () => {
     });
     const report = await runUsagePollTickNow();
     expect(report?.accounts[0].skipped).toContain("health file unreadable");
+    expect(report?.accounts[0].verdict).toBe("no_data");
+    // The shim's bytes are untouched (v1.10.1: the poll never writes this file)...
     expect(readFileSync(file, "utf8")).toBe("{ this is not json");
-    expect(warn.some((m) => m.includes("not overwriting"))).toBe(true);
+    expect(warn.some((m) => m.includes('"claw1"') && m.includes("health file unreadable"))).toBe(true);
+    // ...and the poll's own file is written regardless: nothing of the shim's
+    // is at stake there, and the figures are current when the shim's file heals.
+    expect(parseStoredState(readFileSync(usageStateFile("claw1"), "utf8"))!.windows["usage:five_hour"].utilization).toBeCloseTo(0.5);
     // claw2's write is unaffected.
-    expect(parseStoredState(readFileSync(healthStateFile("claw2"), "utf8"))!.windows["usage:five_hour"].utilization).toBeCloseTo(0.05);
+    expect(parseStoredState(readFileSync(usageStateFile("claw2"), "utf8"))!.windows["usage:five_hour"].utilization).toBeCloseTo(0.05);
   });
 
   test("an endpoint failure changes nothing on disk and is logged once per transition", async () => {

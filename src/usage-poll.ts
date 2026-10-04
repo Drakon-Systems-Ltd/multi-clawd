@@ -410,9 +410,18 @@ export interface UsagePollMember {
 export interface UsagePollIo {
   /** Raw file text; undefined when the file does not exist. Other errors may throw. */
   readFile: (path: string) => string | undefined;
-  /** Parsed state; undefined when absent. MUST throw on a present-but-unreadable file. */
+  /**
+   * The merged view of the shim's health file and the poll's own usage file;
+   * undefined when neither exists. MUST throw when the shim's file is present
+   * but unreadable — that is evidence in an unknown state, not an empty one.
+   */
   readHealth: (accountId: string) => AccountHealthState | undefined;
-  writeHealth: (accountId: string, state: AccountHealthState) => void;
+  /**
+   * Overwrite the poll's OWN per-account usage file with this tick's full
+   * snapshot. Never touches the shim's health file (v1.10.1): the two files
+   * are merged by the reader, so neither writer can lose the other's update.
+   */
+  writeUsage: (accountId: string, state: AccountHealthState) => void;
   fetchImpl: FetchLike;
   raiseAlert: (alert: Alert) => void;
   clearAlert: (key: string) => void;
@@ -490,29 +499,35 @@ export function createUsagePollController(params: {
         reports.push({ id: member.id, failure: { kind: result.kind, reason: result.reason }, verdict: verdictFor(member.id) });
         continue;
       }
-      let disk: AccountHealthState;
-      try {
-        disk = io.readHealth(member.id) ?? { accountId: member.id, windows: {} };
-      } catch (err) {
-        // A present file that cannot be read is the shim's evidence in an
-        // unknown state. Writing over it would discard that evidence (and any
-        // credential record) for the sake of two numbers; skip this tick.
-        noteProblem(member.id, `health file unreadable, not overwriting (${err instanceof Error ? err.message : String(err)})`);
-        reports.push({ id: member.id, snapshot: result.snapshot, skipped: "health file unreadable", verdict: "no_data" });
-        continue;
-      }
-      noteProblem(member.id, undefined);
       const live: AccountHealthState = {
         accountId: member.id,
         updatedAt: at,
         windows: usageHealthWindows(result.snapshot, at),
       };
-      const merged = mergeHealthStates(disk, live, at);
+      // The poll owns its own file and never rewrites the shim's. A full
+      // snapshot arrives every tick, so this is an overwrite, not a
+      // read-merge-write — there is no window in which the shim's (or the
+      // credential paths') concurrent read-merge-write of the health file can
+      // be lost under this rename, and vice versa. The reader merges the two
+      // files newest-wins, which is exactly what one merged file used to say.
       try {
-        io.writeHealth(member.id, merged);
+        io.writeUsage(member.id, live);
       } catch (err) {
-        io.logger.warn(`[multi-clawd] usage poll: health write failed for "${member.id}": ${String(err)}`);
+        io.logger.warn(`[multi-clawd] usage poll: usage write failed for "${member.id}": ${String(err)}`);
       }
+      let disk: AccountHealthState;
+      try {
+        disk = io.readHealth(member.id) ?? { accountId: member.id, windows: {} };
+      } catch (err) {
+        // The shim's evidence is in an unknown state. Nothing was overwritten
+        // (the usage file is separate), but a verdict built without it could
+        // elect a benched account, so report UNKNOWN rather than guess.
+        noteProblem(member.id, `health file unreadable (${err instanceof Error ? err.message : String(err)})`);
+        reports.push({ id: member.id, snapshot: result.snapshot, skipped: "health file unreadable", verdict: "no_data" });
+        continue;
+      }
+      noteProblem(member.id, undefined);
+      const merged = mergeHealthStates(disk, live, at);
       const verdict = classifyAccountHealth(merged, healthOptions, at).verdict;
       const previous = lastVerdict.get(member.id);
       if (previous !== undefined && previous !== verdict) {
@@ -561,8 +576,27 @@ export function createUsagePollController(params: {
     return { at, accounts: reports, raised, cleared };
   }
 
+  // Keyed apart from `lastProblem`: the skip/failure reason for an account is
+  // noted just before verdictFor runs, and sharing the map would make the two
+  // reasons alternate in the log on every tick.
+  const lastReadProblem = new Map<string, string>();
   function verdictFor(id: string): HealthVerdict {
-    return classifyAccountHealth(io.readHealth(id), healthOptions, now()).verdict;
+    let state: AccountHealthState | undefined;
+    try {
+      state = io.readHealth(id);
+    } catch (err) {
+      // One unreadable health file must not abort the tick for every account
+      // after it: the timer's catch would swallow the throw and the whole
+      // cycle would silently do nothing. Unknown, not healthy.
+      const problem = `health file unreadable (${err instanceof Error ? err.message : String(err)})`;
+      if (lastReadProblem.get(id) !== problem) {
+        io.logger.warn(`[multi-clawd] usage poll: account "${id}" — ${problem}`);
+        lastReadProblem.set(id, problem);
+      }
+      return "no_data";
+    }
+    lastReadProblem.delete(id);
+    return classifyAccountHealth(state, healthOptions, now()).verdict;
   }
 
   return { tick };
