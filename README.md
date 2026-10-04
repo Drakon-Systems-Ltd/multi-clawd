@@ -223,6 +223,12 @@ claude-cli/claude-fable-5        # main login
   stream-json and records per-window health to
   `~/.openclaw/state/multi-clawd/<account>.json`. Passthrough-first: a state
   write can never break a live turn.
+- 📡 **Live usage (v1.10)** — the pool also *asks* the provider what is left,
+  on a timer, using the login each account already holds. Both windows come
+  back as real percentages with reset times — including the 5-hour window the
+  stream never puts a number on — so hand-over happens at 85% of the session
+  window, not at the error. Passing 95% raises an operator alert through the
+  heartbeat; `multi-clawd usage` shows it on demand.
 - 🧰 **Full harness on every hop** — each backend is a genuine Claude Code
   subprocess: native tools, skills, MCP bridge, and native compaction all
   stay intact when failover steps across accounts.
@@ -574,9 +580,11 @@ How it decides, per launch (all data from each account's live
 | no data / stale data | used — never rotate on missing evidence |
 | whole pool exhausted | home account anyway → real limit error → your chain drops provider |
 
-**Why the short-window rule exists (v1.7.2).** The threshold rule needs a
-utilization number, and Anthropic does not send one for the 5-hour session
-window — across every observation we hold from two accounts it arrives as a
+**Why the short-window rule exists (v1.7.2).** (v1.10's live usage poll now
+supplies the missing number — see below — so this rule is the fallback for
+hosts where polling is off or the account cannot be polled.) The threshold
+rule needs a utilization number, and Anthropic does not send one for the
+5-hour session window — across every observation we hold from two accounts it arrives as a
 bare status plus a reset time, while the weekly windows carry percentages. A
 rule that waits for a number therefore could never pre-empt the session
 limit: the pool would take the hit and rotate afterwards. So on hour-scoped
@@ -595,6 +603,77 @@ Notes:
   The pool therefore decides inside the backend's own `prepareExecution`,
   which runs on every launch on every turn path. Details in
   [`DESIGN.md`](./DESIGN.md).
+
+## Live usage: ask, don't wait to be told (v1.10)
+
+Everything above learns about quota from the stream — the `rate_limit_event`
+records the CLI emits at the top of a turn. That is reactive by construction:
+nothing is observed between turns, and the 5-hour session window arrives with
+a status but no percentage, so the pool could see "warning" but never "how
+close". v1.10 closes both gaps by reading each pooled account's **live usage
+from the provider** on a timer — the same figures the Claude CLI's own
+`/usage` command shows — with the OAuth session the CLI already holds.
+
+```jsonc
+"pool": {
+  "id": "clawd",
+  "accounts": ["claw1", "claw2"],
+  "utilizationThreshold": 0.85,     // hand over here (unchanged)
+  "usagePoll": {                    // v1.10 — on by default
+    "intervalMs": 120000,           // every 2 min (minimum 60000)
+    "warnThreshold": 0.95           // operator alert from here
+  }
+}
+```
+
+What a poll does, per account:
+
+| Provider says | Health file gets | Pool does |
+|---|---|---|
+| 5-hour at 40%, weekly at 20% | `usage:five_hour` / `usage:seven_day`, `allowed` with the number and reset | nothing — home account serves |
+| 5-hour at 86% | the same, `utilization 0.86` | **next launch rotates** to the spare (threshold rule, now with a real number on the session window) |
+| 5-hour at 96% | the same | rotates, **and raises an alert**: account, window, reset time, where launches now go |
+| 5-hour at 100% | `rejected` with the provider's reset | `exhausted` until that reset — for every model, before any turn is refused |
+| every account past 95% | — | **pool-wide alert**: at 100% the ladder or the host's chain takes over; soonest reset named |
+| model-scoped limit (e.g. one family at 97%) | — | alert naming the model; the shim's reactive capture still handles the refusal |
+
+Polled records live under their own keys (`usage:<window>`) so they never race
+the shim's `five_hour` / `seven_day` for the same slot — the shim's next bare
+`allowed` cannot erase the number the poll just wrote, and `explain` shows
+both ("5-hour (live) 40%"). The health rules are the existing ones; the poll
+only improves what they can see.
+
+Boundaries:
+
+- **Read-only on credentials.** The poll reads the access token from the
+  account's `.credentials.json` and sends it to the usage endpoint — nowhere
+  else. It never refreshes, rewrites, or copies a token; an expired one is a
+  skipped tick (the next CLI launch refreshes it, as it always has).
+- **Best-effort.** A failed poll changes nothing: the health file keeps what
+  the shim wrote, selection keeps working from it, and the failure is logged
+  once per transition, not per tick.
+- **Native and `configDir` accounts only.** A token-based account
+  (`oauthTokenFile` / `oauthTokenRef`) runs in the default login dir on a
+  token of its own, so the credentials file there belongs to a different
+  account; those accounts keep stream telemetry only and `explain` says so.
+  macOS native logins kept in the keychain (no `.credentials.json`) are
+  likewise not polled.
+- **Off switch:** `"usagePoll": { "enabled": false }`.
+
+On demand:
+
+```
+multi-clawd usage           # live figures per account + what the next launch would do
+multi-clawd usage --json
+```
+
+**What "seamless" means here.** Rotation is decided per launch, so a turn that
+starts after the poll has seen 85% simply runs on the other account — the user
+sees nothing. A turn already in flight when its account runs out is covered by
+the shim's in-turn retry (v1.9): the refusal is held back, the sibling is
+spawned, the conversation is handed over, and the turn completes there. The
+poll's job is to make that second path rare by moving work off an account
+before it reaches the cliff, and to tell you when every account is nearing one.
 
 ## Direct route: the pool for `anthropic/*` too (v1.9)
 

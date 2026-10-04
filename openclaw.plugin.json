@@ -59,6 +59,25 @@
             "type": "number",
             "description": "After rotating away from home, stay on the rotated-to account at least this long before returning home (anti-flap hysteresis; health always overrides). Default 600000 (10min)."
           },
+          "usagePoll": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Live usage polling (v1.10): read each pooled account's current usage from the provider on a timer (the same figures the Claude CLI's /usage shows) and fold them into the pool's health state, so near-limit rotation fires on the 5-hour window with a real percentage behind it and a window at 100% is exhausted before a turn is refused. Raises an operator alert (via the heartbeat) when any window passes warnThreshold. Read-only on credentials: uses the login the CLI already holds, never refreshes or copies it. Applies to native and configDir accounts; token-based accounts keep stream telemetry only.",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Default true. Set false to turn polling off entirely."
+              },
+              "intervalMs": {
+                "type": "number",
+                "description": "Poll interval. Default 120000 (2min); minimum 60000."
+              },
+              "warnThreshold": {
+                "type": "number",
+                "description": "Raise an operator alert when any usage window reaches this fraction. Default 0.95."
+              }
+            }
+          },
           "degrade": {
             "type": "object",
             "additionalProperties": false,
