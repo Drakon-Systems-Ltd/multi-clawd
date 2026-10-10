@@ -52,6 +52,7 @@ import { resolveBaseModelIds } from "./catalog-source.js";
 import {
   allCredentialFailed,
   classifyAccountHealth,
+  lastAuthSuccessAt,
   overdueProbeAccount,
   pickPoolAccountForLaunch,
 } from "./health.js";
@@ -104,13 +105,12 @@ import {
   type KnownModelsState,
 } from "./model-currency.js";
 import {
-  checkAccountCredential,
-  keychainServiceForConfigDir,
+  assessAccountCredential,
   createRefProbeTracker,
   type CredentialIo,
   type RefProbeTracker,
 } from "./login-health.js";
-import { execFileSync } from "node:child_process";
+import { createSystemCredentialIo } from "./credential-store.js";
 import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
 import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
@@ -328,30 +328,19 @@ function ingestAlertSpool(): void {
 const LOGIN_PROBE_INTERVAL_MS = 15 * 60 * 1000;
 const LOGIN_PROBE_INITIAL_DELAY_MS = 45 * 1000;
 
-const realCredentialIo: CredentialIo = {
-  readFile: (p) => readFileSync(expandHome(p), "utf8"),
-  keychainHasClaudeCredentials: () => keychainHasService("Claude Code-credentials"),
-  keychainHasClaudeCredentialsForDir: (dir) =>
-    keychainHasService(keychainServiceForConfigDir(expandHome(dir))),
-  platform: process.platform,
-};
-
-/** Metadata-only keychain probe (no `-w`): the secret is never read. */
-function keychainHasService(service: string): boolean {
-  try {
-    execFileSync("security", ["find-generic-password", "-s", service], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
+/**
+ * Created on first use: the Keychain account it carries is read from the
+ * environment, and a probe pass is the first thing that needs it.
+ */
+let realCredentialIo: CredentialIo | undefined;
 
 /**
- * Periodic login-health probe: credential *sources* are checked (file shape,
- * keychain presence, credentials.json token) so a dead login raises an
- * operator alert instead of silently failing every turn behind a
- * successfully-registered backend. Ref-backed accounts are validated through
- * the async resolver. No quota is spent.
+ * Periodic login-health probe: credential *sources* are judged on evidence
+ * (an unexpired stored access token, or a successful turn since it expired —
+ * never mere presence) so a dead login raises an operator alert instead of
+ * silently failing every turn behind a successfully-registered backend.
+ * Ref-backed accounts are validated through the async resolver. No quota is
+ * spent.
  */
 /**
  * Probe state, deliberately at MODULE scope rather than inside
@@ -378,9 +367,10 @@ const lastProbeStatus = new Map<string, string>();
  * declared dead kept winning every rung for hours.
  *
  * Written on EVERY credential-broken observation, not just the transition into
- * it: the record is TTL-bounded (CREDENTIAL_FAILED_TTL_MS, 15m) and the probe
- * runs on the same 15m cadence, so a transition-only write would let the
- * exclusion lapse under a login that is still dead.
+ * it: the hard exclusion is bounded (CREDENTIAL_FAILED_TTL_MS, 15m, after which
+ * the account is only `credential_unverified`) and the probe runs on the same
+ * 15m cadence, so a transition-only write would let the exclusion soften under
+ * a login that is still dead.
  *
  * Best-effort, like every other health write: no state file is worth a turn.
  */
@@ -423,11 +413,14 @@ export async function runLoginHealthProbe(
     resolver?: TokenRefResolver;
     io?: CredentialIo;
     nowMs?: number;
+    /** Account health state, for proof of a recent successful turn. */
+    readHealth?: (accountId: string) => AccountHealthState | undefined;
   } = {},
 ): Promise<void> {
   const now = deps.nowMs ?? Date.now();
   const resolver = deps.resolver ?? activeTokenResolver;
-  const io = deps.io ?? realCredentialIo;
+  const io = deps.io ?? (realCredentialIo ??= createSystemCredentialIo());
+  const readHealth = deps.readHealth ?? readHealthState;
   for (const account of accounts) {
     let status: string;
     let reason: string | undefined;
@@ -450,9 +443,12 @@ export async function runLoginHealthProbe(
       reason = outcome.reason;
       cause = outcome.cause;
     } else {
-      const check = checkAccountCredential(account, io);
+      const check = assessAccountCredential(account, io, {
+        proof: { lastSuccessAt: lastAuthSuccessAt(readHealth(account.id)) },
+        nowMs: now,
+      });
       status = check.status;
-      reason = check.reason;
+      reason = check.status === "ok" ? check.detail : check.reason;
     }
     const previous = lastProbeStatus.get(account.id);
     lastProbeStatus.set(account.id, status);
@@ -489,9 +485,21 @@ export async function runLoginHealthProbe(
       const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — turns on it will fail until fixed`;
       logger.error(`[multi-clawd] ${text}`);
       raiseAlert({ key: `login:${account.id}`, severity: "error", text });
+    } else if (status === "unverified" && previous !== "unverified") {
+      // Stored, but its access token has expired and nothing since proves the
+      // refresh works. Routine for an idle account, and also exactly what a
+      // login with a dead refresh token looks like at rest — so it is said,
+      // once per transition, and it is never reported as alive. Selection-
+      // neutral and no alert: a turn that fails records the failure itself.
+      logger.info(`[multi-clawd] account "${account.id}" login unverified: ${reason ?? "unproven"}`);
+    } else if (status === "unknown" && previous !== "unknown" && reason) {
+      // e.g. a locked Keychain: said once per transition, so it is not silent.
+      logger.info(`[multi-clawd] account "${account.id}" login could not be checked: ${reason}`);
     } else if (status === "degraded" && previous !== "degraded") {
       // Transient — one operator-visible info line per transition, no alert.
       logger.info(`[multi-clawd] account "${account.id}" login degraded: ${reason ?? "resolver error"}`);
+    } else if (status === "ok" && previous === "unverified") {
+      logger.info(`[multi-clawd] account "${account.id}" login verified: ${reason ?? "ok"}`);
     } else if (status === "ok" && (previous === "broken" || previous === "degraded")) {
       logger.info(`[multi-clawd] account "${account.id}" login recovered`);
       alertState = clearAlert(alertState, `login:${account.id}`);
@@ -499,8 +507,19 @@ export async function runLoginHealthProbe(
       // NOT cleared here: any credential record this account carries. A probe
       // "ok" means the credential SOURCE resolves, which is not proof the
       // session is accepted — clearing on presence would un-bench a dead login
-      // on the next tick and restore #8. The TTL, a successful turn through the
-      // shim, or `multi-clawd login <id>` end the exclusion.
+      // on the next tick and restore #8. Only a successful turn through the
+      // shim, or `multi-clawd login <id>`, ends the record.
+    }
+    // The source alerts describe what the probe SEES, so they end whenever it
+    // stops seeing a missing source — whatever the status in between was (an
+    // `unverified` or `unknown` pass must not latch them), and whatever this
+    // process remembers (a restart forgets `previous`; the alert outlives it).
+    // Recorded credential failures keep their own alert, ended only by success.
+    if (status === "ok") {
+      alertState = clearAlert(alertState, `login:${account.id}`);
+      alertState = clearAlert(alertState, `login-resolver:${account.id}`);
+    } else if ((status === "unverified" || status === "unknown") && cause === undefined) {
+      alertState = clearAlert(alertState, `login:${account.id}`);
     }
   }
 }
@@ -1126,8 +1145,8 @@ function mergeStoredHealth(
  * End a recorded credential failure for one account (#8) — the explicit
  * re-authentication path (`multi-clawd login <id>`) and any surface that has
  * PROVEN the login works again. Exported so those out-of-band flows can
- * un-bench an account immediately instead of waiting out
- * CREDENTIAL_FAILED_TTL_MS.
+ * un-bench an account immediately: a recorded failure no longer expires on its
+ * own (past CREDENTIAL_FAILED_TTL_MS it reads `credential_unverified`).
  *
  * Deliberately NOT wired to the periodic login probe: that probe checks
  * credential SOURCES (keychain item present, token file well-formed, ref
@@ -1308,6 +1327,15 @@ export function registerPoolBackend(
           `launching on ${decision.account} to re-test a rejection last seen ` +
           `${Math.round((now - observedAt) / 3600000)}h ago`,
       );
+    } else if (
+      poolVerdicts.find((v) => v.id === decision.account)?.verdict === "credential_unverified"
+    ) {
+      // Nothing proven can serve, so the launch re-tests a login whose last
+      // evidence is a rejection. A question, not a rotation: no rotation alert.
+      logger.info(
+        `[multi-clawd] pool ${poolId}: no proven account can serve ${requestedModel} — ` +
+          `launching on ${decision.account} to re-test a login last rejected by the Claude CLI`,
+      );
     } else if (decision.account !== previousAccount) {
       const home = verdicts[0];
       const line =
@@ -1377,6 +1405,16 @@ export function registerPoolBackend(
           severity: "error",
           text: `pool ${poolId}: account "${v.id}" is excluded — ${
             v.health.reason ?? "its login was rejected by the Claude CLI"
+          }. Fix with \`multi-clawd login ${v.id}\`.`,
+        });
+      } else if (v.health.verdict === "credential_unverified") {
+        // Same key, same latch: past the hard exclusion is not recovery. The
+        // alert ends only when the verdict does, i.e. on observed success.
+        raiseAlert({
+          key,
+          severity: "error",
+          text: `pool ${poolId}: account "${v.id}" is unproven — ${
+            v.health.reason ?? "its login was last rejected by the Claude CLI"
           }. Fix with \`multi-clawd login ${v.id}\`.`,
         });
       } else {

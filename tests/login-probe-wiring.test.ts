@@ -29,8 +29,13 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.dir, default: { ...actual, homedir: () => home.dir } };
 });
 
-const { registerPoolBackend, healthStateFile, runLoginHealthProbe, startLoginHealthProbe } =
-  await import("../src/index.js");
+const {
+  registerPoolBackend,
+  healthStateFile,
+  runLoginHealthProbe,
+  startLoginHealthProbe,
+  pendingOperatorAlerts,
+} = await import("../src/index.js");
 const { parseStoredState } = await import("../src/shim-core.js");
 
 const MIN = 60 * 1000;
@@ -308,5 +313,104 @@ describe("an unresolvable credential rotates rather than throwing (1.7.3 × #8)"
     await expect(chosenAccountWith({ claw1: undefined, claw2: undefined })).rejects.toThrow(
       /clawd/,
     );
+  });
+});
+
+/**
+ * The source check judges a stored OAuth credential on evidence, not presence.
+ * The case that prompted it: a Keychain item holding an expired access token
+ * (its refresh token long since rotated away) passed as "alive" while every
+ * real turn failed. Keychain and files are mocked; nothing real is read.
+ */
+describe("the source check needs proof, not presence", () => {
+  const NATIVE = { id: "claw9", native: true };
+  const ACCESS = "fake-access-token-value";
+  function ioWith(expiresAt: number | undefined) {
+    return {
+      readFile: () => {
+        throw new Error("no file");
+      },
+      expandHome: (p: string) => p,
+      keychainAccount: "example-user",
+      platform: "darwin" as const,
+      readKeychainItem: (service: string, account: string) =>
+        expiresAt !== undefined && service === "Claude Code-credentials" && account === "example-user"
+          ? {
+              status: "found" as const,
+              data: JSON.stringify({ claudeAiOauth: { accessToken: ACCESS, refreshToken: "r", expiresAt } }),
+            }
+          : { status: "absent" as const },
+    };
+  }
+
+  test("an expired, unproven credential is reported unverified — once, with no alert and no bench", async () => {
+    const now = Date.now();
+    const { out, logger } = logs();
+    const deps = { io: ioWith(now - 3 * 60 * MIN), nowMs: now, readHealth: () => undefined };
+    await runLoginHealthProbe([NATIVE], logger, deps);
+    await runLoginHealthProbe([NATIVE], logger, { ...deps, nowMs: now + 15 * MIN });
+    const unverified = out.info.filter((l) => l.includes("claw9") && l.includes("unverified"));
+    expect(unverified).toHaveLength(1);
+    expect(out.error).toEqual([]);
+    expect(pendingOperatorAlerts(now) ?? "").not.toContain("claw9");
+    expect(storedCredential("claw9")).toBeUndefined();
+    expect([...out.info, ...out.error].join("\n")).not.toContain(ACCESS);
+  });
+
+  test("a successful turn after expiry proves the refresh and verifies it", async () => {
+    const now = Date.now();
+    const { out, logger } = logs();
+    const io = ioWith(now - 3 * 60 * MIN);
+    await runLoginHealthProbe([NATIVE], logger, { io, nowMs: now, readHealth: () => undefined });
+    await runLoginHealthProbe([NATIVE], logger, {
+      io,
+      nowMs: now + MIN,
+      readHealth: () => ({
+        accountId: "claw9",
+        windows: { five_hour: { status: "allowed", seenAt: now } },
+      }),
+    });
+    expect(out.info.some((l) => l.includes("claw9") && l.includes("login verified"))).toBe(true);
+  });
+
+  test("usage-poll windows never prove the CLI's expired Keychain copy", async () => {
+    // The poll rides the credentials FILE, which can be a different copy.
+    const now = Date.now();
+    const { out, logger } = logs();
+    await runLoginHealthProbe([{ id: "claw8", native: true }], logger, {
+      io: ioWith(now - 3 * 60 * MIN),
+      nowMs: now,
+      readHealth: () => ({
+        accountId: "claw8",
+        windows: { "usage:five_hour": { status: "allowed", utilization: 0.1, seenAt: now - MIN } },
+      }),
+    });
+    expect(out.info.some((l) => l.includes("claw8") && l.includes("unverified"))).toBe(true);
+    expect(out.info.some((l) => l.includes("claw8") && l.includes("login verified"))).toBe(false);
+  });
+
+  test("a login alert does not outlive recovery through an unverified pass", async () => {
+    // broken (no credential at all) → unverified (stored again) → ok.
+    const now = Date.now();
+    const { logger } = logs();
+    const readHealth = () => undefined;
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(undefined), nowMs: now, readHealth });
+    expect(pendingOperatorAlerts(now) ?? "").toContain("claw9");
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(now - 3 * 60 * MIN), nowMs: now, readHealth });
+    expect(pendingOperatorAlerts(now) ?? "").not.toContain("claw9");
+
+    // broken → unknown (a locked Keychain) → ok: no latch either.
+    const locked = { ...ioWith(undefined), readKeychainItem: () => ({ status: "unreadable" as const }) };
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(undefined), nowMs: now, readHealth });
+    expect(pendingOperatorAlerts(now) ?? "").toContain("claw9");
+    await runLoginHealthProbe([NATIVE], logger, { io: locked, nowMs: now, readHealth });
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(now + 60 * MIN), nowMs: now, readHealth });
+    expect(pendingOperatorAlerts(now) ?? "").not.toContain("claw9");
+
+    // And straight from unverified to ok, an alert raised earlier is cleared.
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(undefined), nowMs: now, readHealth });
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(now - 3 * 60 * MIN), nowMs: now, readHealth });
+    await runLoginHealthProbe([NATIVE], logger, { io: ioWith(now + 60 * MIN), nowMs: now, readHealth });
+    expect(pendingOperatorAlerts(now) ?? "").not.toContain("claw9");
   });
 });

@@ -4,6 +4,59 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **Login health now needs proof, not presence.** The credential-source check
+  (login probe and `doctor`) used to pass any account whose Keychain item
+  merely EXISTED, so an item holding an expired access token whose refresh
+  token had already been rotated away read "credential source looks alive"
+  while every real turn failed "OAuth session expired and could not be
+  refreshed". The stored `claudeAiOauth` credential is now judged on its
+  expiry: `ok` only with an unexpired access token, or an expired one followed
+  by a successful turn (within 24h) proving the refresh works; otherwise
+  `unverified` — reported as a warning, never as alive. A stored credential
+  with no refresh token and an expired access token is `broken`; one that
+  records no expiry is `unverified`. Only the CLI's own evidence counts as
+  proof: the usage poll's windows do not, because the poll authenticates with
+  the credentials file, which can be a different copy. A Keychain item that
+  exists but cannot be read (locked, access refused, timed out) is reported as
+  not checked, never as missing. The Keychain
+  is read under an explicit account (`-a`, the Claude CLI's own user-name
+  rule), never by service alone, so a stray same-service item cannot stand in
+  for the CLI's copy; macOS falls back to `.credentials.json` exactly when the
+  CLI does. Token values are reduced to expiry metadata where they are read and
+  never logged or printed.
+- **A recorded auth failure no longer expires into "healthy".** Past its
+  15-minute hard exclusion a failure used to stop binding, and the account
+  read `ok` again with no successful turn in between. It now reads
+  `credential_unverified` until observed success (a successful turn through
+  the shim, `multi-clawd login <id>`, or `doctor --probe`) clears it: never
+  chosen over a proven member, re-tested only when no proven member can serve
+  (so an out-of-band fix is still found), and the pool's credential alert
+  stays raised under the same key until the verdict ends. Failed credential
+  records are also no longer pruned by the 14-day state retention.
+- **`doctor` ignores an inherited `CLAUDE_CONFIG_DIR` for the native
+  account.** Run inside an agent session served by the pool, doctor inherited
+  the serving account's config dir and resolved the native login from it,
+  reporting two distinct logins as "the SAME Claude login". A native child
+  always runs with the variable cleared, so doctor now resolves native from
+  the real home and prints an info line saying the value was ignored.
+
+### Added
+- **`doctor`: credential split-store check.** Per account, warns when more
+  than one copy of the same login's OAuth credential exists — several Keychain
+  items for the account's service under different `acct` values, or the
+  Keychain item plus a plaintext `.credentials.json`. Refresh tokens rotate,
+  so once the copies diverge only the one refreshed last can still refresh,
+  and a tool reading another sees a login that is not the one in use. Each
+  copy is listed with its location, account label, expiry and which one the
+  Claude CLI reads. The remedy proves the CLI's copy first, moves a stray file
+  aside (reversible) only after a passing probe, deletes a stray Keychain item
+  only after a fresh login, never touches the CLI's own copy, and offers no
+  cleanup at all while that copy cannot be read. The Keychain is listed
+  attributes-only (`security dump-keychain` without `-d`).
+
 ## [1.10.1] - 2026-10-04
 
 ### Fixed
