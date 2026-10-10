@@ -6,6 +6,10 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-10
+
+> **Breaking:** a pool account that declares a setup-token (`oauthTokenFile` / `oauthTokenRef`) whose token does not resolve is now refused, even when it also has a `configDir` — it no longer falls back to that directory's own login. Remove the token source from such an account if you relied on the fallback.
+
 ### Fixed
 - **Login health now needs proof, not presence.** The credential-source check
   (login probe and `doctor`) used to pass any account whose Keychain item
