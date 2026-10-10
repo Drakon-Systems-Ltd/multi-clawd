@@ -226,7 +226,11 @@ const VERDICT_RANK: Record<HealthVerdict, number> = {
   no_data: 0,
   near_limit: 1,
   exhausted: 2,
-  credential_failed: 3,
+  // After exhausted: its latest evidence is a rejection, and a direct turn
+  // does not run through the shim, so trying it here could not clear the
+  // record even if it worked.
+  credential_unverified: 3,
+  credential_failed: 4,
 };
 
 export interface DirectOrderPlan {

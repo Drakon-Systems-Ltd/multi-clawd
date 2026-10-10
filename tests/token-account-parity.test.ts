@@ -20,7 +20,7 @@ import {
   parseRetryRoster,
   type RetryAccount,
 } from "../src/retry-plan";
-import { checkAccountCredential } from "../src/login-health";
+import { assessAccountCredential } from "../src/login-health";
 
 const home = { dir: "" };
 vi.mock("node:os", async (importOriginal) => {
@@ -165,7 +165,7 @@ describe("token file parsing", () => {
       keychainHasClaudeCredentials: () => false,
       keychainHasClaudeCredentialsForDir: () => false,
     } as never;
-    const check = checkAccountCredential({ id: "claw1", oauthTokenFile: "~/.claw1/oauth-token" }, io);
+    const check = assessAccountCredential({ id: "claw1", oauthTokenFile: "~/.claw1/oauth-token" }, io);
     expect(check.status).toBe("broken");
     expect(check.reason).toContain("~/.claw1/oauth-token");
     expect(check.reason).toContain("ONLY the token");
@@ -174,7 +174,7 @@ describe("token file parsing", () => {
 
   test("the login probe still passes a clean token file", () => {
     const io = { readFile: () => `${TOKEN1}\n`, platform: "linux" } as never;
-    expect(checkAccountCredential({ id: "claw1", oauthTokenFile: "/t" }, io).status).toBe("ok");
+    expect(assessAccountCredential({ id: "claw1", oauthTokenFile: "/t" }, io).status).toBe("ok");
   });
 });
 

@@ -6,7 +6,8 @@
  *   1. plugin install + manifest/config key agreement (the --force trap)
  *   2. compiled-artifact freshness (stale dist detection)
  *   3. claude CLI availability + PATH sanity
- *   4. per-account credential-source health + which Claude login each
+ *   4. per-account credential health (judged on expiry and proof, never on
+ *      presence), credential split-store detection, and which Claude login each
  *      account actually authenticates as (and whether two share one)
  *   5. per-account rate-limit telemetry (state files, age, windows)
  *   6. pool configuration, sticky state, and the account the next turn runs on
@@ -280,55 +281,73 @@ try {
 
 // ── 4. account credentials (values never printed) ──────────────────────────
 console.log("account credentials");
-const { checkAccountCredential, keychainServiceForConfigDir } = await importDist("login-health.js", [
-  "checkAccountCredential",
-  "keychainServiceForConfigDir",
-]);
-const { summarizeWindowUsage, classifyAccountHealth, overdueProbeAccount } = await importDist("health.js", [
-  "summarizeWindowUsage",
-  "classifyAccountHealth",
-  "overdueProbeAccount",
-]);
+// "cli": judging a credential source is doctor's own diagnostic (see the
+// identity import below). The store module carries the system I/O; both must
+// come from the same build so the io matches the judge.
+const { assessAccountCredential } = await importDist(
+  "login-health.js",
+  ["assessAccountCredential"],
+  "cli",
+);
+const { createSystemCredentialIo, findCredentialCopies, describeSplitStore } = await importDist(
+  "credential-store.js",
+  ["createSystemCredentialIo", "findCredentialCopies", "describeSplitStore"],
+  "cli",
+);
+const { summarizeWindowUsage, classifyAccountHealth, overdueProbeAccount, lastAuthSuccessAt } =
+  await importDist("health.js", [
+    "summarizeWindowUsage",
+    "classifyAccountHealth",
+    "overdueProbeAccount",
+    "lastAuthSuccessAt",
+  ]);
 // "cli", like the chain audits: resolving WHICH login backs an account is
 // doctor's own diagnostic, not a description of the running plugin's
 // behaviour. Asking the installed copy meant a fix to the resolver could not
 // take effect until the plugin itself was reinstalled — so the CLI reported a
 // bug it had already been taught not to make.
-const { resolveAccountIdentity, describeIdentity, findDuplicateLogins, maskEmail } =
-  await importDist(
-    "account-identity.js",
-    ["resolveAccountIdentity", "describeIdentity", "findDuplicateLogins", "maskEmail"],
-    "cli",
-  );
+const {
+  resolveAccountIdentity,
+  describeIdentity,
+  findDuplicateLogins,
+  maskEmail,
+  nativeDefaultConfigDir,
+} = await importDist(
+  "account-identity.js",
+  ["resolveAccountIdentity", "describeIdentity", "findDuplicateLogins", "maskEmail", "nativeDefaultConfigDir"],
+  "cli",
+);
 const { decideStickySelection } = await importDist("sticky.js", ["decideStickySelection"]);
-const io = {
-  readFile: (p) => readFileSync(expandHome(p), "utf8"),
-  keychainHasClaudeCredentials: () => keychainHasService("Claude Code-credentials"),
-  keychainHasClaudeCredentialsForDir: (dir) =>
-    keychainHasService(keychainServiceForConfigDir(expandHome(dir))),
-  platform: process.platform,
-};
-// Metadata-only probe (no `-w`): the secret is never read.
-function keychainHasService(service) {
-  try {
-    execFileSync("security", ["find-generic-password", "-s", service], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+// Keychain reads name the account the Claude CLI uses (`-a`), never just the
+// service. Token values are reduced to expiry metadata where they are read and
+// are never printed.
+const io = createSystemCredentialIo();
+// A native account's child runs with CLAUDE_CONFIG_DIR CLEARED (the pool strips
+// it before every launch), so its login lives under the real home whatever
+// this shell says. Doctor run inside an agent session served by the pool
+// inherits the serving account's dir; honouring it resolved "native" from that
+// account and reported two distinct logins as one.
+const nativeDir = nativeDefaultConfigDir(process.env, HOME);
+if (nativeDir.ignored) {
+  note(
+    `CLAUDE_CONFIG_DIR=${nativeDir.ignored} is set in this shell — ignored: a native account runs ` +
+      `with it cleared, so native is resolved from ${nativeDir.dir}`,
+  );
 }
-// A native account's child sets no CLAUDE_CONFIG_DIR, so it authenticates
-// against whatever the default dir is in the ENV THE GATEWAY RUNS IN. Doctor
-// reads the same variable and prints the path it used, so a box that exports
-// CLAUDE_CONFIG_DIR globally shows its real source rather than a guess.
 const identityIo = {
   readFile: (p) => readFileSync(expandHome(p), "utf8"),
   expandHome,
-  defaultConfigDir: process.env.CLAUDE_CONFIG_DIR
-    ? expandHome(process.env.CLAUDE_CONFIG_DIR)
-    : join(HOME, ".claude"),
+  defaultConfigDir: nativeDir.dir,
   homeDir: HOME,
 };
+/**
+ * Last time the CLI's login for this account was accepted. The shim's file
+ * only: the usage poll authenticates with the credentials FILE, which on a
+ * split store is not the copy the CLI reads, so it proves nothing here.
+ */
+function authProofAt(accountId) {
+  return lastAuthSuccessAt(readJson(join(STATE_DIR, `${accountId}.json`)));
+}
 const accounts = pluginConfig.accounts ?? [];
 const identities = [];
 if (accounts.length === 0) warn("no accounts configured");
@@ -361,24 +380,51 @@ for (const account of accounts) {
   // credential EXISTS, and #8 is exactly the case where a present credential
   // is a session the Claude CLI has already rejected. A recorded runtime
   // failure is the stronger evidence, so it is reported as such.
+  // The record stands until a successful turn (or a re-login) clears it, so
+  // its age changes the wording, never the verdict.
   const recorded = readJson(join(STATE_DIR, `${account.id}.json`))?.credential;
   if (recorded?.status === "failed") {
-    const ageMin = Math.round((Date.now() - recorded.seenAt) / 60000);
+    const ageMin = Math.max(0, Math.round((Date.now() - recorded.seenAt) / 60000));
+    const age = ageMin < 90 ? `${ageMin}m` : `${Math.round(ageMin / 60)}h`;
     bad(
-      `${account.id}: the Claude CLI rejected this login ${ageMin}m ago${
+      `${account.id}: the Claude CLI rejected this login ${age} ago${
         recorded.reason ? ` (${recorded.reason})` : ""
-      } — excluded from the pool; fix with \`multi-clawd login ${account.id}\``,
+      } and no successful turn has been seen since — ` +
+        `fix with \`multi-clawd login ${account.id}\`, or prove an out-of-band fix with ` +
+        `\`multi-clawd doctor --probe\``,
     );
-    continue;
-  }
-  if (account.oauthTokenRef) {
+  } else if (account.oauthTokenRef) {
     warn(`${account.id}: oauthTokenRef — validated by the gateway's async probe, not doctor`);
-    continue;
+  } else {
+    const check = assessAccountCredential(account, io, { proof: { lastSuccessAt: authProofAt(account.id) } });
+    if (check.status === "ok") ok(`${account.id}: credential verified — ${check.detail ?? "ok"}`);
+    else if (check.status === "unverified") {
+      // Not a failure (an idle account's access token expires routinely), and
+      // never "alive": a dead refresh token looks exactly like this at rest.
+      warn(
+        `${account.id}: credential UNVERIFIED — ${check.reason}. The next turn on it refreshes or ` +
+          `fails; prove it now with \`multi-clawd doctor --probe\``,
+      );
+    } else if (check.status === "unknown") warn(`${account.id}: cannot verify (${check.reason ?? "no source"})`);
+    else bad(`${account.id}: ${check.reason}`);
   }
-  const check = checkAccountCredential(account, io);
-  if (check.status === "ok") ok(`${account.id}: credential source looks alive`);
-  else if (check.status === "unknown") warn(`${account.id}: cannot verify (${check.reason ?? "no source"})`);
-  else bad(`${account.id}: ${check.reason}`);
+  // Credential split-store: more than one copy of this login's OAuth
+  // credential. Refresh tokens rotate, so once the copies diverge only the one
+  // refreshed last can still refresh — and the copy a tool happens to read
+  // decides whether it sees a live login or a dead one. Warn-level: the CLI's
+  // own copy may be fine today; this is the early warning.
+  const split = findCredentialCopies(account, io);
+  if (split.status === "split") {
+    const text = describeSplitStore(split, Date.now());
+    warn(`credential split-store — ${text.headline}`);
+    for (const line of text.copies) console.log(`       · ${line}`);
+    console.log(`       remedy: ${text.remedy}`);
+  } else if (split.status !== "n/a" && VERBOSE) {
+    note(`${account.id}: credential split-store — ${split.status === "single" ? "one copy" : "no stored copy"}`);
+  }
+  if (split.incomplete) {
+    note(`${account.id}: credential split-store check incomplete — the Keychain could not be listed, so same-service duplicates may be missed`);
+  }
 }
 
 // Two ids, one login. This is the failure the rest of doctor cannot see: every
