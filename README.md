@@ -261,8 +261,10 @@ claude-cli/claude-fable-5        # main login
 - 🩺 **`npm run doctor` (v0.3)** — one command that says whether a box is
   actually ready: config/manifest agreement (with the exact `--force`
   preflight strip plan), dist freshness, CLI presence, credential health
-  (values never printed), **which Claude login each account authenticates as
-  and which one the next turn will run on**, telemetry age, pool + sticky
+  judged on evidence — an unexpired token or a successful turn, never mere
+  presence (values never printed), a **credential split-store** warning when a
+  login's OAuth credential exists in more than one place, **which Claude login
+  each account authenticates as and which one the next turn will run on**, telemetry age, pool + sticky
   state, **whether every non-Claude chain rung still has a usable auth
   profile**, watchdog presence, optional `--probe` (one turn per account).
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime

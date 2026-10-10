@@ -59,6 +59,26 @@ export interface AccountIdentity {
 }
 
 /**
+ * The default config dir a NATIVE account's child actually runs with, for a
+ * diagnostic running in `env`.
+ *
+ * The pool clears CLAUDE_CONFIG_DIR before every launch, so a native child
+ * always uses `<home>/.claude`, whatever the caller's shell says. Honouring an
+ * inherited value is wrong in exactly the place doctor is most often run: an
+ * agent session served by the pool inherits the SERVING account's config dir,
+ * and resolving "native" from there reported two distinct logins as the same
+ * one. The value is ignored, and returned so the caller can say so.
+ */
+export function nativeDefaultConfigDir(
+  env: Record<string, string | undefined>,
+  homeDir: string,
+): { dir: string; ignored?: string } {
+  const dir = `${homeDir.replace(/\/+$/, "")}/.claude`;
+  const inherited = env.CLAUDE_CONFIG_DIR?.trim();
+  return inherited ? { dir, ignored: inherited } : { dir };
+}
+
+/**
  * The `.claude.json` files an account's child process might authenticate
  * against, best candidate first.
  *

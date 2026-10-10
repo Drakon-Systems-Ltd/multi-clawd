@@ -543,8 +543,8 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
  * A clean exit with no auth failure in the stream proves this account's login
  * works right now, so any recorded credential failure is stale and must be
  * cleared — otherwise an account that has since been re-authenticated stays
- * benched until CREDENTIAL_FAILED_TTL_MS runs out (#8, "clear on a successful
- * execution"). Conditional on a failure actually being on disk so the common
+ * benched, and then reported unproven, until something else clears it (#8,
+ * "clear on a successful execution"). Conditional on a failure actually being on disk so the common
  * path adds no write at all.
  */
 function clearRecordedAuthFailureOnSuccess(): void {
@@ -557,7 +557,9 @@ function clearRecordedAuthFailureOnSuccess(): void {
       `[multi-clawd shim] auth recovered for ${accountId} — credential exclusion cleared\n`,
     );
   } catch {
-    // clearing is best-effort; the TTL is the backstop
+    // Best-effort. A failed clear leaves the record standing (it no longer
+    // expires), and while a proven sibling serves this account is not picked
+    // again; `multi-clawd login <id>` or `doctor --probe` clears it then.
   }
 }
 

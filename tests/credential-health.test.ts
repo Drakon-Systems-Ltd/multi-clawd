@@ -24,10 +24,12 @@ import {
   classifyAccountHealth,
   credentialFailureFor,
   fallbackPoolAccount,
+  lastAuthSuccessAt,
   pickPoolAccountForLaunch,
   CREDENTIAL_FAILED_TTL_MS,
 } from "../src/health";
 import { renderExplanation } from "../src/explain-core";
+import { USAGE_WINDOW_PREFIX } from "../src/usage-poll";
 
 const NOW = 1_784_600_000_000;
 const NOW_S = NOW / 1000;
@@ -218,11 +220,20 @@ describe("credential record persistence", () => {
     expect(mergeHealthStates(disk, live, NOW).credential?.status).toBe("failed");
   });
 
-  test("a credential record beyond the retention horizon is pruned from the file", () => {
-    const disk = recordCredentialFailure({ accountId: "claw1", windows: {} }, "dead", NOW);
+  test("an ok credential record beyond the retention horizon is pruned from the file", () => {
+    const disk = clearCredentialFailure({ accountId: "claw1", windows: {} }, NOW);
     const later = NOW + 15 * 24 * 60 * 60 * 1000; // > PRUNE_AFTER_MS (14d)
     expect(mergeHealthStates(disk, { accountId: "claw1", windows: {} }, later).credential)
       .toBeUndefined();
+  });
+
+  test("a failed credential record is never pruned: only observed success ends it", () => {
+    // Pruning it would turn an unresolved auth failure into a clean bill of
+    // health with no successful turn in between.
+    const disk = recordCredentialFailure({ accountId: "claw1", windows: {} }, "dead", NOW);
+    const later = NOW + 15 * 24 * 60 * 60 * 1000;
+    expect(mergeHealthStates(disk, { accountId: "claw1", windows: {} }, later).credential?.status)
+      .toBe("failed");
   });
 });
 
@@ -254,12 +265,26 @@ describe("credential health outranks quota in classification", () => {
     }
   });
 
-  test("it stops binding past the TTL so an out-of-band fix recovers", () => {
+  test("past the TTL it is unverified, never healthy: no success has been seen", () => {
+    // The bug: the record stopped binding and the account read `ok` with
+    // allowed quota and no successful turn in between.
     const s = withCredential({
       status: "failed",
+      reason: "OAuth session expired",
       seenAt: NOW - CREDENTIAL_FAILED_TTL_MS - 1000,
     });
-    expect(classifyAccountHealth(s, {}, NOW).verdict).not.toBe("credential_failed");
+    const h = classifyAccountHealth(s, {}, NOW);
+    expect(h.verdict).toBe("credential_unverified");
+    expect(h.reason).toContain("OAuth session expired");
+    expect(h.reason).toContain("not proven since");
+    // Days later it is still the latest evidence.
+    expect(classifyAccountHealth(s, {}, NOW + 3 * 24 * 3600_000).verdict).toBe("credential_unverified");
+  });
+
+  test("an observed success after the failure ends it", () => {
+    const failed = withCredential({ status: "failed", seenAt: NOW - CREDENTIAL_FAILED_TTL_MS - 1000 });
+    const cleared = mergeHealthStates(failed, clearCredentialFailure(failed, NOW), NOW);
+    expect(classifyAccountHealth(cleared, {}, NOW).verdict).toBe("ok");
   });
 
   test("an explicit ok record does not bind at all", () => {
@@ -326,6 +351,48 @@ describe("pool selection vocabulary", () => {
     expect(allCredentialFailed([])).toBe(false);
   });
 
+  test("an unverified login is never chosen over a proven one", () => {
+    // Its latest evidence is a rejection: re-test it only when nothing proven can serve.
+    expect(
+      pickPoolAccountForLaunch([
+        { id: "claw1", verdict: "credential_unverified" },
+        { id: "claw2", verdict: "ok" },
+      ]),
+    ).toBe("claw2");
+    expect(
+      pickPoolAccountForLaunch([
+        { id: "claw1", verdict: "credential_unverified" },
+        { id: "claw2", verdict: "near_limit" },
+      ]),
+    ).toBe("claw2");
+  });
+
+  test("an unverified login is re-tested when nothing proven can serve", () => {
+    // A login fixed out-of-band is found again this way; one still dead
+    // re-records its failure and is benched again.
+    expect(
+      pickPoolAccountForLaunch([
+        { id: "claw1", verdict: "exhausted" },
+        { id: "claw2", verdict: "credential_unverified" },
+      ]),
+    ).toBe("claw2");
+    expect(
+      pickPoolAccountForLaunch([
+        { id: "claw1", verdict: "credential_failed" },
+        { id: "claw2", verdict: "credential_unverified" },
+      ]),
+    ).toBe("claw2");
+  });
+
+  test("unverified does not count toward the all-dead hard error", () => {
+    expect(
+      allCredentialFailed([
+        { id: "claw1", verdict: "credential_failed" },
+        { id: "claw2", verdict: "credential_unverified" },
+      ]),
+    ).toBe(false);
+  });
+
   test("with every login dead the fallback is home — the caller raises the error", () => {
     expect(
       fallbackPoolAccount([
@@ -377,5 +444,50 @@ describe("diagnostics keep the two failure kinds apart", () => {
     expect(dead.reason).not.toEqual(exhausted.reason);
     expect(dead.reason).toMatch(/re-authenticate/i);
     expect(exhausted.reason).toMatch(/rejected until/);
+  });
+});
+
+describe("lastAuthSuccessAt: proof that the API accepted the login", () => {
+  test("the newest window or ok record", () => {
+    expect(lastAuthSuccessAt(undefined)).toBeUndefined();
+    expect(
+      lastAuthSuccessAt({
+        accountId: "claw1",
+        windows: { five_hour: { status: "allowed", seenAt: NOW - 5000 } },
+        credential: { status: "ok", seenAt: NOW - 9000 },
+      }),
+    ).toBe(NOW - 5000);
+  });
+
+  test("the usage poll's windows prove nothing: they ride the FILE token, not the CLI's copy", () => {
+    expect(
+      lastAuthSuccessAt({
+        accountId: "claw1",
+        windows: { "usage:five_hour": { status: "allowed", utilization: 0.2, seenAt: NOW } },
+      }),
+    ).toBeUndefined();
+    expect(USAGE_WINDOW_PREFIX).toBe("usage:"); // the prefix health.ts skips
+  });
+
+  test("an overdue quota re-probe still comes before an unverified re-test", () => {
+    expect(
+      fallbackPoolAccount(
+        [
+          { id: "claw1", verdict: "credential_unverified", observedAt: NOW - 3600_000 },
+          { id: "claw2", verdict: "exhausted", observedAt: NOW - 3 * 3600_000 },
+        ],
+        NOW,
+      ),
+    ).toBe("claw2");
+  });
+
+  test("nothing counts while a failure is outstanding", () => {
+    expect(
+      lastAuthSuccessAt({
+        accountId: "claw1",
+        windows: { five_hour: { status: "allowed", seenAt: NOW } },
+        credential: { status: "failed", seenAt: NOW - 1000 },
+      }),
+    ).toBeUndefined();
   });
 });
