@@ -57,6 +57,36 @@ versioning from v1.0.
   cleanup at all while that copy cannot be read. The Keychain is listed
   attributes-only (`security dump-keychain` without `-d`).
 
+### Setup-token pool accounts at parity
+
+- **In-turn retry onto setup-token siblings.** The retry roster used to drop
+  every `oauthTokenFile` / `oauthTokenRef` account, so in a pool made only of
+  setup-token accounts a mid-launch limit fell straight through to the host's
+  chain. Token-file accounts are now offered to the shim by the PATH of their
+  token file; the shim reads it only when it actually retries, and the value
+  goes into that one child. The original protection holds: no token value is
+  ever distributed through the roster (a value handed in anyway is dropped),
+  and the shim now removes the roster from the claude child's env entirely. `oauthTokenRef` accounts
+  stay next-launch rotation only — a reference has no file the shim could
+  read. A sibling whose token does not resolve is skipped, never launched.
+- **Breaking: fail closed even with a `configDir`.** A declared token that resolves
+  empty no longer falls back to the account's `configDir` login; the account
+  is refused, the pool launches on a sibling, and a
+  `credential-unresolved:<id>` alert says which account and why (cleared on
+  its next good launch). If you relied on a token account quietly running on
+  its `configDir` login when the token was missing, remove the token source
+  from that account (it is then a plain `configDir` account).
+- **Token files must hold only the token.** `claude setup-token > file`
+  captures the whole screen around the token. Such a file is now refused with
+  a precise message (never mined for the token: the screen may wrap it), in
+  the launch path, the login probe and `doctor`. README setup no longer tells
+  you to redirect.
+- **Usage polling and setup-tokens, documented.** Setup-tokens carry only
+  `user:inference`; the usage endpoint needs `user:profile` and answers 403
+  (upstream anthropics/claude-code#11985). Token accounts remain unpolled;
+  `doctor`, `usage` and the log now give that reason, and rotation from
+  stream telemetry is covered by tests for token pools.
+
 ## [1.10.1] - 2026-10-04
 
 ### Fixed

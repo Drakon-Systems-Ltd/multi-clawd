@@ -15,6 +15,7 @@
  * successful turn since it expired — and never on presence alone.
  */
 
+import { parseSetupTokenFile } from "./account-env.js";
 import { createHash } from "node:crypto";
 
 export interface CredentialAccountShape {
@@ -319,10 +320,6 @@ export function createRefProbeTracker(
   };
 }
 
-function looksLikeSetupToken(value: string): boolean {
-  return /^sk-ant-[a-z0-9]+-/.test(value.trim());
-}
-
 /** Undefined when the file cannot be read at all. */
 function assessCredentialsJson(
   io: CredentialIo,
@@ -391,11 +388,12 @@ export function assessAccountCredential(
     } catch {
       return { status: "broken", reason: `${account.oauthTokenFile} unreadable` };
     }
-    if (looksLikeSetupToken(raw)) return { status: "ok", detail: "setup-token present" };
-    return {
-      status: "broken",
-      reason: `${account.oauthTokenFile} does not contain a setup-token`,
-    };
+    // The same parse the launch uses, so the probe and doctor call a file
+    // broken exactly when a launch would refuse it — including the common
+    // `claude setup-token > file` capture of the whole screen.
+    const read = parseSetupTokenFile(raw, account.oauthTokenFile);
+    if ("token" in read) return { status: "ok", detail: "setup-token present" };
+    return { status: "broken", reason: read.error };
   }
   if (account.oauthTokenRef) {
     // Refs are validated by the async resolver path; sync check can't see them.

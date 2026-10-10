@@ -4,6 +4,8 @@
  * test rather than trusted to survive refactors.
  */
 import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildBackend, buildRetryRoster } from "../src/index.js";
 
@@ -94,11 +96,40 @@ describe("buildRetryRoster (#19)", () => {
     expect(buildRetryRoster([native, configDir], "claw2").map((r) => r.id)).toEqual(["claw1"]);
   });
 
-  it("excludes token-backed accounts — their secret must not ride in every child's env", () => {
-    // Security, not capability: a token sibling would mean one compromised
-    // child sees the whole pool's credentials rather than its own login.
+  it("offers a token-file sibling by PATH only — the value never rides in the roster", () => {
+    // The roster is in every child's env: a token VALUE there would give one
+    // compromised child every account's credential. A path grants nothing a
+    // same-user process could not read from the plugin config already.
     const roster = buildRetryRoster([native, configDir, tokenFile, tokenRef], "claw1");
-    expect(roster.map((r) => r.id)).toEqual(["claw2"]);
+    expect(roster.map((r) => r.id)).toEqual(["claw2", "claw3"]);
+    const claw3 = roster.find((r) => r.id === "claw3")!;
+    expect(claw3.tokenFile).toBe(join(homedir(), ".claw3/token"));
+    expect(claw3.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(JSON.stringify(roster)).not.toContain("sk-ant");
+  });
+
+  it("a token-file sibling with its own configDir carries the dir, still no value", () => {
+    const both = { id: "claw2", configDir: "/tmp/claw2", oauthTokenFile: "/tmp/claw2.token" };
+    const roster = buildRetryRoster([{ id: "claw1", oauthTokenFile: "/tmp/claw1.token" }, both], "claw1");
+    expect(roster).toEqual([
+      expect.objectContaining({ id: "claw2", tokenFile: "/tmp/claw2.token", env: { CLAUDE_CONFIG_DIR: "/tmp/claw2" } }),
+    ]);
+  });
+
+  it("an all-token pool still has a sibling to retry onto", () => {
+    const a = { id: "claw1", oauthTokenFile: "/tmp/claw1.token" };
+    const b = { id: "claw2", configDir: "/tmp/claw2", oauthTokenFile: "/tmp/claw2.token" };
+    expect(buildRetryRoster([a, b], "claw1").map((r) => r.id)).toEqual(["claw2"]);
+    expect(buildRetryRoster([a, b], "claw2").map((r) => r.id)).toEqual(["claw1"]);
+    expect(buildRetryRoster([a, b], "claw2")[0].env).toEqual({});
+  });
+
+  it("excludes secret-reference siblings — their value exists only after the gateway resolves it", () => {
+    expect(buildRetryRoster([native, tokenRef], "claw1")).toEqual([]);
+  });
+
+  it("excludes a member with no credential source — an empty env would retry on the default login", () => {
+    expect(buildRetryRoster([native, { id: "claw9" }], "claw1")).toEqual([]);
   });
 
   it("carries no identity vars — those are set at retry time from the entry", () => {

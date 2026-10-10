@@ -46,7 +46,8 @@ import { parseModelLimitError, recordModelLimit } from "./shim-core.js";
 import { canonicalModelId } from "./models.js";
 import {
   buildRetryEnv,
-  chooseRetryAccount,
+  chooseLaunchableRetryAccount,
+  materializeRetryAccount,
   parseRetryRoster,
   retryArming,
   RETRY_ROSTER_ENV,
@@ -183,6 +184,10 @@ if (modelOverride) {
 // Decided before a byte exists, because whether the preamble must be held back
 // is a property of the launch, not of what the stream turns out to contain.
 const retryRoster = parseRetryRoster(process.env[RETRY_ROSTER_ENV]);
+// The roster is the shim's business only. The claude child — and every tool
+// process it starts — gets no view of which siblings exist or where their
+// credentials live (retry-plan.ts #2).
+delete process.env[RETRY_ROSTER_ENV];
 // #24: a resumed launch can be retried only if its conversation can follow it.
 // Snapshot the transcript NOW — after the ordinary handover, before the child
 // exists — because the child writes to it before it is ever refused. Pool
@@ -400,11 +405,18 @@ function readSiblingState(file: string) {
 function attemptRetry(): boolean {
   if (!retryArmed || retryUsed) return false;
   const model = effectiveModelId();
-  const target = chooseRetryAccount({
+  const target = chooseLaunchableRetryAccount({
     roster: retryRoster,
     readState: readSiblingState,
     modelId: model,
     nowMs: Date.now(),
+    // A token-file sibling's token is read here, at the moment of the retry,
+    // and goes only into the retried child's env (retry-plan.ts #2).
+    materialize: (account) => materializeRetryAccount(account, (path) => readFileSync(path, "utf8")),
+    onSkip: (id, reason) =>
+      process.stderr.write(
+        `[multi-clawd shim] not retrying onto ${id}: its declared credential did not resolve (${reason})\n`,
+      ),
   });
   if (!target) {
     process.stderr.write(

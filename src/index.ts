@@ -95,7 +95,10 @@ import {
 export { healthStateFile, usageStateFile, clearAccountCredentialFailure };
 import {
   accountConfigDir,
+  AccountCredentialError,
   buildAccountChildEnv,
+  credentialFailureText,
+  parseSetupTokenFile,
   tokenFileModeWarning,
   validateAccountTokenSources,
 } from "./account-env.js";
@@ -570,7 +573,21 @@ function peekToken(account: AccountConfig): string | undefined {
   if (account.oauthTokenFile) {
     const path = expandHome(account.oauthTokenFile);
     warnIfTokenFileExposed(path);
-    return readFileSync(path, "utf8").trim();
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      throw new AccountCredentialError(
+        `[multi-clawd] account "${account.id}": token file ${account.oauthTokenFile} unreadable` +
+          (typeof code === "string" ? ` (${code})` : ""),
+      );
+    }
+    const read = parseSetupTokenFile(raw, `token file ${account.oauthTokenFile}`);
+    if ("error" in read) {
+      throw new AccountCredentialError(`[multi-clawd] account "${account.id}": ${read.error}`);
+    }
+    return read.token;
   }
   if (isSecretRefShape(account.oauthTokenRef)) {
     return activeTokenResolver?.peek(account.oauthTokenRef);
@@ -821,31 +838,46 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
  * The siblings the shim may re-spawn onto when a model limit lands mid-launch
  * (#19), in the pool's own preference order.
  *
- * Secret-free accounts only, and that is a security decision rather than an
- * implementation limit: handing the shim a sibling's OAuth token would put
- * every account's credential in every child's environment, so one compromised
- * child would own the pool instead of one login. A `native` or `configDir`
- * account is switched to with a path, so it costs nothing to offer; a
- * token-backed account keeps today's next-launch rotation.
+ * Paths only, never secret values, and that is a security decision rather
+ * than an implementation limit: the roster rides in every pooled launch's env
+ * (the shim's — it strips it before starting claude), so a sibling's token
+ * VALUE there would distribute every account's credential to every launch. A
+ * `native` or `configDir` account is switched to with a path; a token-file
+ * account is offered by the PATH of its token file, which the shim reads only
+ * when it actually retries onto that account (a same-user process could read
+ * that path from the plugin config anyway — handing it over grants nothing).
+ * A secret-reference account has no path to offer, so it keeps next-launch
+ * rotation. See retry-plan.ts #2.
  */
 export function buildRetryRoster(
   members: AccountConfig[],
   launchedId: string,
-): Array<{ id: string; stateFile: string; env: Record<string, string> }> {
-  const roster: Array<{ id: string; stateFile: string; env: Record<string, string> }> = [];
+): Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }> {
+  const roster: Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }> = [];
   for (const member of members) {
     if (member.id === launchedId) continue;
-    if (member.oauthTokenFile || member.oauthTokenRef) continue;
+    // Native wins over any declared token (validateAccountTokenSources), and a
+    // file wins over a ref — the same precedence the launch path applies.
+    const tokenFile = !member.native && member.oauthTokenFile ? expandHome(member.oauthTokenFile) : undefined;
+    if (!member.native && !tokenFile && member.oauthTokenRef) continue;
+    // No credential source at all: the launch path refuses it, and an empty
+    // env here would retry on the machine's default login.
+    if (!member.native && !tokenFile && !member.configDir) continue;
     const stateFile = healthStateFile(member.id);
-    // No token to resolve, so this never touches the secret provider — a
-    // launch-path 1Password call per sibling would be a real cost for a
-    // contingency that usually does not happen.
-    const env = buildAccountChildEnv(member, undefined, stateFile);
+    // No token resolved here, so this never touches the secret provider or a
+    // token file — a launch-path read per sibling would be a real cost for a
+    // contingency that usually does not happen. The credential half is built
+    // without the token source; the shim adds the token at retry time.
+    const env = buildAccountChildEnv(
+      { ...member, oauthTokenFile: undefined, oauthTokenRef: undefined },
+      undefined,
+      stateFile,
+    );
     // The shim gets the credential half only; its own identity vars are set
     // at retry time from the roster entry.
     delete env.MULTI_CLAWD_ACCOUNT_ID;
     delete env.MULTI_CLAWD_STATE_FILE;
-    roster.push({ id: member.id, stateFile, env });
+    roster.push({ id: member.id, stateFile, env, ...(tokenFile ? { tokenFile } : {}) });
   }
   return roster;
 }
@@ -1443,6 +1475,7 @@ export function registerPoolBackend(
       try {
         env = await buildAccountEnv(candidate, deps?.resolver);
         launched = candidate;
+        alertState = clearAlert(alertState, `credential-unresolved:${candidate.id}`);
         if (candidate.id !== chosen.id) {
           logger.warn(
             `[multi-clawd] pool ${poolId}: ${chosen.id}'s credential did not resolve — ` +
@@ -1451,7 +1484,18 @@ export function registerPoolBackend(
         }
         break;
       } catch (err) {
-        unresolved.push(`${candidate.id} (${(err as Error).message})`);
+        const why = credentialFailureText(err);
+        unresolved.push(`${candidate.id} (${why})`);
+        // Skipped, never launched on another login — and said so, because a
+        // pool that quietly routes around a broken token file looks healthy
+        // right up to the day the sibling runs out too.
+        raiseAlert({
+          key: `credential-unresolved:${candidate.id}`,
+          severity: "error",
+          text:
+            `pool ${poolId}: account "${candidate.id}" was skipped — its declared credential did ` +
+            `not resolve, so it will not launch on any other login (${why})`,
+        });
       }
     }
     if (!env) {
@@ -1670,16 +1714,29 @@ export function stopUsagePoll(): void {
   usageController = undefined;
 }
 
+/** Why a setup-token account is never usage-polled (doctor and `usage` repeat it). */
+export const USAGE_TOKEN_ACCOUNT_REASON =
+  "setup-token login — the usage endpoint needs the user:profile scope and setup-tokens carry only " +
+  "user:inference, so usage comes from stream telemetry only";
+
 /**
  * The `.credentials.json` the poll may read for an account, or the reason it
  * may not. Only a login the CLI keeps in a config dir of its own is readable
- * AND attributable: a token-based account (`oauthTokenFile` / `oauthTokenRef`)
- * runs in the default dir on a token of its own, so the file there belongs to
- * a different account and must not be read as this one.
+ * AND attributable. A token-based account (`oauthTokenFile` / `oauthTokenRef`)
+ * is not polled at all:
+ *   - any `.credentials.json` in its dir is not the credential it runs on, so
+ *     must not be read as this account; and
+ *   - its own setup-token cannot be used instead. `claude setup-token` grants
+ *     only the `user:inference` scope and the usage endpoint requires
+ *     `user:profile`: it answers 403 `oauth_scope_insufficient` (verified
+ *     against the live endpoint, Oct 2026; upstream anthropics/claude-code
+ *     #11985, still open). Polling would be a guaranteed failure per tick.
+ * Such accounts are steered by the shim's stream telemetry, which the
+ * selection rules already handle on their own (USAGE_TOKEN_ACCOUNT_REASON).
  */
 export function usagePollCredentialsFile(account: AccountConfig): { file: string } | { reason: string } {
   if (account.oauthTokenFile || account.oauthTokenRef) {
-    return { reason: "token-based login — usage is read from its own stream telemetry only" };
+    return { reason: USAGE_TOKEN_ACCOUNT_REASON };
   }
   if (!account.native && !account.configDir) {
     return { reason: "no login dir to read credentials from" };
