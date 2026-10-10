@@ -449,6 +449,27 @@ else {
   const members = (pool.accounts ?? []).filter((id) => accounts.some((a) => a.id === id));
   if (members.length < 2) bad(`pool "${pool.id ?? "clawd"}" has ${members.length} valid member(s); needs ≥ 2`);
   else ok(`pool "${pool.id ?? "clawd"}": ${members.join(" → ")}`);
+  // Setup-token members: what they do and do not get, said once, plainly.
+  const tokenMembers = members
+    .map((id) => accounts.find((a) => a.id === id))
+    .filter((a) => a && !a.native && (a.oauthTokenFile || a.oauthTokenRef));
+  if (tokenMembers.length > 0 && pool.usagePoll?.enabled !== false) {
+    note(
+      `usage poll: ${tokenMembers.map((a) => a.id).join(", ")} not polled — a setup-token carries only the ` +
+        `user:inference scope and the usage endpoint needs user:profile (upstream claude-code #11985). ` +
+        `Rotation for ${tokenMembers.length === 1 ? "it" : "them"} runs on stream telemetry: each turn's ` +
+        `rate-limit events still trigger the threshold and 5-hour-warning rules, but an idle account is ` +
+        `not re-measured between turns and there is no 95% usage alert.`,
+    );
+  }
+  const refOnly = tokenMembers.filter((a) => !a.oauthTokenFile);
+  if (refOnly.length > 0) {
+    note(
+      `in-turn retry: ${refOnly.map((a) => a.id).join(", ")} (oauthTokenRef) cannot be a mid-turn retry ` +
+        `target — the shim never receives secret values, and a reference has no file it could read. ` +
+        `${refOnly.length === 1 ? "It rotates" : "They rotate"} at the next launch instead.`,
+    );
+  }
   const sticky = readJson(join(STATE_DIR, `pool-${pool.id ?? "clawd"}.sticky.json`));
 
   // WHICH ACCOUNT IS ACTUALLY BEING USED. Everything above describes the pool

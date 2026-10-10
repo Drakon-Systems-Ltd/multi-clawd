@@ -253,7 +253,8 @@ claude-cli/claude-fable-5        # main login
   your chain: the refusal is swallowed before anything reaches you and the turn
   is re-spawned on a healthy account. Covers ongoing conversations too: the
   session is handed to the sibling as it stood before the refused attempt.
-  Secret-free sibling accounts, one retry.
+  One retry. Works for config-dir, native, and setup-token-file accounts; the
+  shim is handed paths only and reads a token file at the moment it retries.
 - 📟 **Operator alerts (v0.3)** — dead logins (probed every 15 min without
   spending quota), pool rotations, whole-pool exhaustion, and watchdog
   restarts surface through your agent's next heartbeat (e.g. straight into
@@ -462,9 +463,16 @@ dir* — a separate Claude "app" — so the logins can never clobber each other.
 
    ```bash
    mkdir -p ~/.claw2 && chmod 700 ~/.claw2
-   CLAUDE_CONFIG_DIR=~/.claw2 claude setup-token > ~/.claw2/oauth-token   # log in as the 2nd account
-   chmod 600 ~/.claw2/oauth-token
+   CLAUDE_CONFIG_DIR=~/.claw2 claude setup-token   # log in as the 2nd account; it prints the token
+   install -m 600 /dev/null ~/.claw2/oauth-token
+   nano ~/.claw2/oauth-token   # paste ONLY the printed sk-ant-oat01-… token, on one line; save
    ```
+
+   Do not redirect `claude setup-token > file`: that captures the whole
+   screen (sign-in prompts and instructions) around the token. multi-clawd
+   refuses a token file holding anything but the single token line — the
+   account is skipped with an alert naming the file, and `multi-clawd doctor`
+   says exactly what to fix — rather than guess which part is the token.
 
    **Windows (native, PowerShell):**
 
@@ -652,10 +660,22 @@ Boundaries:
 - **Best-effort.** A failed poll changes nothing: the health file keeps what
   the shim wrote, selection keeps working from it, and the failure is logged
   once per transition, not per tick.
-- **Native and `configDir` accounts only.** A token-based account
-  (`oauthTokenFile` / `oauthTokenRef`) runs in the default login dir on a
-  token of its own, so the credentials file there belongs to a different
-  account; those accounts keep stream telemetry only and `explain` says so.
+- **Native and `configDir` logins only — not setup-token accounts.** A
+  `claude setup-token` token carries only the `user:inference` scope, and the
+  usage endpoint requires `user:profile`: it answers `403
+  oauth_scope_insufficient` (checked against the live endpoint; upstream
+  anthropics/claude-code#11985). Reading a credentials file from the
+  account's dir instead would read a different login than the one it runs
+  on. So token accounts (`oauthTokenFile` / `oauthTokenRef`) are not polled,
+  and `doctor`, `usage` and the gateway log say so. What that means in
+  practice for a pool of token accounts:
+  - **Still works:** rotation from stream telemetry — every turn's
+    `rate_limit_event` feeds the same threshold rule, the numberless 5-hour
+    warning rule (v1.7.2), and rejection-with-reset handling in the table
+    above; and the in-turn retry still catches a limit that lands mid-turn.
+  - **Missing:** an idle account is not re-measured between turns, the
+    5-hour window usually has no percentage (only a warning status), and
+    there is no 95% usage alert.
   macOS native logins kept in the keychain (no `.credentials.json`) are
   likewise not polled.
 - **Off switch:** `"usagePoll": { "enabled": false }`.
@@ -829,14 +849,17 @@ Housekeeping:
 - Prefer a secret reference (`oauthTokenRef`, v0.3) over a plaintext
   file; when a file is used, keep it `0600` (POSIX) or locked to your user
   with `icacls` (Windows).
-- **Credential resolution fails closed (v1.7.3).** An account that declares
-  `oauthTokenRef` or `oauthTokenFile` is authenticated by that token. If it
-  resolves to nothing — provider briefly unavailable, empty secret, truncated
-  file — and the account has no `configDir` to fall back on, the launch is
-  refused with `declares a token source but none resolved` rather than
-  allowed to proceed on the machine's default login and spend a different
-  account's quota under this account's name. Native accounts are exempt: the
-  default login *is* their credential.
+- **Credential resolution fails closed (v1.7.3; configDir no longer an
+  exception).** An account that declares `oauthTokenRef` or `oauthTokenFile`
+  is authenticated by that token and nothing else. If it resolves to nothing
+  — provider briefly unavailable, empty secret, truncated file, or a file
+  holding anything besides the single token line — the launch on that
+  account is refused with `declares a token source but none resolved`, even
+  when the account also has a `configDir` (whatever login sits in that dir
+  is not the credential you declared). In a pool the account is skipped, the
+  turn runs on a sibling, and an operator alert names the account and why;
+  only when no member resolves does the launch fail. Native accounts are
+  exempt: the default login *is* their credential.
 - Migrating a token file into a vault? `op read` (and most secret CLIs)
   append a trailing newline on output — resolution trims the resolved
   value (guaranteed in `token-resolution.ts`), so a file-vs-vault diff
