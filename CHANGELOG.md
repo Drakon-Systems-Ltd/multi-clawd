@@ -6,6 +6,40 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-13
+
+> **Requires OpenClaw 2026.8.1 or later** (peer and compat minimums raised). Older hosts keep the legacy node + shim launch automatically.
+
+### Fixed
+- **OpenClaw 2026.10.2 "Ask OpenClaw" / setup authority.** OpenClaw now verifies
+  the CLI backend's executable before minting setup authority, and rejected
+  multi-clawd's `node` + shim command ("executable cannot be bound to one
+  durable absolute owner"). The backend now registers the real `claude`
+  executable with the same `runtimeArtifact` as OpenClaw's built-in
+  `claude-cli` backend, so the host verifies the program that actually runs.
+  Nothing of multi-clawd's, and never `node`, is added to that authority.
+
+### Changed
+- **Agent turns run through an `execute` transport** that launches the shim
+  pinned to the verified claude realpath (`MULTI_CLAWD_CLAUDE_BIN`), keeping
+  mid-turn account failover, rate-limit capture, resume handover and model
+  degrade. The transport refuses any other binary, interpreter prefix or
+  foreign `argv0`, and follows the host's live-session lifecycle.
+- **Side-question turns** (setup probe, `/btw`) are launched and verified by
+  OpenClaw directly with the pool-chosen healthy account; they have no in-turn
+  failover, and a wholly limited pool is logged rather than degraded.
+- **Launch mode is chosen by probing host capabilities**, not a version string;
+  the chosen mode and reason are logged at startup. If `claude` cannot be
+  resolved, on Windows, or on hosts without execute-transport support, the
+  previous node + shim launch is kept unchanged.
+- Host live-session capacity refusals are never attributed to an account.
+
+### Security
+- README documents that verified authority is basename-only for a native
+  install (parity with the built-in backend) and that `MULTI_CLAWD_CLAUDE_BIN`
+  is operator-trusted; the shim exits 127 rather than falling back to PATH if
+  it is set but not executable.
+
 ## [2.0.0] - 2026-10-10
 
 > **Breaking:** a pool account that declares a setup-token (`oauthTokenFile` / `oauthTokenRef`) whose token does not resolve is now refused, even when it also has a `configDir` — it no longer falls back to that directory's own login. Remove the token source from such an account if you relied on the fallback.
