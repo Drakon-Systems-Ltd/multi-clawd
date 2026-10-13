@@ -42,6 +42,18 @@ const LIMIT_TEXT =
   process.env.FAKE_CLAUDE_LIMIT_TEXT ??
   "You've reached your Fable 5 limit. /model to switch models.";
 
+// Opt-in: how this process was launched, for transport tests.
+function launchReport() {
+  const argv = process.argv.slice(2);
+  const idx = argv.indexOf("--append-system-prompt-file");
+  return {
+    argv,
+    system_prompt: idx >= 0 ? readFileSync(argv[idx + 1], "utf8") : null,
+    via_wrapper: process.env.FAKE_VIA_WRAPPER ?? null,
+    saw_claude_bin_env: "MULTI_CLAWD_CLAUDE_BIN" in process.env,
+  };
+}
+
 const lines = [
   '{"type":"system","subtype":"init","session_id":"s1"}',
   '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]},"session_id":"s1"}',
@@ -159,6 +171,7 @@ process.stdin.on("end", () => {
               ? process.env.CLAUDE_CODE_OAUTH_TOKEN === process.env.FAKE_CLAUDE_EXPECT_TOKEN
               : null,
             session_id: "s1",
+            ...(process.env.FAKE_CLAUDE_REPORT_ARGV === "1" ? launchReport() : {}),
           }),
     ) + "\n",
   );
