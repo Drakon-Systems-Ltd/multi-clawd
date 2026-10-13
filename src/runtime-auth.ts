@@ -185,7 +185,11 @@ export function createLoginAuthCache(options: {
       check.status === "ok" && check.expiresAt !== undefined
         ? check.expiresAt - ACCESS_TOKEN_EXPIRY_SKEW_MS
         : undefined;
-    const hardUntil = tokenBound !== undefined && tokenBound > nowMs + ttlMs ? tokenBound : nowMs + ttlMs;
+    // A token-backed verdict is capped at tokenBound, whether that falls
+    // inside or outside the TTL window — never served once the token itself
+    // is within its expiry skew. A success-proven verdict with no token
+    // expiry (tokenBound undefined) keeps the plain TTL.
+    const hardUntil = tokenBound !== undefined && tokenBound > nowMs ? tokenBound : nowMs + ttlMs;
     cache.set(accountId, { check, freshUntil: nowMs + ttlMs, hardUntil });
   };
 

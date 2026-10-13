@@ -307,6 +307,15 @@ describe("createLoginAuthCache", () => {
     expect(cache.peek(native, "claw1", NOW + 31 * 1000)).toBeUndefined();
   });
 
+  test("a near-term token expiry caps hardUntil even when it falls inside the TTL window", async () => {
+    // Expiry at +70s, skew 60s → tokenBound is +10s, well short of the 30s TTL.
+    // A buggy max(tokenBound, ttl) would keep serving "ok" through +30s.
+    const cache = createLoginAuthCache({ io: fileIo({ "~/.claude/.credentials.json": cred(NOW + 70 * 1000) }) });
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW + 9 * 1000)?.apiKey).toBe("oauth:claw1");
+    expect(cache.peek(native, "claw1", NOW + 11 * 1000)).toBeUndefined();
+  });
+
   test("record(): the probe's own verdict feeds the cache on its cadence", () => {
     const cache = createLoginAuthCache({ io: fileIo({}) });
     cache.record("claw1", ok(NOW + HOUR), NOW);
