@@ -520,24 +520,59 @@ describe("the shim execute transport", () => {
   });
 
   test("refuses a leading interpreter argv it would otherwise wrap", () => {
+    const bin = fakeClaudeBinary();
     expect(() =>
-      assertWrappableInvocation({ command: "/x/claude", args: ["/x/cli.js", "-p"] }, "/x/claude"),
+      assertWrappableInvocation({ command: bin, args: ["/x/cli.js", "-p"] }, bin),
     ).toThrow(/leading argv/);
-    expect(() => assertWrappableInvocation({ command: "/x/claude", args: ["-p"] }, "/x/claude")).not.toThrow();
+    expect(() => assertWrappableInvocation({ command: bin, args: ["-p"] }, bin)).not.toThrow();
   });
 
-  test("passes argv0 to the shim and never inherits a stale one", async () => {
-    const bin = fakeClaudeBinary();
+  test("hands the shim the realpath captured at check time, named by the registered path", async () => {
+    const real = writeExecutable(
+      join(scratch, "versions", "2.1.0"),
+      `#!/bin/sh\nFAKE_VIA_WRAPPER=1 exec "${process.execPath}" "${FAKE}" "$@"\n`,
+    );
+    mkdirSync(join(scratch, "bin"));
+    const link = join(scratch, "bin", "claude");
+    symlinkSync(real, link);
     // A stand-in shim that reports what it was handed.
     const probe = writeExecutable(
       join(scratch, "probe-shim.mjs"),
       `process.stdout.write(JSON.stringify({type:"result",bin:process.env.MULTI_CLAWD_CLAUDE_BIN??null,argv0:process.env.MULTI_CLAWD_CLAUDE_ARGV0??null})+"\\n");\n`,
     );
+    const exec = createShimExecute({ configuredCommand: link, shimPath: probe });
+    const expected = { bin: realpathSync(real), argv0: link };
+    // Unverified agent turn: the registered symlink itself.
+    expect((await collect(exec(baseCtx(link, {}))))[0]).toMatchObject(expected);
+    // Verified invocation: realpath + argv0 = the registered path.
+    expect((await collect(exec({ ...baseCtx(realpathSync(link), {}), argv0: link })))[0]).toMatchObject(expected);
+    // A stale argv0 in the inherited env never survives.
+    expect((await collect(exec(baseCtx(link, { MULTI_CLAWD_CLAUDE_ARGV0: "/stale" }))))[0]).toMatchObject(expected);
+
+    // TOCTOU: re-pointing the symlink after the check cannot change what runs —
+    // the shim was given the file, not the link.
+    const decoy = writeExecutable(join(scratch, "versions", "decoy"), "#!/bin/sh\necho decoy\n");
+    const pinned = assertWrappableInvocation({ command: link, args: ["-p"] }, link);
+    rmSync(link);
+    symlinkSync(decoy, link);
+    expect(pinned.executable).toBe(realpathSync(real));
+  });
+
+  test("refuses an argv0 that is not the registered command path", async () => {
+    const bin = fakeClaudeBinary();
+    expect(() => assertWrappableInvocation({ command: bin, argv0: bin, args: ["-p"] }, bin)).not.toThrow();
+    expect(() => assertWrappableInvocation({ command: bin, args: ["-p"] }, bin)).not.toThrow();
+    for (const argv0 of ["/home/u/.local/bin/claude", "claude", ""]) {
+      expect(() => assertWrappableInvocation({ command: bin, argv0, args: ["-p"] }, bin)).toThrow(/refusing argv0/);
+    }
+    const marker = join(scratch, "spawned");
+    const probe = writeExecutable(
+      join(scratch, "marker-shim.mjs"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "x");\n`,
+    );
     const exec = createShimExecute({ configuredCommand: bin, shimPath: probe });
-    const withArgv0 = await collect(exec({ ...baseCtx(bin, {}), argv0: "/home/u/.local/bin/claude" }));
-    expect(withArgv0[0]).toMatchObject({ bin, argv0: "/home/u/.local/bin/claude" });
-    const without = await collect(exec(baseCtx(bin, { MULTI_CLAWD_CLAUDE_ARGV0: "/stale" })));
-    expect(without[0]).toMatchObject({ bin, argv0: null });
+    await expect(collect(exec({ ...baseCtx(bin, {}), argv0: "/elsewhere/claude" }))).rejects.toThrow(/refusing argv0/);
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("a host live-session capacity refusal is never attributed to the launched account", async () => {

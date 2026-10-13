@@ -25,8 +25,9 @@
  * Fail closed: the transport only ever wraps the executable the backend was
  * registered with — the registered path itself, or the same file reached
  * through its symlinks (a host-verified invocation hands over the realpath,
- * with the registered name as argv0, and the shim execs exactly that). Any
- * other command, or a leading interpreter argv, is refused rather than
+ * with the registered name as argv0). The realpath is captured once and the
+ * shim execs exactly that file, named by the registered path. Any other
+ * command or argv0, or a leading interpreter argv, is refused rather than
  * wrapped, because wrapping it would exec a binary nobody verified.
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -101,15 +102,31 @@ export function composePromptForStdin(
   return context?.appendContext ? `${prepended}\n\n${context.appendContext}` : prepended;
 }
 
+/** The exact file and invocation name the shim is told to exec. */
+export interface WrappableInvocation {
+  /** Absolute realpath captured once, at check time; the shim execs this file. */
+  executable: string;
+  /** Invocation name: the registered command path. */
+  argv0: string;
+}
+
 /**
- * Refuse any invocation this transport would wrap incorrectly. Exported so the
- * guard is testable without spawning anything.
+ * Refuse any invocation this transport would wrap incorrectly, and pin what
+ * it will run. The command must be the registered claude executable — that
+ * path itself, or (as a verifying host hands over) its realpath. Its realpath
+ * is resolved HERE, once, and that absolute file is what the shim is given, so
+ * nothing re-resolves a symlink between this check and the exec. argv0 may only
+ * be absent or the registered path (the name OpenClaw's verifier preserves);
+ * the exec always carries the registered path as argv0, as a direct launch
+ * through the PATH symlink would. Leading interpreter argv is refused.
  */
 export function assertWrappableInvocation(
   ctx: Pick<ShimExecuteContext, "command" | "argv0" | "args">,
   configuredCommand: string,
-): void {
-  if (ctx.command !== configuredCommand && !sameExecutable(ctx.command, configuredCommand)) {
+): WrappableInvocation {
+  const registered = realpathOf(configuredCommand);
+  const handed = realpathOf(ctx.command);
+  if (!registered || !handed || registered !== handed) {
     throw new Error(
       `[multi-clawd] refusing to run ${ctx.command} through the shim: this backend only wraps ` +
         `its registered claude executable ${configuredCommand}`,
@@ -121,23 +138,21 @@ export function assertWrappableInvocation(
         `the shim can only exec ${configuredCommand} itself`,
     );
   }
-  if (ctx.argv0 !== undefined && ctx.argv0.trim() === "") {
-    throw new Error("[multi-clawd] refusing an empty argv0 for the claude executable");
+  if (ctx.argv0 !== undefined && ctx.argv0 !== configuredCommand) {
+    throw new Error(
+      `[multi-clawd] refusing argv0 ${JSON.stringify(ctx.argv0)}: only the registered command ` +
+        `${configuredCommand} may name the claude executable`,
+    );
   }
+  return { executable: handed, argv0: configuredCommand };
 }
 
-/**
- * A host that verifies the invocation hands over the RESOLVED executable
- * (OpenClaw's identity check realpaths it) with the PATH-visible name as
- * argv0. That is still the registered binary; anything else is not. A path
- * that cannot be resolved is never the same executable.
- */
-function sameExecutable(a: string, b: string): boolean {
-  if (!isAbsolute(a) || !isAbsolute(b)) return false;
+function realpathOf(path: string): string | undefined {
+  if (!isAbsolute(path)) return undefined;
   try {
-    return realpathSync(a) === realpathSync(b);
+    return realpathSync(path);
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -189,7 +204,7 @@ export function createShimExecute(options: ShimTransportOptions) {
   return async function* executeThroughShim(
     ctx: ShimExecuteContext,
   ): AsyncGenerator<Record<string, unknown>, void, undefined> {
-    assertWrappableInvocation(ctx, options.configuredCommand);
+    const invocation = assertWrappableInvocation(ctx, options.configuredCommand);
     ctx.assertCurrent?.();
     ctx.abortSignal?.throwIfAborted();
 
@@ -259,9 +274,11 @@ export function createShimExecute(options: ShimTransportOptions) {
         args.push(SYSTEM_PROMPT_FILE_ARG, file);
       }
 
-      const env: Record<string, string> = { ...ctx.env, [CLAUDE_BIN_ENV]: ctx.command };
-      delete env[CLAUDE_ARGV0_ENV];
-      if (ctx.argv0 !== undefined) env[CLAUDE_ARGV0_ENV] = ctx.argv0;
+      const env: Record<string, string> = {
+        ...ctx.env,
+        [CLAUDE_BIN_ENV]: invocation.executable,
+        [CLAUDE_ARGV0_ENV]: invocation.argv0,
+      };
 
       ctx.assertCurrent?.();
       ctx.abortSignal?.throwIfAborted();
