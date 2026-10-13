@@ -868,6 +868,28 @@ Housekeeping:
   showing only a trailing-newline mismatch is a false alarm.
 - Use only accounts you own, within your provider's terms of service.
 
+### Security notes: verified launch (OpenClaw ≥ 2026.8.1)
+
+- **Same verification bar as the built-in backend, no stronger.** Each
+  backend's command is the `claude` executable found on the gateway's
+  `PATH`. It declares exactly the runtime artifact OpenClaw's built-in
+  `claude-cli` backend declares (`@anthropic-ai/claude-code`, native
+  executable names `claude` / `claude.exe`). For a native install, OpenClaw
+  verifies that executable by its basename, the same check it applies to its
+  own `claude-cli`. multi-clawd adds no package or binary of its own to that
+  authority and never lists `node` as a native executable.
+- **The shim runs only the verified binary.** Agent turns go through the
+  shim, which is given the realpath checked when the turn starts and runs
+  that file under the registered command name. A different command, a
+  different `argv0`, or an interpreter prefix is refused rather than
+  wrapped.
+- **`MULTI_CLAWD_CLAUDE_BIN` is operator-trusted.** When it is set in the
+  gateway's environment, the plugin uses it in place of the `PATH` lookup.
+  Whoever can set the gateway's environment already controls which binary
+  runs, so the variable widens nothing. Only point it at an executable you
+  trust. If it is set but not executable, the launch fails; nothing falls
+  back to another `claude`.
+
 ## Status & roadmap
 
 Early but real — built for and dogfooded in production.
