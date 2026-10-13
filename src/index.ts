@@ -118,6 +118,8 @@ import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
 import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
 import { materialiseRuntime } from "./runtime-home.js";
+import { CLAUDE_ARGV0_ENV, CLAUDE_BIN_ENV, resolveClaudeExecutable } from "./claude-command.js";
+import { createShimExecute } from "./shim-transport.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
 // declaration files. Derive the backend contract from the stable registration
@@ -126,6 +128,7 @@ type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
 type CliBackendPrepareExecution = NonNullable<CliBackendPlugin["prepareExecution"]>;
 type CliBackendPrepareExecutionContext = Parameters<CliBackendPrepareExecution>[0];
 type CliBackendPreparedExecution = Awaited<ReturnType<CliBackendPrepareExecution>>;
+type CliBackendExecuteFn = NonNullable<NonNullable<CliBackendPreparedExecution>["execute"]>;
 
 const CLI_FRESH_WATCHDOG_DEFAULTS = {
   noOutputTimeoutRatio: 0.8,
@@ -669,6 +672,113 @@ if (!SHIM_RUNTIME.stable) {
 }
 const SHIM_PATH = SHIM_RUNTIME.shimPath;
 
+/**
+ * The runtime artifact the bundled `claude-cli` backend declares, verbatim.
+ * OpenClaw 2026.10 binds a verified setup owner (the dashboard custodian) only
+ * to a command whose package tree it can hash; this names Claude Code's own
+ * package and its native executable basenames. Never ours, never `node`.
+ */
+export const CLAUDE_RUNTIME_ARTIFACT = Object.freeze({
+  kind: "bundled-package-tree" as const,
+  packageName: "@anthropic-ai/claude-code",
+  entrypoint: "command" as const,
+  nativeExecutableNames: Object.freeze(["claude", "claude.exe"]),
+});
+
+/**
+ * How a backend launches Claude Code.
+ *
+ * - `verified` (OpenClaw >= 2026.8.1 with `claude` resolvable): the backend's
+ *   command IS the claude executable, declared with Claude Code's runtime
+ *   artifact so the host can verify it. Side-question turns (setup probe,
+ *   /btw) run it directly; agent turns run through the shim via the execute
+ *   transport, which keeps failover, rate-limit capture, handover and degrade.
+ * - `legacy`: node + shim exactly as every release before this one. Used when
+ *   claude cannot be resolved or the host cannot run plugin transports; the
+ *   host's verified-owner check then fails exactly as it did before.
+ */
+export type BackendLaunch =
+  | { kind: "verified"; claudeCommand: string; shimPath: string; log?: (line: string) => void }
+  | { kind: "legacy"; shimPath: string; reason?: string };
+
+/** First OpenClaw release whose CLI runner honours a prepared `execute` transport. */
+const EXECUTE_TRANSPORT_MIN_HOST: readonly [number, number, number] = [2026, 8, 1];
+
+function parseHostVersion(version: unknown): [number, number, number] | undefined {
+  if (typeof version !== "string") return undefined;
+  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
+}
+
+function versionAtLeast(v: readonly number[], min: readonly number[]): boolean {
+  for (let i = 0; i < min.length; i += 1) {
+    if (v[i] !== min[i]) return v[i] > min[i];
+  }
+  return true;
+}
+
+/**
+ * Decide the launch mode once per registration. An unknown host version is
+ * treated as current (every host that reports none is newer than the field);
+ * a known pre-transport host keeps the legacy launch, because it would ignore
+ * the transport and run claude bare — losing the shim on every turn.
+ */
+export function resolveBackendLaunch(params: {
+  hostVersion?: unknown;
+  env?: Readonly<Record<string, string | undefined>>;
+  platform?: NodeJS.Platform;
+  shimPath?: string;
+  log?: (line: string) => void;
+}): BackendLaunch {
+  const shimPath = params.shimPath ?? SHIM_PATH;
+  const host = parseHostVersion(params.hostVersion);
+  if (host && !versionAtLeast(host, EXECUTE_TRANSPORT_MIN_HOST)) {
+    return {
+      kind: "legacy",
+      shimPath,
+      reason: `OpenClaw ${String(params.hostVersion)} predates plugin execute transports`,
+    };
+  }
+  const claude = resolveClaudeExecutable(params.env ?? process.env, params.platform ?? process.platform);
+  if (!claude.ok) return { kind: "legacy", shimPath, reason: claude.reason };
+  return {
+    kind: "verified",
+    claudeCommand: claude.command,
+    shimPath,
+    ...(params.log ? { log: params.log } : {}),
+  };
+}
+
+/** Shim-only steering vars: meaningless (and the roster private) to a bare claude. */
+const SHIM_ONLY_ENV = [
+  RETRY_ROSTER_ENV,
+  SESSION_DIRS_ENV,
+  "MULTI_CLAWD_MODEL_OVERRIDE",
+  CLAUDE_BIN_ENV,
+  CLAUDE_ARGV0_ENV,
+];
+
+/**
+ * The prepared execution for one launch. Legacy: env only, as always.
+ * Verified side-question turns: env only, minus the shim's steering vars —
+ * OpenClaw runs (and verifies) the claude command itself, on the account the
+ * pool already chose. Verified agent turns: env plus the shim transport.
+ */
+function preparedForLaunch(
+  launch: BackendLaunch,
+  ctx: CliBackendPrepareExecutionContext,
+  env: Record<string, string>,
+  transport: CliBackendExecuteFn | undefined,
+): CliBackendPreparedExecution {
+  if (launch.kind === "legacy") return { env };
+  if (ctx.executionMode === "side-question") {
+    for (const key of SHIM_ONLY_ENV) delete env[key];
+    return { env };
+  }
+  if (!transport) throw new Error("[multi-clawd] verified launch is missing its shim transport");
+  return { env, execute: transport };
+}
+
 
 /** Catalog ids observed on previous runs — the baseline for "this model is new". */
 function knownModelsFile(): string {
@@ -738,7 +848,21 @@ function checkModelCurrency(catalogIds: readonly string[], chainRefs: readonly s
   }
 }
 
-export function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
+export function buildBackend(
+  account: AccountConfig,
+  execMode?: string,
+  launch: BackendLaunch = { kind: "legacy", shimPath: SHIM_PATH },
+): CliBackendPlugin {
+  const verified = launch.kind === "verified";
+  // Plain claude argv: the shim (when one runs) is the transport's business.
+  const shimPrefix = verified ? [] : [launch.shimPath];
+  const transport = verified
+    ? (createShimExecute({
+        configuredCommand: launch.claudeCommand,
+        shimPath: launch.shimPath,
+        ...(launch.log ? { log: launch.log } : {}),
+      }) satisfies CliBackendExecuteFn)
+    : undefined;
   const backend: CliBackendPlugin = {
     id: account.id,
     liveTest: {
@@ -751,6 +875,7 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
       },
     },
     // Full harness — mirror the bundled claude-cli backend.
+    ...(verified ? { runtimeArtifact: CLAUDE_RUNTIME_ARTIFACT } : {}),
     bundleMcp: true,
     bundleMcpMode: "claude-config-file",
     // `selectable` + an enforcement strategy is what lets OpenClaw 2026.8.2 hand
@@ -764,12 +889,13 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     config: {
-      // Spawn our transparent shim (which spawns `claude`) so the plugin can
-      // observe rate_limit_event records for near-limit account rotation.
-      // process.execPath = the node running the gateway; always present.
-      command: process.execPath,
-      args: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode)],
-      resumeArgs: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode), "--resume", "{sessionId}"],
+      // Verified: the real claude executable, so the host can bind it as a
+      // setup owner; agent turns still run through the shim via the execute
+      // transport (shim-transport.ts). Legacy: node (the gateway's own, always
+      // present) running our transparent shim, which spawns `claude`.
+      command: verified ? launch.claudeCommand : process.execPath,
+      args: [...shimPrefix, ...BASE_ARGS, ...permissionModeArgs(execMode)],
+      resumeArgs: [...shimPrefix, ...BASE_ARGS, ...permissionModeArgs(execMode), "--resume", "{sessionId}"],
       forkArg: "--fork-session",
       resumeAtArg: "--resume-session-at",
       output: "jsonl",
@@ -823,11 +949,12 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
     },
     // The crux: point this backend's Claude Code process at its own login.
     async prepareExecution(
-      _ctx: CliBackendPrepareExecutionContext,
+      ctx: CliBackendPrepareExecutionContext,
     ): Promise<CliBackendPreparedExecution> {
-      return { env: await buildAccountEnv(account) };
+      return preparedForLaunch(launch, ctx, await buildAccountEnv(account), transport);
     },
   };
+  launchTransports.set(backend, { launch, transport });
   // Older OpenClaw gateways still read `sessionArg`. 2026.8.1 types dropped it
   // in favour of `sessionArgs`; unknown fields are ignored.
   Object.assign(backend.config, { sessionArg: "--session-id" });
@@ -849,6 +976,12 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
  * A secret-reference account has no path to offer, so it keeps next-launch
  * rotation. See retry-plan.ts #2.
  */
+/** Per-backend launch + transport, so the pool's own prepareExecution can reuse them. */
+const launchTransports = new WeakMap<
+  CliBackendPlugin,
+  { launch: BackendLaunch; transport: CliBackendExecuteFn | undefined }
+>();
+
 export function buildRetryRoster(
   members: AccountConfig[],
   launchedId: string,
@@ -1045,6 +1178,27 @@ export default definePluginEntry({
         permissionModeArgs(execMode).length ? "bypassPermissions" : "default (no override)"
       }`,
     );
+    let hostVersion: unknown;
+    try {
+      hostVersion = (api.runtime as { version?: unknown } | undefined)?.version;
+    } catch {
+      hostVersion = undefined;
+    }
+    const launchLogger = api.logger;
+    const launch = resolveBackendLaunch({
+      hostVersion,
+      log: (line) => launchLogger.info(line),
+    });
+    if (launch.kind === "verified") {
+      api.logger.info(
+        `[multi-clawd] launch: verified claude ${launch.claudeCommand} (agent turns via shim ${launch.shimPath})`,
+      );
+    } else {
+      api.logger.warn(
+        `[multi-clawd] launch: legacy node+shim (${launch.reason ?? "unknown"}) — ` +
+          `OpenClaw cannot verify this backend as a setup owner`,
+      );
+    }
     const seen = new Set<string>();
     for (const account of accounts) {
       const id = account?.id?.trim();
@@ -1063,10 +1217,10 @@ export default definePluginEntry({
       }
       seen.add(id);
       const normalized = { ...account, id };
-      api.registerCliBackend(buildBackend(normalized, execMode));
+      api.registerCliBackend(buildBackend(normalized, execMode, launch));
       api.registerProvider(buildCatalogProvider(normalized));
     }
-    registerPoolBackend(api, cfg.pool, accounts, seen, execMode);
+    registerPoolBackend(api, cfg.pool, accounts, seen, execMode, { launch });
 
     // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
     {
@@ -1253,7 +1407,7 @@ export function registerPoolBackend(
   accounts: AccountConfig[],
   registeredIds: Set<string>,
   execMode?: string,
-  deps?: { resolver?: TokenRefResolver },
+  deps?: { resolver?: TokenRefResolver; launch?: BackendLaunch },
 ): void {
   const logger = api.logger;
   if (!pool) return;
@@ -1297,7 +1451,8 @@ export function registerPoolBackend(
   const stickyFile = join(
     homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
   );
-  const backend = buildBackend(poolAccount, execMode);
+  const backend = buildBackend(poolAccount, execMode, deps?.launch);
+  const { launch, transport } = launchTransports.get(backend)!;
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
     const now = Date.now();
     // Model-aware (v0.3.6): a model-scoped rejected window (reactive 429
@@ -1547,7 +1702,7 @@ export function registerPoolBackend(
         );
       }
     }
-    return { env };
+    return preparedForLaunch(launch, ctx, env, transport);
   };
   api.registerCliBackend(backend);
   api.registerProvider(buildCatalogProvider(poolAccount));
