@@ -497,6 +497,42 @@ describe("the shim execute transport", () => {
     expect(without[0]).toMatchObject({ bin, argv0: null });
   });
 
+  test("a host live-session capacity refusal is never attributed to the launched account", async () => {
+    const bin = fakeClaudeBinary();
+    const marker = join(scratch, "shim-ran");
+    const probe = writeExecutable(
+      join(scratch, "marker-shim.mjs"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "x");\n`,
+    );
+    // OpenClaw's ensureCliLiveSessionCapacity: a FailoverError, reason rate_limit.
+    const capacity = Object.assign(new Error("Too many CLI live sessions are active."), {
+      name: "FailoverError",
+      reason: "rate_limit",
+    });
+    const calls: string[] = [];
+    const capability = {
+      fingerprint: "fp",
+      restart: async () => void calls.push("restart"),
+      register: () => {
+        calls.push("register");
+        throw capacity;
+      },
+      activate: () => void calls.push("activate"),
+      remove: () => void calls.push("remove"),
+    };
+    const stateFile = join(scratch, "claw1.json");
+    const exec = createShimExecute({ configuredCommand: bin, shimPath: probe });
+    const err = await collect(
+      exec(baseCtx(bin, { MULTI_CLAWD_ACCOUNT_ID: "claw1", MULTI_CLAWD_STATE_FILE: stateFile }, { liveSession: capability })),
+    ).catch((e: unknown) => e);
+    // The host's own error, untouched, so the host classifies it as its own.
+    expect(err).toBe(capacity);
+    expect(calls).toEqual(["restart", "register"]);
+    // Nothing launched, so nothing could record a limit against claw1.
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(stateFile)).toBe(false);
+  });
+
   test("cancellation kills the process and ends the turn", async () => {
     const sleeper = writeExecutable(join(scratch, "bin", "claude"), "#!/bin/sh\nsleep 30\n");
     const live = liveSessionRecorder();

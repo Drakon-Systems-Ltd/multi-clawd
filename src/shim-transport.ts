@@ -238,6 +238,11 @@ export function createShimExecute(options: ShimTransportOptions) {
 
     try {
       if (capability && handle) {
+        // Before anything is spawned, on purpose: the host refuses here when
+        // its live-session table is full (a rate_limit FailoverError about
+        // OpenClaw's capacity, not the account). Nothing has run, so the shim
+        // cannot record it against the account, and the host's error is
+        // rethrown untouched for the host to classify as its own.
         capability.register(handle);
         registered = true;
         // Binds the turn's MCP capture to this process; the host does not do
