@@ -6,6 +6,24 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw 2026.10: pool and account models shown as unavailable
+  ("missing-auth").** OpenClaw 2026.10 derives each provider's model
+  availability from the synthetic credential the provider returns, and a
+  `native` / `configDir` account had no setup token to return — so the Control
+  UI's Models picker greyed out every `clawd/*` and `claw<N>/*` row and
+  substituted another model for the configured primary, while turns kept
+  working. CLI-login accounts now prove their login the way the login-health
+  probe judges it (an unexpired stored access token, or a successful turn
+  since it expired — never mere presence) and answer with OpenClaw's own
+  non-secret `oauth:<provider>` marker; the pool reports signed-in when any
+  member does; a dead login still reports nothing, so "missing-auth" stays
+  honest. Token accounts are unchanged. The marker is refused in
+  `prepareRuntimeAuth`, so the direct API transport (`openclaw infer model
+  run --model clawd/...`) keeps failing closed for CLI-login accounts instead
+  of putting a placeholder on the wire. Verdicts are cached for 30s per
+  account; no token value leaves the resolver. Ships as 2.1.1. (#39)
+
 ## [2.1.0] - 2026-10-13
 
 > **Requires OpenClaw 2026.8.1 or later** (peer and compat minimums raised). Older hosts keep the legacy node + shim launch automatically.
