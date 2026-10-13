@@ -53,6 +53,12 @@ import {
   RETRY_ROSTER_ENV,
 } from "./retry-plan.js";
 import {
+  CLAUDE_ARGV0_ENV,
+  CLAUDE_BIN_ENV,
+  parseClaudeBinOverride,
+  resolveExecutable,
+} from "./claude-command.js";
+import {
   effectiveConfigDir,
   handoverForLaunch,
   handoverSnapshotTo,
@@ -61,20 +67,43 @@ import {
   snapshotResumeTranscript,
 } from "./session-handover.js";
 
-function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
-  const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
-  if (override) {
-    try {
-      const parsed = JSON.parse(override);
-      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((p) => typeof p === "string")) {
-        return { command: parsed[0], prependArgs: parsed.slice(1) };
-      }
-    } catch {
-      // not JSON — treat as a plain binary path
-    }
-    return { command: override, prependArgs: [] };
+/**
+ * The one claude executable this launch may exec. When the plugin's verified
+ * transport launches us it names that executable in MULTI_CLAWD_CLAUDE_BIN,
+ * and the shim must run exactly it or nothing: falling back to whatever
+ * `claude` is on PATH would run a different binary under a verified name. So
+ * a set-but-unusable value fails the launch (exit 127) instead. Unset keeps
+ * the original behaviour, `claude` from PATH.
+ */
+function resolveClaudeCommand(): { command: string; prependArgs: string[]; argv0?: string } {
+  const raw = process.env[CLAUDE_BIN_ENV];
+  const argv0 = process.env[CLAUDE_ARGV0_ENV] || undefined;
+  // Ours alone: neither claude nor any tool it starts needs to see them.
+  delete process.env[CLAUDE_BIN_ENV];
+  delete process.env[CLAUDE_ARGV0_ENV];
+  const override = parseClaudeBinOverride(raw);
+  if (!override) {
+    if (argv0) refuseLaunch(`${CLAUDE_ARGV0_ENV} is set without ${CLAUDE_BIN_ENV}`);
+    return { command: "claude", prependArgs: [] };
   }
-  return { command: "claude", prependArgs: [] };
+  const requested = override.kind === "argv" ? override.command : override.value;
+  const command = resolveExecutable(requested, process.env.PATH);
+  if (!command) {
+    refuseLaunch(`${CLAUDE_BIN_ENV}=${requested} is not an executable file`);
+  }
+  if (argv0 && override.kind === "argv" && override.prependArgs.length > 0) {
+    refuseLaunch(`${CLAUDE_ARGV0_ENV} cannot apply to an interpreter-form ${CLAUDE_BIN_ENV}`);
+  }
+  return {
+    command,
+    prependArgs: override.kind === "argv" ? override.prependArgs : [],
+    ...(argv0 ? { argv0 } : {}),
+  };
+}
+
+function refuseLaunch(why: string): never {
+  process.stderr.write(`[multi-clawd shim] refusing to launch claude: ${why}\n`);
+  process.exit(127);
 }
 
 // Mutable: an in-turn retry (#19) moves this process onto a sibling account,
@@ -158,7 +187,7 @@ function persistState(): void {
   }
 }
 
-const { command, prependArgs } = resolveClaudeCommand();
+const { command, prependArgs, argv0: claudeArgv0 } = resolveClaudeCommand();
 // Tier degradation (v0.3.5): the pool's prepareExecution decides, we enforce.
 // The OpenClaw runner appends `--model <requested>` after any hook-provided
 // argv (last-wins), so the swap must happen here, in the process we own.
@@ -208,6 +237,7 @@ if (!retryArmed && retryRoster.length > 0 && arming.reason) {
 let child = spawn(command, childArgs, {
   stdio: ["pipe", "pipe", "inherit"],
   env: process.env,
+  ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
 });
 // stdin must be REPLAYABLE while a retry is possible: the prompt was written
 // to the first child and the second one needs the same bytes. Capped, because
@@ -478,6 +508,7 @@ function attemptRetry(): boolean {
   child = spawn(command, childArgs, {
     stdio: ["pipe", "pipe", "inherit"],
     env: buildRetryEnv(process.env, target),
+    ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
   });
   attachChildHandlers();
   for (const chunk of stdinReplay) child.stdin.write(chunk);
