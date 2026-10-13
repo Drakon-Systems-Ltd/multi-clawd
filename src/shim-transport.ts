@@ -22,16 +22,18 @@
  * - kills the process tree on cancellation and turns a failed exit into an
  *   error carrying the CLI's own diagnostics, so failover still classifies it.
  *
- * Fail closed: the transport only ever wraps the command the backend was
- * registered with. A different command (for example a verified invocation the
- * host resolved to another path) or a leading interpreter argv is refused
- * rather than wrapped, because wrapping it would exec a binary nobody verified.
+ * Fail closed: the transport only ever wraps the executable the backend was
+ * registered with — the registered path itself, or the same file reached
+ * through its symlinks (a host-verified invocation hands over the realpath,
+ * with the registered name as argv0, and the shim execs exactly that). Any
+ * other command, or a leading interpreter argv, is refused rather than
+ * wrapped, because wrapping it would exec a binary nobody verified.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { CLAUDE_ARGV0_ENV, CLAUDE_BIN_ENV } from "./claude-command.js";
 
@@ -107,7 +109,7 @@ export function assertWrappableInvocation(
   ctx: Pick<ShimExecuteContext, "command" | "argv0" | "args">,
   configuredCommand: string,
 ): void {
-  if (ctx.command !== configuredCommand) {
+  if (ctx.command !== configuredCommand && !sameExecutable(ctx.command, configuredCommand)) {
     throw new Error(
       `[multi-clawd] refusing to run ${ctx.command} through the shim: this backend only wraps ` +
         `its registered claude executable ${configuredCommand}`,
@@ -121,6 +123,21 @@ export function assertWrappableInvocation(
   }
   if (ctx.argv0 !== undefined && ctx.argv0.trim() === "") {
     throw new Error("[multi-clawd] refusing an empty argv0 for the claude executable");
+  }
+}
+
+/**
+ * A host that verifies the invocation hands over the RESOLVED executable
+ * (OpenClaw's identity check realpaths it) with the PATH-visible name as
+ * argv0. That is still the registered binary; anything else is not. A path
+ * that cannot be resolved is never the same executable.
+ */
+function sameExecutable(a: string, b: string): boolean {
+  if (!isAbsolute(a) || !isAbsolute(b)) return false;
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return false;
   }
 }
 

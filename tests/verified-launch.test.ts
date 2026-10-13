@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -392,6 +393,31 @@ describe("the shim execute transport", () => {
       /only wraps its registered claude executable/,
     );
     expect(live.calls).toEqual([]);
+  });
+
+  test("accepts a host-verified invocation: the realpath of the registered symlink, argv0 = the symlink", async () => {
+    const real = writeExecutable(
+      join(scratch, "versions", "2.1.0"),
+      `#!/bin/sh\nFAKE_VIA_WRAPPER=1 exec "${process.execPath}" "${FAKE}" "$@"\n`,
+    );
+    mkdirSync(join(scratch, "bin"));
+    const link = join(scratch, "bin", "claude");
+    symlinkSync(real, link);
+    const exec = createShimExecute({ configuredCommand: link, shimPath: SHIM });
+    const records = await collect(
+      exec({ ...baseCtx(realpathSync(link), { PATH: scratch, FAKE_CLAUDE_REPORT_ARGV: "1" }), argv0: link }),
+    );
+    const result = records.find((r) => r.type === "result")!;
+    expect(result.via_wrapper).toBe("1");
+    expect(result.result).toBe("the prompt");
+    // Still refuses a leading argv on the verified path.
+    expect(() =>
+      assertWrappableInvocation({ command: realpathSync(link), argv0: link, args: ["/x/cli.js", "-p"] }, link),
+    ).toThrow(/leading argv/);
+    // And a different file is still a different file.
+    const other = writeExecutable(join(scratch, "versions", "9.9.9"), "#!/bin/sh\n");
+    expect(() => assertWrappableInvocation({ command: other, args: ["-p"] }, link)).toThrow(/only wraps/);
+    expect(() => assertWrappableInvocation({ command: join(scratch, "gone"), args: ["-p"] }, link)).toThrow(/only wraps/);
   });
 
   test("refuses a leading interpreter argv it would otherwise wrap", () => {
