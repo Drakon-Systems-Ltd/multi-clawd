@@ -1697,7 +1697,22 @@ export function registerPoolBackend(
             requestedModel: ctx.modelId,
             ladder,
           });
-      if (degradation) {
+      // A verified side-question (setup probe, /btw) is run by OpenClaw
+      // itself, without the shim — and the shim is the only thing that can
+      // swap the model: OpenClaw appends `--model <requested>` after every
+      // hook-provided argv, and prepareExecution has no supported way to
+      // change it. The account choice above already avoids any account
+      // limited for this model while one is not; only a wholly exhausted pool
+      // reaches here, and that is said plainly rather than claimed as a degrade.
+      const runsWithoutShim = launch.kind === "verified" && ctx.executionMode === "side-question";
+      if (degradation && runsWithoutShim) {
+        logger.warn(
+          `[multi-clawd] pool ${poolId}: side-question runs ${ctx.modelId} undegraded on ${
+            (launched ?? chosen).id
+          } — every account is limited for it, and the degrade ladder (${degradation.model}) ` +
+            `can only be applied by the shim, which OpenClaw does not run for side-questions`,
+        );
+      } else if (degradation) {
         env.MULTI_CLAWD_MODEL_OVERRIDE = degradation.model;
         const line = `pool ${poolId}: degrading ${ctx.modelId} → ${degradation.model} on ${chosen.id} (${degradation.reason})`;
         logger.info(`[multi-clawd] ${line}`);

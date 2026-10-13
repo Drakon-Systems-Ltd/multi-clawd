@@ -37,6 +37,7 @@ const { createShimExecute, assertWrappableInvocation, composePromptForStdin } = 
 );
 const { RETRY_ROSTER_ENV } = await import("../src/retry-plan.js");
 const { SESSION_DIRS_ENV } = await import("../src/session-handover.js");
+const { recordModelLimit } = await import("../src/shim-core.js");
 
 const ROOT = join(__dirname, "..");
 const SHIM = join(ROOT, "dist", "shim.js");
@@ -303,6 +304,61 @@ describe("prepareExecution on a verified backend", () => {
     expect(typeof agent.execute).toBe("function");
     expect(agent.env.CLAUDE_CONFIG_DIR).toBe("/tmp/claw2-login");
     expect(agent.env[RETRY_ROSTER_ENV]).toBeDefined();
+  });
+});
+
+describe("pool side-questions and model limits", () => {
+  const MODEL = "claude-opus-5";
+  function limitFor(accountId: string, model = MODEL) {
+    const stateDir = join(home.dir, ".openclaw", "state", "multi-clawd");
+    mkdirSync(stateDir, { recursive: true });
+    const state = recordModelLimit({ accountId, windows: {} }, model, Date.now(), Math.floor(Date.now() / 1000) + 86_400);
+    writeFileSync(join(stateDir, `${accountId}.json`), JSON.stringify(state));
+  }
+  function registerVerifiedPool(pool: Record<string, unknown> = {}) {
+    let backend: { prepareExecution?: (ctx: unknown) => Promise<{ env: Record<string, string>; execute?: unknown }> } | undefined;
+    const warn: string[] = [];
+    const api = {
+      logger: { info: () => {}, warn: (m: string) => warn.push(m), error: () => {} },
+      registerCliBackend: (b: { id?: string }) => {
+        if (b.id === "clawd") backend = b as typeof backend;
+      },
+      registerProvider: () => {},
+    } as never;
+    fakeClaudeBinary();
+    registerPoolBackend(
+      api,
+      { id: "clawd", accounts: ["claw1", "claw2"], ...pool },
+      [
+        { id: "claw1", configDir: "/tmp/claw1-login" },
+        { id: "claw2", configDir: "/tmp/claw2-login" },
+      ],
+      new Set(["claw1", "claw2"]),
+      undefined,
+      { launch: resolveBackendLaunch({ hostSupportsExecute: true, env: { PATH: join(scratch, "bin") }, platform: "darwin", shimPath: SHIM }) },
+    );
+    const prepare = (executionMode: string) =>
+      backend!.prepareExecution!({ workspaceDir: "/tmp/ws", provider: "clawd", modelId: MODEL, executionMode });
+    return { prepare, warn };
+  }
+
+  test("a side-question never launches on an account limited for its model while another is not", async () => {
+    limitFor("claw1");
+    const { prepare } = registerVerifiedPool();
+    const side = await prepare("side-question");
+    expect(side.execute).toBeUndefined();
+    expect(side.env.CLAUDE_CONFIG_DIR).toBe("/tmp/claw2-login");
+  });
+
+  test("a wholly limited pool: agent turns degrade via the shim; side-questions say they cannot", async () => {
+    limitFor("claw1");
+    limitFor("claw2");
+    const { prepare, warn } = registerVerifiedPool({ degrade: { ladder: ["claude-sonnet-5"] } });
+    const agent = await prepare("agent");
+    expect(agent.env.MULTI_CLAWD_MODEL_OVERRIDE).toBe("claude-sonnet-5");
+    const side = await prepare("side-question");
+    expect(side.env.MULTI_CLAWD_MODEL_OVERRIDE).toBeUndefined();
+    expect(warn.some((w) => w.includes("side-question runs claude-opus-5 undegraded"))).toBe(true);
   });
 });
 
