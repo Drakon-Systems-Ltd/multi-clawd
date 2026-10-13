@@ -30,8 +30,8 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.8.1",
+      "minGatewayVersion": "2026.8.1"
     }
   },
   "main": "./dist/index.js",
@@ -64,7 +64,7 @@
     "version": "npm run sync-manifest && npm run sync-readme-tag && git add openclaw.plugin.json README.md"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.6"
+    "openclaw": ">=2026.8.1"
   },
   "peerDependenciesMeta": {
     "openclaw": {

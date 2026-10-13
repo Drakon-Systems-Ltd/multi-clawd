@@ -62,11 +62,13 @@ describe("plugin manifest", () => {
     expect(pkg.openclaw.build.openclawVersion).toBe(pkg.devDependencies.openclaw);
   });
 
-  it("retains the declared OpenClaw 2026.6 minimum runtime contract", () => {
+  it("declares OpenClaw 2026.8.1 (first release with plugin execute transports) as the minimum", () => {
     const pkg = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),
     );
-    expect(pkg.peerDependencies.openclaw).toBe(">=2026.6");
+    expect(pkg.peerDependencies.openclaw).toBe(">=2026.8.1");
+    expect(pkg.openclaw.compat.minGatewayVersion).toBe("2026.8.1");
+    expect(pkg.openclaw.compat.pluginApi).toBe(">=2026.8.1");
   });
 
   it("ships a normalized executable CLI bin entry", () => {

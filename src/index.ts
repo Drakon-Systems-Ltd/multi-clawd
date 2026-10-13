@@ -123,7 +123,7 @@ import { createShimExecute } from "./shim-transport.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
 // declaration files. Derive the backend contract from the stable registration
-// API instead; this remains valid on the declared 2026.6+ compatibility range.
+// API instead; this remains valid on the declared 2026.8.1+ compatibility range.
 type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
 type CliBackendPrepareExecution = NonNullable<CliBackendPlugin["prepareExecution"]>;
 type CliBackendPrepareExecutionContext = Parameters<CliBackendPrepareExecution>[0];
@@ -701,42 +701,54 @@ export type BackendLaunch =
   | { kind: "verified"; claudeCommand: string; shimPath: string; log?: (line: string) => void }
   | { kind: "legacy"; shimPath: string; reason?: string };
 
-/** First OpenClaw release whose CLI runner honours a prepared `execute` transport. */
-const EXECUTE_TRANSPORT_MIN_HOST: readonly [number, number, number] = [2026, 8, 1];
-
-function parseHostVersion(version: unknown): [number, number, number] | undefined {
-  if (typeof version !== "string") return undefined;
-  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
-}
-
-function versionAtLeast(v: readonly number[], min: readonly number[]): boolean {
-  for (let i = 0; i < min.length; i += 1) {
-    if (v[i] !== min[i]) return v[i] > min[i];
+/**
+ * Whether this host's CLI runner honours a prepared `execute` transport.
+ *
+ * The transport itself is invisible from the plugin API, and a version string
+ * cannot be trusted to be present, so this probes a positive capability that
+ * shipped in the SAME release as the transport (OpenClaw 2026.8.1 final; it is
+ * absent from 2026.8.1-beta.3, 2026.7.x and 2026.6.x, all of which also lack
+ * the transport): `runtime.agent.runCommandFromIngress` and
+ * `runtime.hooks.dispatchHookAgentTurn`. Either present means the runner
+ * consults `prepareExecution().execute`; neither means it would ignore it and
+ * run claude bare, so the caller keeps the legacy shim launch.
+ *
+ * Reads are guarded: in metadata registration modes the runtime is a Proxy
+ * that throws on any property access.
+ */
+export function hostRunsExecuteTransports(runtime: unknown): boolean {
+  try {
+    const rt = runtime as {
+      agent?: { runCommandFromIngress?: unknown };
+      hooks?: { dispatchHookAgentTurn?: unknown };
+    } | undefined;
+    return (
+      typeof rt?.agent?.runCommandFromIngress === "function" ||
+      typeof rt?.hooks?.dispatchHookAgentTurn === "function"
+    );
+  } catch {
+    return false;
   }
-  return true;
 }
 
 /**
- * Decide the launch mode once per registration. An unknown host version is
- * treated as current (every host that reports none is newer than the field);
- * a known pre-transport host keeps the legacy launch, because it would ignore
- * the transport and run claude bare — losing the shim on every turn.
+ * Decide the launch mode once per registration. A host without the execute
+ * transport keeps the legacy launch: it would ignore the transport and run
+ * claude bare, losing the shim (failover, capture, handover) on every turn.
  */
 export function resolveBackendLaunch(params: {
-  hostVersion?: unknown;
+  hostSupportsExecute: boolean;
   env?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   shimPath?: string;
   log?: (line: string) => void;
 }): BackendLaunch {
   const shimPath = params.shimPath ?? SHIM_PATH;
-  const host = parseHostVersion(params.hostVersion);
-  if (host && !versionAtLeast(host, EXECUTE_TRANSPORT_MIN_HOST)) {
+  if (!params.hostSupportsExecute) {
     return {
       kind: "legacy",
       shimPath,
-      reason: `OpenClaw ${String(params.hostVersion)} predates plugin execute transports`,
+      reason: "this OpenClaw does not run plugin execute transports (needs >= 2026.8.1)",
     };
   }
   const claude = resolveClaudeExecutable(params.env ?? process.env, params.platform ?? process.platform);
@@ -1178,15 +1190,9 @@ export default definePluginEntry({
         permissionModeArgs(execMode).length ? "bypassPermissions" : "default (no override)"
       }`,
     );
-    let hostVersion: unknown;
-    try {
-      hostVersion = (api.runtime as { version?: unknown } | undefined)?.version;
-    } catch {
-      hostVersion = undefined;
-    }
     const launchLogger = api.logger;
     const launch = resolveBackendLaunch({
-      hostVersion,
+      hostSupportsExecute: hostRunsExecuteTransports(api.runtime),
       log: (line) => launchLogger.info(line),
     });
     if (launch.kind === "verified") {

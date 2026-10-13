@@ -397,7 +397,7 @@ therefore executes — is fixed at a version you chose, not whatever `master`
 happens to say today. Swap the tag if you want a different release, but
 prefer a tag over a branch.
 
-**Requirements:** OpenClaw ≥ 2026.6, the `claude` CLI on `PATH`, and a
+**Requirements:** OpenClaw ≥ 2026.8.1, the `claude` CLI on `PATH`, and a
 second Claude subscription you own. The current plugin SDK contract and runtime
 registration path are tested against OpenClaw **2026.8.1**. The standalone
 `multi-clawd` CLI and Hermes commands do not require the optional OpenClaw peer

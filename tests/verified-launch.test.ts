@@ -28,7 +28,7 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.dir, default: { ...actual, homedir: () => home.dir } };
 });
 
-const { buildBackend, registerPoolBackend, resolveBackendLaunch, CLAUDE_RUNTIME_ARTIFACT } =
+const { buildBackend, registerPoolBackend, resolveBackendLaunch, hostRunsExecuteTransports, CLAUDE_RUNTIME_ARTIFACT } =
   await import("../src/index.js");
 const { resolveClaudeExecutable, findOnPath } = await import("../src/claude-command.js");
 const { createShimExecute, assertWrappableInvocation, composePromptForStdin } = await import(
@@ -147,7 +147,7 @@ describe("resolving the claude executable", () => {
 describe("launch mode at registration", () => {
   test("resolves claude and declares the bundled backend's runtime artifact", async () => {
     const bin = fakeClaudeBinary();
-    const launch = resolveBackendLaunch({ hostVersion: "2026.10.2", env: { PATH: join(scratch, "bin") }, platform: "darwin", shimPath: SHIM });
+    const launch = resolveBackendLaunch({ hostSupportsExecute: true, env: { PATH: join(scratch, "bin") }, platform: "darwin", shimPath: SHIM });
     expect(launch).toMatchObject({ kind: "verified", claudeCommand: bin });
     const backend = buildBackend({ id: "claw1", native: true }, "full", launch);
     expect(backend.config.command).toBe(bin);
@@ -169,7 +169,7 @@ describe("launch mode at registration", () => {
   });
 
   test("falls back to today's exact node+shim launch when claude is unresolvable", () => {
-    const launch = resolveBackendLaunch({ hostVersion: "2026.10.2", env: { PATH: scratch }, platform: "darwin", shimPath: SHIM });
+    const launch = resolveBackendLaunch({ hostSupportsExecute: true, env: { PATH: scratch }, platform: "darwin", shimPath: SHIM });
     expect(launch.kind).toBe("legacy");
     const backend = buildBackend({ id: "claw1", native: true }, "full", launch);
     expect(backend.config.command).toBe(process.execPath);
@@ -178,12 +178,54 @@ describe("launch mode at registration", () => {
     expect(backend.runtimeArtifact).toBeUndefined();
   });
 
-  test("a host older than the execute transport keeps the legacy launch", () => {
+  test("a host without the execute transport keeps the legacy launch", () => {
     fakeClaudeBinary();
     const env = { PATH: join(scratch, "bin") };
-    expect(resolveBackendLaunch({ hostVersion: "2026.7.3", env, platform: "darwin" }).kind).toBe("legacy");
-    expect(resolveBackendLaunch({ hostVersion: "2026.8.1", env, platform: "darwin" }).kind).toBe("verified");
-    expect(resolveBackendLaunch({ hostVersion: undefined, env, platform: "darwin" }).kind).toBe("verified");
+    expect(resolveBackendLaunch({ hostSupportsExecute: false, env, platform: "darwin" })).toMatchObject({
+      kind: "legacy",
+      reason: expect.stringContaining("execute transports"),
+    });
+    expect(resolveBackendLaunch({ hostSupportsExecute: true, env, platform: "darwin" }).kind).toBe("verified");
+  });
+
+  test("the execute capability is probed positively, never inferred from a missing version", () => {
+    const fn = () => {};
+    // 2026.8.1+ runtime shapes.
+    expect(hostRunsExecuteTransports({ agent: { runCommandFromIngress: fn } })).toBe(true);
+    expect(hostRunsExecuteTransports({ hooks: { dispatchHookAgentTurn: fn } })).toBe(true);
+    // Pre-2026.8.1 shapes (no probe surface), version or not.
+    expect(hostRunsExecuteTransports({ version: "2026.10.2", agent: {}, hooks: {} })).toBe(false);
+    expect(hostRunsExecuteTransports({ config: { current: () => ({}) } })).toBe(false);
+    expect(hostRunsExecuteTransports(undefined)).toBe(false);
+    // Metadata-mode runtime: a Proxy that throws on any read.
+    const throwing = new Proxy({}, { get() { throw new Error("runtime unavailable"); } });
+    expect(hostRunsExecuteTransports(throwing)).toBe(false);
+  });
+
+  test("registration probes the real runtime and picks the verified launch", async () => {
+    const bin = fakeClaudeBinary();
+    const { default: plugin } = await import("../src/index.js");
+    const backends: Array<{ id: string; config: { command: string }; runtimeArtifact?: unknown }> = [];
+    const saved = { PATH: process.env.PATH, BIN: process.env.MULTI_CLAWD_CLAUDE_BIN };
+    process.env.PATH = join(scratch, "bin");
+    delete process.env.MULTI_CLAWD_CLAUDE_BIN;
+    const config = { plugins: { entries: { "multi-clawd": { config: { accounts: [{ id: "claw1", native: true }] } } } } };
+    try {
+      plugin.register({
+        config: {},
+        pluginConfig: {},
+        runtime: { config: { current: () => config }, agent: { runCommandFromIngress: () => {} } },
+        logger: { info: () => {}, warn: () => {}, error: () => {} },
+        registerCliBackend: (b: (typeof backends)[number]) => backends.push(b),
+        registerProvider: () => {},
+        on: () => {},
+      } as never);
+    } finally {
+      process.env.PATH = saved.PATH;
+      if (saved.BIN !== undefined) process.env.MULTI_CLAWD_CLAUDE_BIN = saved.BIN;
+    }
+    expect(backends[0]?.config.command).toBe(bin);
+    expect(backends[0]?.runtimeArtifact).toEqual(CLAUDE_RUNTIME_ARTIFACT);
   });
 
   test("a legacy backend never returns a transport, even for agent turns", async () => {
@@ -199,7 +241,7 @@ describe("launch mode at registration", () => {
 describe("prepareExecution on a verified backend", () => {
   function verifiedLaunch() {
     const bin = fakeClaudeBinary();
-    return resolveBackendLaunch({ env: { PATH: join(scratch, "bin") }, platform: "darwin", shimPath: SHIM });
+    return resolveBackendLaunch({ hostSupportsExecute: true, env: { PATH: join(scratch, "bin") }, platform: "darwin", shimPath: SHIM });
   }
 
   test("side-question turns get no transport, but do get the account's env", async () => {
