@@ -55,6 +55,7 @@ import { resolveBaseModelIds } from "./catalog-source.js";
 import {
   allCredentialFailed,
   classifyAccountHealth,
+  credentialFailureFor,
   lastAuthSuccessAt,
   overdueProbeAccount,
   pickPoolAccountForLaunch,
@@ -116,9 +117,10 @@ import {
   type CredentialIo,
   type RefProbeTracker,
 } from "./login-health.js";
-import { createSystemCredentialIo } from "./credential-store.js";
+import { createSystemCredentialIo, readKeychainItemAsync } from "./credential-store.js";
 import {
   createLoginAuthCache,
+  loginAuthEligible,
   poolRuntimeAuth,
   refuseRuntimeAuthMarker,
   type LoginAuthCache,
@@ -352,15 +354,45 @@ let realCredentialIo: CredentialIo | undefined;
 
 /**
  * Login verdicts served to the host's synchronous synthetic-auth surface
- * (#39): one bounded credential-source read per account per 30s, judged by
- * the same rules as the probe, with a recent successful turn as proof.
+ * (#39). The surface only ever reads this cache; the credential source is
+ * read asynchronously (warmed at registration, refreshed in the background
+ * when stale, fed by the probe), judged by the same rules as the probe with
+ * the account's health state as evidence — a recent successful turn proves
+ * a refresh, a current `credential_failed` record vetoes outright.
  */
 let loginAuthCache: LoginAuthCache | undefined;
+let loginAuthWarm: Promise<void> = Promise.resolve();
 function loginAuth(): LoginAuthCache {
   return (loginAuthCache ??= createLoginAuthCache({
     io: (realCredentialIo ??= createSystemCredentialIo()),
-    lastSuccessAt: (accountId) => lastAuthSuccessAt(readHealthState(accountId)),
+    readKeychainItemAsync: (service, account) => readKeychainItemAsync(service, account),
+    health: (accountId) => {
+      const state = readHealthState(accountId);
+      return {
+        lastSuccessAt: lastAuthSuccessAt(state),
+        failed: credentialFailureFor(state, Date.now()) !== undefined,
+      };
+    },
   }));
+}
+
+/**
+ * Judge every CLI-login account once, off the registration path, so the
+ * host's first catalog discovery finds a verdict instead of a cold cache.
+ * Exported with its completion so a test can await what a gateway only waits
+ * for in passing.
+ */
+export function warmLoginAuth(accounts: AccountConfig[]): Promise<void> {
+  const cache = loginAuth();
+  loginAuthWarm = Promise.all(
+    accounts.filter(loginAuthEligible).map((account) => cache.refresh(account)),
+  ).then(() => undefined);
+  return loginAuthWarm;
+}
+
+/** Resolves when the most recent registration's warm-up has finished. */
+export function loginAuthWarmed(): Promise<void> {
+  return loginAuthWarm;
 }
 
 /**
@@ -476,6 +508,8 @@ export async function runLoginHealthProbe(
         proof: { lastSuccessAt: lastAuthSuccessAt(readHealth(account.id)) },
         nowMs: now,
       });
+      // The same verdict feeds the host's availability surface on this cadence.
+      if (!deps.io) loginAuth().record(account.id, check, now);
       status = check.status;
       reason = check.status === "ok" ? check.detail : check.reason;
     }
@@ -635,7 +669,8 @@ function resolveAccountRuntimeAuth(account: AccountConfig): RuntimeAuthResult | 
   if (token) return { apiKey: token, source: `multi-clawd ${account.id} token`, mode: "token" };
   // A ref whose cache is cold answers nothing until the launch path warms it.
   if (account.oauthTokenFile || isSecretRefShape(account.oauthTokenRef)) return undefined;
-  return loginAuth().resolve(account, account.id);
+  // Cache only: the credential source is never read on this synchronous path.
+  return loginAuth().peek(account, account.id);
 }
 
 /** Launch-path token access: resolves refs via the gateway's secret providers. */
@@ -1291,6 +1326,7 @@ export default definePluginEntry({
       api.registerProvider(buildCatalogProvider(normalized));
     }
     registerPoolBackend(api, cfg.pool, accounts, seen, execMode, { launch });
+    void warmLoginAuth(accounts.filter((a) => seen.has(a.id.trim()))).catch(() => {});
 
     // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
     {

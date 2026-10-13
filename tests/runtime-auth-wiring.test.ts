@@ -18,7 +18,9 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.dir, default: { ...actual, homedir: () => home.dir } };
 });
 
-const plugin = (await import("../src/index.js")).default;
+const index = await import("../src/index.js");
+const plugin = index.default;
+const { healthStateFile, loginAuthWarmed } = index;
 
 const HOUR = 60 * 60 * 1000;
 const ACCESS = "fake-access-token-value";
@@ -37,7 +39,22 @@ interface Provider {
   prepareRuntimeAuth?: (ctx: Record<string, unknown>) => Promise<unknown>;
 }
 
-function registerAll(): Map<string, Provider> {
+/** The shim's record of a turn the Claude CLI rejected for this login. */
+function writeCredentialFailed(accountId: string): void {
+  const file = healthStateFile(accountId);
+  mkdirSync(join(file, ".."), { recursive: true });
+  writeFileSync(
+    file,
+    JSON.stringify({
+      accountId,
+      updatedAt: Date.now(),
+      windows: {},
+      credential: { status: "failed", seenAt: Date.now(), reason: "OAuth session expired and could not be refreshed" },
+    }),
+  );
+}
+
+async function registerAll(poolAccounts = ["claw2", "claw1", "claw3"]): Promise<Map<string, Provider>> {
   const providers = new Map<string, Provider>();
   const api = {
     config: {},
@@ -47,7 +64,7 @@ function registerAll(): Map<string, Provider> {
         { id: "claw2", configDir: "~/.claude-claw2" },
         { id: "claw3", oauthTokenFile: "~/claw3.token" },
       ],
-      pool: { id: "clawd", accounts: ["claw2", "claw1", "claw3"] },
+      pool: { id: "clawd", accounts: poolAccounts },
     },
     runtime: { config: { current: () => ({ plugins: { entries: {} } }) } },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
@@ -56,6 +73,9 @@ function registerAll(): Map<string, Provider> {
     on: () => {},
   };
   plugin.register(api as never);
+  // register() returns before the login verdicts are judged (the read is
+  // asynchronous on purpose); a gateway's first discovery simply waits for it.
+  await loginAuthWarmed();
   return providers;
 }
 
@@ -76,8 +96,21 @@ describe.skipIf(process.platform === "darwin")("register(): runtime auth per acc
     rmSync(home.dir, { recursive: true, force: true });
   });
 
-  test("native with a live login → oauth marker for its own provider id", () => {
-    const providers = registerAll();
+  test("the synchronous hook never reads the credential source: a changed file is unseen until a refresh", async () => {
+    const providers = await registerAll();
+    expect((auth(providers.get("claw1")) as { apiKey: string }).apiKey).toBe("oauth:claw1");
+    // The login dies on disk. The hook keeps answering from its verdict —
+    // it is not allowed to read here (on macOS this read is `security`,
+    // which can block the gateway for seconds inside catalog discovery).
+    writeFileSync(join(home.dir, ".claude", ".credentials.json"), cred(Date.now() - HOUR));
+    expect((auth(providers.get("claw1")) as { apiKey: string }).apiKey).toBe("oauth:claw1");
+    // The next asynchronous judgement sees it.
+    await index.warmLoginAuth([{ id: "claw1", native: true }]);
+    expect(auth(providers.get("claw1"))).toBeUndefined();
+  });
+
+  test("native with a live login → oauth marker for its own provider id", async () => {
+    const providers = await registerAll();
     const result = auth(providers.get("claw1")) as { apiKey: string; mode: string; expiresAt?: number; source: string };
     expect(result.apiKey).toBe("oauth:claw1");
     expect(result.mode).toBe("oauth");
@@ -86,17 +119,25 @@ describe.skipIf(process.platform === "darwin")("register(): runtime auth per acc
     expect(JSON.stringify(result)).not.toContain(ACCESS);
   });
 
-  test("configDir with an expired, unproven login → nothing (host keeps missing-auth)", () => {
-    expect(auth(registerAll().get("claw2"))).toBeUndefined();
+  test("configDir with an expired, unproven login → nothing (host keeps missing-auth)", async () => {
+    expect(auth((await registerAll()).get("claw2"))).toBeUndefined();
   });
 
-  test("token account keeps today's behaviour: the real token, mode token", () => {
-    const result = auth(registerAll().get("claw3"));
+  test("a live login the CLI has rejected on a real turn (credential_failed) → nothing, and so the pool", async () => {
+    writeCredentialFailed("claw1");
+    rmSync(join(home.dir, "claw3.token"));
+    const providers = await registerAll();
+    expect(auth(providers.get("claw1"))).toBeUndefined();
+    expect(auth(providers.get("clawd"))).toBeUndefined();
+  });
+
+  test("token account keeps today's behaviour: the real token, mode token", async () => {
+    const result = auth((await registerAll()).get("claw3"));
     expect(result).toEqual({ apiKey: TOKEN, source: "multi-clawd claw3 token", mode: "token" });
   });
 
-  test("pool reports the first live member, re-keyed to the pool's provider id", () => {
-    const providers = registerAll();
+  test("pool reports the first live member, re-keyed to the pool's provider id", async () => {
+    const providers = await registerAll();
     const result = auth(providers.get("clawd")) as { apiKey: string; source: string; mode: string };
     // Pool order is claw2 (dead) → claw1 (live): the marker names the pool.
     expect(result.apiKey).toBe("oauth:clawd");
@@ -105,14 +146,26 @@ describe.skipIf(process.platform === "darwin")("register(): runtime auth per acc
     expect(JSON.stringify(result)).not.toContain(ACCESS);
   });
 
-  test("pool with no live member → nothing", () => {
+  test("pool whose first live member is a token account answers the pool MARKER, never that token", async () => {
+    const providers = await registerAll(["claw2", "claw3", "claw1"]);
+    const result = auth(providers.get("clawd")) as { apiKey: string; source: string; mode: string };
+    expect(result.apiKey).toBe("oauth:clawd");
+    expect(result.source).toBe("multi-clawd claw3 token");
+    expect(JSON.stringify(result)).not.toContain(TOKEN);
+    // ...so a direct clawd/... request is refused instead of riding claw3's token.
+    await expect(
+      providers.get("clawd")!.prepareRuntimeAuth!({ provider: "clawd", modelId: "m", apiKey: result.apiKey, env: {} }),
+    ).rejects.toThrow(/Claude Code CLI backend/);
+  });
+
+  test("pool with no live member → nothing", async () => {
     writeFileSync(join(home.dir, ".claude", ".credentials.json"), cred(Date.now() - HOUR));
     rmSync(join(home.dir, "claw3.token"));
-    expect(auth(registerAll().get("clawd"))).toBeUndefined();
+    expect(auth((await registerAll()).get("clawd"))).toBeUndefined();
   });
 
   test("every registered provider refuses its marker in prepareRuntimeAuth; a real token passes", async () => {
-    const providers = registerAll();
+    const providers = await registerAll();
     for (const id of ["claw1", "claw2", "claw3", "clawd"]) {
       const p = providers.get(id)!;
       expect(typeof p.prepareRuntimeAuth).toBe("function");
@@ -125,8 +178,8 @@ describe.skipIf(process.platform === "darwin")("register(): runtime auth per acc
     ).resolves.toBeUndefined();
   });
 
-  test("the placeholder is only ever the host's non-secret marker — never a bare string a transport would bear", () => {
-    const providers = registerAll();
+  test("the placeholder is only ever the host's non-secret marker — never a bare string a transport would bear", async () => {
+    const providers = await registerAll();
     for (const id of ["claw1", "clawd"]) {
       const result = auth(providers.get(id)) as { apiKey: string };
       expect(result.apiKey).toMatch(/^oauth:[a-z0-9-]+$/);

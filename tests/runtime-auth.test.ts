@@ -8,13 +8,25 @@
  * login from the stored credential's metadata and answers with a non-secret
  * marker. These tests pin the three properties that matter:
  *
- * - the marker is emitted only for a login judged usable, never for a dead one;
- * - no token value ever leaves the resolver;
+ * - the marker is emitted only for a login judged usable, never for a dead one
+ *   (a login the CLI has rejected on a real turn is dead, whatever the stored
+ *   credential looks like at rest);
+ * - no token value ever leaves the resolver, and the synchronous surface never
+ *   reads a credential source (on macOS that is a `security` call that can
+ *   block for seconds);
  * - the marker is refused as a request credential, so the direct API path
- *   keeps failing closed instead of putting a placeholder on the wire.
+ *   keeps failing closed instead of putting a placeholder on the wire — for
+ *   the pool too, which must never hand out a member's real token.
  */
 import { describe, expect, test } from "vitest";
-import type { CredentialAccountShape, CredentialCheck, CredentialIo } from "../src/login-health.js";
+import {
+  CLAUDE_KEYCHAIN_SERVICE,
+  keychainServiceForConfigDir,
+  type CredentialAccountShape,
+  type CredentialCheck,
+  type CredentialIo,
+  type KeychainRead,
+} from "../src/login-health.js";
 import {
   LOGIN_AUTH_CACHE_TTL_MS,
   createLoginAuthCache,
@@ -109,11 +121,14 @@ describe("loginRuntimeAuth", () => {
     });
   });
 
-  test("a member's real token is passed through unchanged by the pool", () => {
+  test("a member's real token NEVER rides out under the pool: the pool answers its marker", () => {
     const pool = poolRuntimeAuth("clawd", [
       () => ({ apiKey: "sk-ant-oat01-real", source: "multi-clawd claw1 token", mode: "token" }),
     ]);
-    expect(pool).toEqual({ apiKey: "sk-ant-oat01-real", source: "multi-clawd claw1 token", mode: "token" });
+    expect(pool).toEqual({ apiKey: "oauth:clawd", source: "multi-clawd claw1 token", mode: "oauth" });
+    expect(JSON.stringify(pool)).not.toContain("sk-ant");
+    // ...and that marker is refused on the direct path, as every marker is.
+    expect(() => refuseRuntimeAuthMarker({ provider: "clawd", modelId: "m", apiKey: pool!.apiKey })).toThrow();
   });
 
   test("pool with no live member → nothing; a throwing member is treated as not live", () => {
@@ -132,43 +147,137 @@ describe("createLoginAuthCache", () => {
   const native: CredentialAccountShape = { id: "claw1", native: true };
   const dir: CredentialAccountShape = { id: "claw2", configDir: "~/.claude-claw2" };
 
-  test("native: reads ~/.claude/.credentials.json; unexpired → marker, no secret leaves", () => {
-    const io = fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) });
-    const cache = createLoginAuthCache({ io });
-    const result = cache.resolve(native, "claw1", NOW);
+  test("native: reads ~/.claude/.credentials.json on refresh; unexpired → marker, no secret leaves", async () => {
+    const cache = createLoginAuthCache({ io: fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) }) });
+    await cache.refresh(native, NOW);
+    const result = cache.peek(native, "claw1", NOW);
     expect(result?.apiKey).toBe("oauth:claw1");
     expect(result?.mode).toBe("oauth");
     noSecrets(result);
   });
 
-  test("native: expired with no proof of refresh → nothing", () => {
-    const io = fileIo({ "~/.claude/.credentials.json": cred(NOW - HOUR) });
-    expect(createLoginAuthCache({ io }).resolve(native, "claw1", NOW)).toBeUndefined();
+  test("native: expired with no proof of refresh → nothing", async () => {
+    const cache = createLoginAuthCache({ io: fileIo({ "~/.claude/.credentials.json": cred(NOW - HOUR) }) });
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
   });
 
-  test("native: expired but a successful turn since proves the refresh → marker", () => {
-    const io = fileIo({ "~/.claude/.credentials.json": cred(NOW - HOUR) });
-    const cache = createLoginAuthCache({ io, lastSuccessAt: () => NOW - 10 * MIN });
-    expect(cache.resolve(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
+  test("native: expired but a successful turn since proves the refresh → marker", async () => {
+    const cache = createLoginAuthCache({
+      io: fileIo({ "~/.claude/.credentials.json": cred(NOW - HOUR) }),
+      health: () => ({ lastSuccessAt: NOW - 10 * MIN }),
+    });
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
   });
 
-  test("configDir: reads <dir>/.credentials.json", () => {
-    const io = fileIo({ "~/.claude-claw2/.credentials.json": cred(NOW + HOUR) });
-    expect(createLoginAuthCache({ io }).resolve(dir, "claw2", NOW)?.apiKey).toBe("oauth:claw2");
+  test("a login the CLI rejected on a real turn (credential_failed) answers nothing — even with an unexpired token", async () => {
+    let failed = false;
+    const cache = createLoginAuthCache({
+      io: fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) }),
+      health: () => ({ failed }),
+    });
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
+    // The shim records the failure after a turn; the next peek must see it
+    // at once, without waiting for any re-read.
+    failed = true;
+    expect(cache.peek(native, "claw1", NOW + 1)).toBeUndefined();
+    failed = false;
+    expect(cache.peek(native, "claw1", NOW + 2)?.apiKey).toBe("oauth:claw1");
   });
 
-  test("configDir: missing file → nothing, and an io that throws never escapes", () => {
-    expect(createLoginAuthCache({ io: fileIo({}) }).resolve(dir, "claw2", NOW)).toBeUndefined();
+  test("configDir: reads <dir>/.credentials.json", async () => {
+    const cache = createLoginAuthCache({ io: fileIo({ "~/.claude-claw2/.credentials.json": cred(NOW + HOUR) }) });
+    await cache.refresh(dir, NOW);
+    expect(cache.peek(dir, "claw2", NOW)?.apiKey).toBe("oauth:claw2");
+  });
+
+  test("configDir: missing file → nothing, and an io that throws never escapes refresh", async () => {
+    const cache = createLoginAuthCache({ io: fileIo({}) });
+    await cache.refresh(dir, NOW);
+    expect(cache.peek(dir, "claw2", NOW)).toBeUndefined();
     const broken: CredentialIo = {
       ...fileIo({}),
       readFile: () => {
         throw new TypeError("boom");
       },
     };
-    expect(createLoginAuthCache({ io: broken }).resolve(dir, "claw2", NOW)).toBeUndefined();
+    const cache2 = createLoginAuthCache({ io: broken });
+    await expect(cache2.refresh(dir, NOW)).resolves.toBeUndefined();
+    expect(cache2.peek(dir, "claw2", NOW)).toBeUndefined();
   });
 
-  test("the read is cached per account for the TTL, then re-read", () => {
+  test("peek is cache-only: a cold peek answers nothing, starts ONE background refresh, never reads inline", async () => {
+    let reads = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const io = fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) });
+    const cache = createLoginAuthCache({
+      io: { ...io, platform: "darwin" },
+      readKeychainItemAsync: async () => {
+        reads += 1;
+        await gate; // the Keychain is slow (locked, prompting, timing out)
+        return { status: "absent" };
+      },
+    });
+    expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
+    expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
+    expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
+    expect(reads).toBe(1);
+    release!();
+    await cache.refresh(native, NOW); // joins the in-flight refresh
+    // Keychain absent → file fallback, which is live.
+    expect(cache.peek(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
+  });
+
+  test("macOS: refresh reads the Keychain asynchronously, by the CLI's service and account, never via the sync reader", async () => {
+    const asked: Array<[string, string]> = [];
+    const syncReads: string[] = [];
+    const io: CredentialIo = {
+      ...fileIo({}),
+      platform: "darwin",
+      keychainAccount: "example-user",
+      readKeychainItem: (service) => {
+        syncReads.push(service);
+        return { status: "unreadable" };
+      },
+    };
+    const cache = createLoginAuthCache({
+      io,
+      readKeychainItemAsync: async (service, account): Promise<KeychainRead> => {
+        asked.push([service, account]);
+        return { status: "found", data: cred(NOW + HOUR) };
+      },
+    });
+    await cache.refresh(native, NOW);
+    await cache.refresh(dir, NOW);
+    expect(asked).toEqual([
+      [CLAUDE_KEYCHAIN_SERVICE, "example-user"],
+      [keychainServiceForConfigDir("/home/example/.claude-claw2"), "example-user"],
+    ]);
+    expect(syncReads).toEqual([]);
+    expect(cache.peek(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
+    expect(cache.peek(dir, "claw2", NOW)?.apiKey).toBe("oauth:claw2");
+    noSecrets(cache.peek(native, "claw1", NOW));
+  });
+
+  test("macOS: a Keychain read that times out (unreadable) → nothing, judged once, no storm", async () => {
+    let reads = 0;
+    const cache = createLoginAuthCache({
+      io: { ...fileIo({}), platform: "darwin" },
+      readKeychainItemAsync: async () => {
+        reads += 1;
+        return { status: "unreadable" };
+      },
+    });
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
+    expect(cache.peek(native, "claw1", NOW + 1)).toBeUndefined();
+    expect(reads).toBe(1);
+  });
+
+  test("a fresh verdict is served for the TTL; a stale one is served while ONE background re-read runs", async () => {
     let reads = 0;
     const io = fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) });
     const counting: CredentialIo = {
@@ -179,36 +288,41 @@ describe("createLoginAuthCache", () => {
       },
     };
     const cache = createLoginAuthCache({ io: counting });
-    cache.resolve(native, "claw1", NOW);
-    cache.resolve(native, "claw1", NOW + LOGIN_AUTH_CACHE_TTL_MS - 1);
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW + LOGIN_AUTH_CACHE_TTL_MS - 1)?.apiKey).toBe("oauth:claw1");
     expect(reads).toBe(1);
-    cache.resolve(native, "claw1", NOW + LOGIN_AUTH_CACHE_TTL_MS + 1);
+    // Stale: still served (the token is good for an hour), re-read in the background.
+    expect(cache.peek(native, "claw1", NOW + LOGIN_AUTH_CACHE_TTL_MS + 1)?.apiKey).toBe("oauth:claw1");
+    expect(cache.peek(native, "claw1", NOW + LOGIN_AUTH_CACHE_TTL_MS + 2)?.apiKey).toBe("oauth:claw1");
+    await cache.refresh(native, NOW + LOGIN_AUTH_CACHE_TTL_MS + 2);
     expect(reads).toBe(2);
     expect(LOGIN_AUTH_CACHE_TTL_MS).toBe(30 * 1000);
   });
 
-  test("a usable verdict is not cached past the access token's own expiry", () => {
-    const io = fileIo({ "~/.claude/.credentials.json": cred(NOW + 90 * 1000) });
-    let reads = 0;
-    const counting: CredentialIo = {
-      ...io,
-      readFile: (p) => {
-        reads += 1;
-        return io.readFile(p);
-      },
-    };
-    const cache = createLoginAuthCache({ io: counting });
-    expect(cache.resolve(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
-    // Inside the expiry skew the cached "ok" must not be served: re-read, judged expired.
-    expect(cache.resolve(native, "claw1", NOW + 60 * 1000)).toBeUndefined();
-    expect(reads).toBe(2);
+  test("a usable verdict is never served past the access token's own expiry", async () => {
+    const cache = createLoginAuthCache({ io: fileIo({ "~/.claude/.credentials.json": cred(NOW + 90 * 1000) }) });
+    await cache.refresh(native, NOW);
+    expect(cache.peek(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
+    // Inside the expiry skew the cached "ok" is withheld, whatever the TTL says.
+    expect(cache.peek(native, "claw1", NOW + 31 * 1000)).toBeUndefined();
   });
 
-  test("token-backed accounts are not this cache's business", () => {
-    const io = fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) });
-    const cache = createLoginAuthCache({ io });
-    expect(cache.resolve({ id: "t", oauthTokenFile: "~/t.token" }, "t", NOW)).toBeUndefined();
-    expect(cache.resolve({ id: "r", oauthTokenRef: { source: "exec", provider: "p", id: "x" } }, "r", NOW)).toBeUndefined();
+  test("record(): the probe's own verdict feeds the cache on its cadence", () => {
+    const cache = createLoginAuthCache({ io: fileIo({}) });
+    cache.record("claw1", ok(NOW + HOUR), NOW);
+    expect(cache.peek(native, "claw1", NOW)?.apiKey).toBe("oauth:claw1");
+    cache.record("claw1", { status: "broken", reason: "gone" }, NOW + 1);
+    expect(cache.peek(native, "claw1", NOW + 2)).toBeUndefined();
+  });
+
+  test("token-backed accounts are not this cache's business", async () => {
+    const cache = createLoginAuthCache({ io: fileIo({ "~/.claude/.credentials.json": cred(NOW + HOUR) }) });
+    const file = { id: "t", oauthTokenFile: "~/t.token" };
+    const ref = { id: "r", oauthTokenRef: { source: "exec", provider: "p", id: "x" } };
+    await cache.refresh(file, NOW);
+    await cache.refresh(ref, NOW);
+    expect(cache.peek(file, "t", NOW)).toBeUndefined();
+    expect(cache.peek(ref, "r", NOW)).toBeUndefined();
   });
 });
 

@@ -17,12 +17,20 @@ versioning from v1.0.
   probe judges it (an unexpired stored access token, or a successful turn
   since it expired — never mere presence) and answer with OpenClaw's own
   non-secret `oauth:<provider>` marker; the pool reports signed-in when any
-  member does; a dead login still reports nothing, so "missing-auth" stays
-  honest. Token accounts are unchanged. The marker is refused in
-  `prepareRuntimeAuth`, so the direct API transport (`openclaw infer model
-  run --model clawd/...`) keeps failing closed for CLI-login accounts instead
-  of putting a placeholder on the wire. Verdicts are cached for 30s per
-  account; no token value leaves the resolver. Ships as 2.1.1. (#39)
+  member does, always with its own marker (a member's real token never rides
+  out under the pool's id); a dead login still reports nothing, so
+  "missing-auth" stays honest — including a login the Claude CLI has rejected
+  on a real turn (`credential_failed`), whatever the stored credential looks
+  like at rest. Per-account token accounts are unchanged. The marker is
+  refused in `prepareRuntimeAuth`, so the direct API transport (`openclaw
+  infer model run --model clawd/...`) keeps failing closed for CLI-login
+  accounts and for the pool instead of putting a placeholder on the wire or
+  riding one member's token around the pool. The host's synchronous hook is
+  served from a verdict cache only; the credential source (on macOS the
+  Keychain, via `security`) is read asynchronously — warmed at registration,
+  refreshed in the background when a verdict is older than 30s, fed by the
+  login-health probe — so catalog discovery never blocks on it. No token
+  value leaves the resolver. Ships as 2.1.1. (#39)
 
 ## [2.1.0] - 2026-10-13
 

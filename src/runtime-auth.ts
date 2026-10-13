@@ -22,21 +22,32 @@
  * that is its own CLI runtime — so `nativeAuth` leaves the models unavailable.
  * The marker form is what the host actually acts on.
  *
+ * The host's hook is synchronous, so it is served from a verdict cache only:
+ * the credential-source read (a file on Linux, the Keychain via `security` on
+ * macOS, which can block for seconds) runs asynchronously — warmed at
+ * registration, refreshed in the background when a verdict goes stale, and
+ * fed by the login-health probe on its cadence. A login the Claude CLI has
+ * rejected on a real turn (health state `credential_failed`) answers nothing
+ * at once, whatever the stored credential says at rest.
+ *
  * No token value ever leaves this module: credentials are reduced to metadata
  * by `parseOauthCredential` on read, and only a verdict is cached.
  */
 import {
   ACCESS_TOKEN_EXPIRY_SKEW_MS,
+  CLAUDE_KEYCHAIN_SERVICE,
   assessAccountCredential,
+  keychainServiceForConfigDir,
   type CredentialAccountShape,
   type CredentialCheck,
   type CredentialIo,
+  type KeychainRead,
 } from "./login-health.js";
 
 /** The host's own non-secret api-key marker prefix for OAuth-backed providers. */
 export const RUNTIME_AUTH_MARKER_PREFIX = "oauth:";
 
-/** How long one account's login verdict is served before the source is re-read. */
+/** How long one account's login verdict is served before a background re-read. */
 export const LOGIN_AUTH_CACHE_TTL_MS = 30 * 1000;
 
 export interface RuntimeAuthResult {
@@ -80,10 +91,11 @@ export function loginRuntimeAuth(
 }
 
 /**
- * The pool is signed in when any member is. The first live member's result is
- * re-keyed to the pool's own provider id when it is a marker (the marker names
- * the provider it authorises); a member's real setup token passes through as
- * is, which is what per-account token providers already report today.
+ * The pool is signed in when any member is — and it says so with its OWN
+ * marker, whatever the member's credential type. A member's real setup token
+ * must never ride out under the pool's id: the direct API transport would
+ * then run `clawd/...` on that one account, around the pool's routing and
+ * limits, instead of being refused like every other pool request.
  */
 export function poolRuntimeAuth(
   poolId: string,
@@ -97,53 +109,132 @@ export function poolRuntimeAuth(
       continue;
     }
     if (!result) continue;
-    return isRuntimeAuthMarker(result.apiKey) ? { ...result, apiKey: runtimeAuthMarker(poolId) } : result;
+    return {
+      apiKey: runtimeAuthMarker(poolId),
+      source: result.source,
+      mode: "oauth",
+      ...(result.expiresAt === undefined ? {} : { expiresAt: result.expiresAt }),
+    };
   }
   return undefined;
 }
 
+/** Accounts whose login this cache judges: CLI logins, not token-backed ones. */
+export function loginAuthEligible(account: CredentialAccountShape): boolean {
+  return !account.oauthTokenFile && !account.oauthTokenRef && Boolean(account.native || account.configDir);
+}
+
+/** What the account's health state says about its login, from outside the credential store. */
+export interface LoginHealthEvidence {
+  /** Last time the API accepted this account's login (epoch ms), if ever seen. */
+  lastSuccessAt?: number;
+  /** The Claude CLI rejected this login on a real turn and the failure is still current. */
+  failed?: boolean;
+}
+
 export interface LoginAuthCache {
   /**
-   * Synchronous and bounded: one credential-source read per account per TTL,
-   * served from a verdict cache in between. Never throws.
+   * The host's synchronous surface: a cached verdict or nothing, never a
+   * credential-source read. A missing or stale verdict starts one background
+   * refresh; a stale `ok` keeps being served until the access token itself
+   * would expire. A current `credential_failed` health record vetoes at once.
    */
-  resolve(account: CredentialAccountShape, providerId: string, nowMs?: number): RuntimeAuthResult | undefined;
+  peek(account: CredentialAccountShape, providerId: string, nowMs?: number): RuntimeAuthResult | undefined;
+  /** Re-judge one account's credential source off the event loop. Never rejects. */
+  refresh(account: CredentialAccountShape, nowMs?: number): Promise<void>;
+  /** Adopt a verdict the login-health probe has just computed. */
+  record(accountId: string, check: CredentialCheck, nowMs?: number): void;
+}
+
+interface CachedVerdict {
+  check: CredentialCheck;
+  /** Served without a refresh until here. */
+  freshUntil: number;
+  /** Never served past here (an `ok` is bounded by the token's own expiry). */
+  hardUntil: number;
 }
 
 export function createLoginAuthCache(options: {
   io: CredentialIo;
-  /** Last time the API accepted this account's login (epoch ms), if known. */
-  lastSuccessAt?: (accountId: string) => number | undefined;
+  /**
+   * macOS: the Keychain read, asynchronous. When given, a refresh fetches the
+   * item first and judges with the result, so `security` never runs on the
+   * synchronous path. Without it, refresh falls back to `io.readKeychainItem`.
+   */
+  readKeychainItemAsync?: (service: string, account: string) => Promise<KeychainRead>;
+  health?: (accountId: string) => LoginHealthEvidence;
   ttlMs?: number;
 }): LoginAuthCache {
   const ttlMs = options.ttlMs ?? LOGIN_AUTH_CACHE_TTL_MS;
-  const cache = new Map<string, { check: CredentialCheck; until: number }>();
+  const cache = new Map<string, CachedVerdict>();
+  const inflight = new Map<string, Promise<void>>();
+  const health = (accountId: string): LoginHealthEvidence => {
+    try {
+      return options.health?.(accountId) ?? {};
+    } catch {
+      return {};
+    }
+  };
+  const eligible = loginAuthEligible;
+
+  const store = (accountId: string, check: CredentialCheck, nowMs: number): void => {
+    // An `ok` backed by an unexpired token may be served, stale, until that
+    // token would expire; an `ok` proven by a recent turn (token already
+    // expired) and every other verdict only for the TTL.
+    const tokenBound =
+      check.status === "ok" && check.expiresAt !== undefined
+        ? check.expiresAt - ACCESS_TOKEN_EXPIRY_SKEW_MS
+        : undefined;
+    const hardUntil = tokenBound !== undefined && tokenBound > nowMs + ttlMs ? tokenBound : nowMs + ttlMs;
+    cache.set(accountId, { check, freshUntil: nowMs + ttlMs, hardUntil });
+  };
+
+  const judge = async (account: CredentialAccountShape, nowMs: number): Promise<void> => {
+    let io = options.io;
+    if (io.platform === "darwin" && options.readKeychainItemAsync) {
+      const dir = account.native ? "~/.claude" : account.configDir;
+      const service = account.native
+        ? CLAUDE_KEYCHAIN_SERVICE
+        : keychainServiceForConfigDir(io.expandHome(dir ?? ""));
+      const read = await options.readKeychainItemAsync(service, io.keychainAccount);
+      io = { ...io, readKeychainItem: () => read };
+    }
+    const check = assessAccountCredential(account, io, {
+      proof: { lastSuccessAt: health(account.id).lastSuccessAt },
+      nowMs,
+    });
+    store(account.id, check, nowMs);
+  };
+
+  const refresh = (account: CredentialAccountShape, nowMs = Date.now()): Promise<void> => {
+    if (!eligible(account)) return Promise.resolve();
+    const running = inflight.get(account.id);
+    if (running) return running;
+    const task = judge(account, nowMs)
+      .catch(() => {
+        // An unreadable source proves nothing either way: record `unknown`
+        // so the next peek does not re-trigger a refresh storm.
+        store(account.id, { status: "unknown", reason: "credential source could not be judged" }, nowMs);
+      })
+      .finally(() => {
+        inflight.delete(account.id);
+      });
+    inflight.set(account.id, task);
+    return task;
+  };
+
   return {
-    resolve(account, providerId, nowMs = Date.now()) {
-      if (account.oauthTokenFile || account.oauthTokenRef) return undefined;
-      if (!account.native && !account.configDir) return undefined;
-      let check: CredentialCheck | undefined;
+    peek(account, providerId, nowMs = Date.now()) {
+      if (!eligible(account)) return undefined;
+      if (health(account.id).failed) return undefined;
       const hit = cache.get(account.id);
-      if (hit && hit.until > nowMs) {
-        check = hit.check;
-      } else {
-        try {
-          check = assessAccountCredential(account, options.io, {
-            proof: { lastSuccessAt: options.lastSuccessAt?.(account.id) },
-            nowMs,
-          });
-        } catch {
-          return undefined;
-        }
-        // A usable verdict is good until the TTL or the access token's own
-        // expiry (less the probe's skew), whichever comes first.
-        let until = nowMs + ttlMs;
-        if (check.status === "ok" && check.expiresAt !== undefined) {
-          until = Math.min(until, check.expiresAt - ACCESS_TOKEN_EXPIRY_SKEW_MS);
-        }
-        cache.set(account.id, { check, until });
-      }
-      return loginRuntimeAuth(check, { providerId, accountId: account.id, nowMs });
+      if (!hit || hit.freshUntil <= nowMs) void refresh(account, nowMs);
+      if (!hit || hit.hardUntil <= nowMs) return undefined;
+      return loginRuntimeAuth(hit.check, { providerId, accountId: account.id, nowMs });
+    },
+    refresh,
+    record(accountId, check, nowMs = Date.now()) {
+      store(accountId, check, nowMs);
     },
   };
 }
