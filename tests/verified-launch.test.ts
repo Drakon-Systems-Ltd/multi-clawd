@@ -193,8 +193,15 @@ describe("launch mode at registration", () => {
   test("the execute capability is probed positively, never inferred from a missing version", () => {
     const fn = () => {};
     // 2026.8.1+ runtime shapes.
-    expect(hostRunsExecuteTransports({ agent: { runCommandFromIngress: fn } })).toBe(true);
-    expect(hostRunsExecuteTransports({ hooks: { dispatchHookAgentTurn: fn } })).toBe(true);
+    expect(
+      hostRunsExecuteTransports({ agent: { runCommandFromIngress: fn }, hooks: { dispatchHookAgentTurn: fn } }),
+    ).toBe(true);
+    // One general API alone is not enough evidence.
+    expect(hostRunsExecuteTransports({ agent: { runCommandFromIngress: fn } })).toBe(false);
+    expect(hostRunsExecuteTransports({ hooks: { dispatchHookAgentTurn: fn } })).toBe(false);
+    expect(
+      hostRunsExecuteTransports({ agent: { runCommandFromIngress: fn }, hooks: { dispatchHookAgentTurn: "x" } }),
+    ).toBe(false);
     // Pre-2026.8.1 shapes (no probe surface), version or not.
     expect(hostRunsExecuteTransports({ version: "2026.10.2", agent: {}, hooks: {} })).toBe(false);
     expect(hostRunsExecuteTransports({ config: { current: () => ({}) } })).toBe(false);
@@ -208,6 +215,7 @@ describe("launch mode at registration", () => {
     const bin = fakeClaudeBinary();
     const { default: plugin } = await import("../src/index.js");
     const backends: Array<{ id: string; config: { command: string }; runtimeArtifact?: unknown }> = [];
+    const infos: string[] = [];
     const saved = { PATH: process.env.PATH, BIN: process.env.MULTI_CLAWD_CLAUDE_BIN };
     process.env.PATH = join(scratch, "bin");
     delete process.env.MULTI_CLAWD_CLAUDE_BIN;
@@ -216,8 +224,12 @@ describe("launch mode at registration", () => {
       plugin.register({
         config: {},
         pluginConfig: {},
-        runtime: { config: { current: () => config }, agent: { runCommandFromIngress: () => {} } },
-        logger: { info: () => {}, warn: () => {}, error: () => {} },
+        runtime: {
+          config: { current: () => config },
+          agent: { runCommandFromIngress: () => {} },
+          hooks: { dispatchHookAgentTurn: () => {} },
+        },
+        logger: { info: (m: string) => infos.push(m), warn: () => {}, error: () => {} },
         registerCliBackend: (b: (typeof backends)[number]) => backends.push(b),
         registerProvider: () => {},
         on: () => {},
@@ -228,6 +240,37 @@ describe("launch mode at registration", () => {
     }
     expect(backends[0]?.config.command).toBe(bin);
     expect(backends[0]?.runtimeArtifact).toEqual(CLAUDE_RUNTIME_ARTIFACT);
+    const line = infos.find((m) => m.includes("launch mode:"));
+    expect(line).toContain("launch mode: verified");
+    expect(line).toContain("from PATH");
+    expect(line).toContain("runCommandFromIngress + runtime.hooks.dispatchHookAgentTurn present");
+  });
+
+  test("registration on a host without the probe surface logs legacy mode and why", async () => {
+    fakeClaudeBinary();
+    const { default: plugin } = await import("../src/index.js");
+    const warns: string[] = [];
+    const backends: Array<{ config: { command: string } }> = [];
+    const saved = process.env.PATH;
+    process.env.PATH = join(scratch, "bin");
+    const config = { plugins: { entries: { "multi-clawd": { config: { accounts: [{ id: "claw1", native: true }] } } } } };
+    try {
+      plugin.register({
+        config: {},
+        pluginConfig: {},
+        runtime: { config: { current: () => config }, agent: { runCommandFromIngress: () => {} } },
+        logger: { info: () => {}, warn: (m: string) => warns.push(m), error: () => {} },
+        registerCliBackend: (b: (typeof backends)[number]) => backends.push(b),
+        registerProvider: () => {},
+        on: () => {},
+      } as never);
+    } finally {
+      process.env.PATH = saved;
+    }
+    expect(backends[0]?.config.command).toBe(process.execPath);
+    const line = warns.find((m) => m.includes("launch mode:"));
+    expect(line).toContain("launch mode: legacy node+shim");
+    expect(line).toContain("dispatchHookAgentTurn");
   });
 
   test("a legacy backend never returns a transport, even for agent turns", async () => {

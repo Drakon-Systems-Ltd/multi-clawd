@@ -698,7 +698,14 @@ export const CLAUDE_RUNTIME_ARTIFACT = Object.freeze({
  *   host's verified-owner check then fails exactly as it did before.
  */
 export type BackendLaunch =
-  | { kind: "verified"; claudeCommand: string; shimPath: string; log?: (line: string) => void }
+  | {
+      kind: "verified";
+      claudeCommand: string;
+      shimPath: string;
+      /** Where the claude path came from: PATH lookup or an operator override. */
+      claudeSource?: "path" | "override";
+      log?: (line: string) => void;
+    }
   | { kind: "legacy"; shimPath: string; reason?: string };
 
 /**
@@ -709,9 +716,11 @@ export type BackendLaunch =
  * shipped in the SAME release as the transport (OpenClaw 2026.8.1 final; it is
  * absent from 2026.8.1-beta.3, 2026.7.x and 2026.6.x, all of which also lack
  * the transport): `runtime.agent.runCommandFromIngress` and
- * `runtime.hooks.dispatchHookAgentTurn`. Either present means the runner
- * consults `prepareExecution().execute`; neither means it would ignore it and
- * run claude bare, so the caller keeps the legacy shim launch.
+ * `runtime.hooks.dispatchHookAgentTurn`. BOTH must be present: a false
+ * positive would register bare claude on a host that ignores the transport
+ * and silently lose the shim, while a false negative only keeps today's
+ * legacy launch. (The runner's own target selection is checked against an
+ * installed OpenClaw dist in tests/host-execute-target.test.ts.)
  *
  * Reads are guarded: in metadata registration modes the runtime is a Proxy
  * that throws on any property access.
@@ -723,7 +732,7 @@ export function hostRunsExecuteTransports(runtime: unknown): boolean {
       hooks?: { dispatchHookAgentTurn?: unknown };
     } | undefined;
     return (
-      typeof rt?.agent?.runCommandFromIngress === "function" ||
+      typeof rt?.agent?.runCommandFromIngress === "function" &&
       typeof rt?.hooks?.dispatchHookAgentTurn === "function"
     );
   } catch {
@@ -748,7 +757,10 @@ export function resolveBackendLaunch(params: {
     return {
       kind: "legacy",
       shimPath,
-      reason: "this OpenClaw does not run plugin execute transports (needs >= 2026.8.1)",
+      reason:
+        "this OpenClaw does not expose runtime.agent.runCommandFromIngress and " +
+        "runtime.hooks.dispatchHookAgentTurn, so it is treated as not running plugin execute " +
+        "transports (needs >= 2026.8.1)",
     };
   }
   const claude = resolveClaudeExecutable(params.env ?? process.env, params.platform ?? process.platform);
@@ -756,6 +768,7 @@ export function resolveBackendLaunch(params: {
   return {
     kind: "verified",
     claudeCommand: claude.command,
+    claudeSource: claude.source,
     shimPath,
     ...(params.log ? { log: params.log } : {}),
   };
@@ -1197,12 +1210,16 @@ export default definePluginEntry({
     });
     if (launch.kind === "verified") {
       api.logger.info(
-        `[multi-clawd] launch: verified claude ${launch.claudeCommand} (agent turns via shim ${launch.shimPath})`,
+        `[multi-clawd] launch mode: verified — claude ${launch.claudeCommand} (from ${
+          launch.claudeSource === "override" ? "MULTI_CLAWD_CLAUDE_BIN" : "PATH"
+        }) is the backend command; host runs execute transports ` +
+          `(runtime.agent.runCommandFromIngress + runtime.hooks.dispatchHookAgentTurn present), ` +
+          `so agent turns run through shim ${launch.shimPath} and side-questions run claude directly`,
       );
     } else {
       api.logger.warn(
-        `[multi-clawd] launch: legacy node+shim (${launch.reason ?? "unknown"}) — ` +
-          `OpenClaw cannot verify this backend as a setup owner`,
+        `[multi-clawd] launch mode: legacy node+shim — ${launch.reason ?? "unknown reason"}; ` +
+          `failover is unchanged, but OpenClaw cannot verify this backend as a setup owner`,
       );
     }
     const seen = new Set<string>();
