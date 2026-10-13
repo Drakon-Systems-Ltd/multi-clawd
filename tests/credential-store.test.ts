@@ -334,3 +334,57 @@ describe("createSystemCredentialIo: the real command boundary", () => {
     expect(failing.listKeychainItems()).toBeUndefined();
   });
 });
+
+describe("readKeychainItemAsync — the non-blocking twin of readKeychainItem", async () => {
+  const { readKeychainItemAsync } = await import("../src/credential-store");
+
+  test("runs the same named-service-and-account command and returns the data", async () => {
+    const calls: string[][] = [];
+    const read = await readKeychainItemAsync("Claude Code-credentials", "example-user", {
+      exec: async (file, args) => {
+        calls.push([file, ...args]);
+        return `${cred(NOW + HOUR)}\n`;
+      },
+    });
+    expect(calls).toEqual([
+      ["security", "find-generic-password", "-s", "Claude Code-credentials", "-a", "example-user", "-w"],
+    ]);
+    expect(read.status).toBe("found");
+    expect(read.status === "found" && read.data.endsWith("\n")).toBe(false);
+  });
+
+  test("exit 44 (errSecItemNotFound) → absent", async () => {
+    const read = await readKeychainItemAsync("s", "a", {
+      exec: async () => {
+        throw Object.assign(new Error("not found"), { status: 44 });
+      },
+    });
+    expect(read).toEqual({ status: "absent" });
+  });
+
+  test("a timed-out `security` (killed, no status) → unreadable, and the caller was never blocked", async () => {
+    let resolveExec: (() => void) | undefined;
+    const pending = readKeychainItemAsync("s", "a", {
+      exec: () =>
+        new Promise((_, reject) => {
+          resolveExec = () => reject(Object.assign(new Error("timeout"), { killed: true, code: null, signal: "SIGTERM" }));
+        }),
+    });
+    // The read is in flight; the current turn continues immediately.
+    let settled = false;
+    void pending.then(() => (settled = true));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveExec!();
+    expect(await pending).toEqual({ status: "unreadable" });
+  });
+
+  test("any other failure (locked Keychain, access refused) → unreadable", async () => {
+    const read = await readKeychainItemAsync("s", "a", {
+      exec: async () => {
+        throw Object.assign(new Error("denied"), { status: 36 });
+      },
+    });
+    expect(read).toEqual({ status: "unreadable" });
+  });
+});

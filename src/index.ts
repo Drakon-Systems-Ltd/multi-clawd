@@ -25,8 +25,11 @@
  *   applies `clearEnv` to the host env first and merges prepared env after,
  *   so stripping the main account's ambient Claude vars is safe.
  * - `resolveSyntheticAuth` mirrors the bundled backend's synthetic auth so
- *   status/failover surfaces treat the backend as authenticated (mode
- *   "token") without an OpenClaw auth profile.
+ *   status/failover surfaces treat the backend as authenticated without an
+ *   OpenClaw auth profile: a token account reports its token (mode "token");
+ *   a CLI-login account reports the host's non-secret `oauth:<provider>`
+ *   marker when its stored login is usable (runtime-auth.ts, #39), which is
+ *   what OpenClaw >= 2026.10 needs to list the models as available.
  */
 import {
   definePluginEntry,
@@ -52,6 +55,7 @@ import { resolveBaseModelIds } from "./catalog-source.js";
 import {
   allCredentialFailed,
   classifyAccountHealth,
+  credentialFailureFor,
   lastAuthSuccessAt,
   overdueProbeAccount,
   pickPoolAccountForLaunch,
@@ -113,7 +117,15 @@ import {
   type CredentialIo,
   type RefProbeTracker,
 } from "./login-health.js";
-import { createSystemCredentialIo } from "./credential-store.js";
+import { createSystemCredentialIo, readKeychainItemAsync } from "./credential-store.js";
+import {
+  createLoginAuthCache,
+  loginAuthEligible,
+  poolRuntimeAuth,
+  refuseRuntimeAuthMarker,
+  type LoginAuthCache,
+  type RuntimeAuthResult,
+} from "./runtime-auth.js";
 import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
 import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
@@ -341,6 +353,49 @@ const LOGIN_PROBE_INITIAL_DELAY_MS = 45 * 1000;
 let realCredentialIo: CredentialIo | undefined;
 
 /**
+ * Login verdicts served to the host's synchronous synthetic-auth surface
+ * (#39). The surface only ever reads this cache; the credential source is
+ * read asynchronously (warmed at registration, refreshed in the background
+ * when stale, fed by the probe), judged by the same rules as the probe with
+ * the account's health state as evidence — a recent successful turn proves
+ * a refresh, a current `credential_failed` record vetoes outright.
+ */
+let loginAuthCache: LoginAuthCache | undefined;
+let loginAuthWarm: Promise<void> = Promise.resolve();
+function loginAuth(): LoginAuthCache {
+  return (loginAuthCache ??= createLoginAuthCache({
+    io: (realCredentialIo ??= createSystemCredentialIo()),
+    readKeychainItemAsync: (service, account) => readKeychainItemAsync(service, account),
+    health: (accountId) => {
+      const state = readHealthState(accountId);
+      return {
+        lastSuccessAt: lastAuthSuccessAt(state),
+        failed: credentialFailureFor(state, Date.now()) !== undefined,
+      };
+    },
+  }));
+}
+
+/**
+ * Judge every CLI-login account once, off the registration path, so the
+ * host's first catalog discovery finds a verdict instead of a cold cache.
+ * Exported with its completion so a test can await what a gateway only waits
+ * for in passing.
+ */
+export function warmLoginAuth(accounts: AccountConfig[]): Promise<void> {
+  const cache = loginAuth();
+  loginAuthWarm = Promise.all(
+    accounts.filter(loginAuthEligible).map((account) => cache.refresh(account)),
+  ).then(() => undefined);
+  return loginAuthWarm;
+}
+
+/** Resolves when the most recent registration's warm-up has finished. */
+export function loginAuthWarmed(): Promise<void> {
+  return loginAuthWarm;
+}
+
+/**
  * Periodic login-health probe: credential *sources* are judged on evidence
  * (an unexpired stored access token, or a successful turn since it expired —
  * never mere presence) so a dead login raises an operator alert instead of
@@ -453,6 +508,8 @@ export async function runLoginHealthProbe(
         proof: { lastSuccessAt: lastAuthSuccessAt(readHealth(account.id)) },
         nowMs: now,
       });
+      // The same verdict feeds the host's availability surface on this cadence.
+      if (!deps.io) loginAuth().record(account.id, check, now);
       status = check.status;
       reason = check.status === "ok" ? check.detail : check.reason;
     }
@@ -599,6 +656,21 @@ function peekToken(account: AccountConfig): string | undefined {
   throw new Error(
     `[multi-clawd] account "${account.id}" needs oauthTokenFile, oauthTokenRef, or configDir`,
   );
+}
+
+/**
+ * What this account proves to the host's synthetic-auth surface: a token
+ * account its setup token; a CLI-login account the non-secret marker when its
+ * stored login is judged usable (#39). Throws like peekToken for an
+ * unreadable token file; the provider hook catches.
+ */
+function resolveAccountRuntimeAuth(account: AccountConfig): RuntimeAuthResult | undefined {
+  const token = peekToken(account);
+  if (token) return { apiKey: token, source: `multi-clawd ${account.id} token`, mode: "token" };
+  // A ref whose cache is cold answers nothing until the launch path warms it.
+  if (account.oauthTokenFile || isSecretRefShape(account.oauthTokenRef)) return undefined;
+  // Cache only: the credential source is never read on this synchronous path.
+  return loginAuth().peek(account, account.id);
 }
 
 /** Launch-path token access: resolves refs via the gateway's secret providers. */
@@ -1068,24 +1140,31 @@ export function isRuntimelessRegistration(api: unknown): boolean {
  * route through an API transport: the run executor checks the CLI-backend
  * registry first (isCliProvider) and drives the Claude Code subprocess.
  */
-function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
+function buildCatalogProvider(account: AccountConfig, members?: AccountConfig[]): ProviderPlugin {
   return {
     id: account.id,
     label: account.label ?? `Claude Code (${account.id})`,
     auth: [],
     resolveSyntheticAuth: () => {
       try {
-        // Sync surface: warm ref-cache or file read only — never blocks.
-        const token = peekToken(account);
-        if (!token) return undefined;
-        return {
-          apiKey: token,
-          source: `multi-clawd ${account.id} token`,
-          mode: "token",
-        };
+        // Sync surface: warm ref-cache, token-file read or cached login
+        // verdict only — never blocks. A pool is signed in when any member is.
+        return members
+          ? poolRuntimeAuth(
+              account.id,
+              members.map((member) => () => resolveAccountRuntimeAuth(member)),
+            )
+          : resolveAccountRuntimeAuth(account);
       } catch {
         return undefined;
       }
+    },
+    // The direct API transport (`infer model run`, side completions) asks
+    // here before building a request. A CLI-login account's marker is not a
+    // bearer: refuse it so that path fails closed, exactly as before #39.
+    prepareRuntimeAuth: async (ctx) => {
+      refuseRuntimeAuthMarker(ctx);
+      return undefined;
     },
     // Async on purpose: mirrors the bundled claude-cli catalog at catalog-build
     // time (falling back to the built-in list), so new subscription models
@@ -1223,6 +1302,9 @@ export default definePluginEntry({
       );
     }
     const seen = new Set<string>();
+    // Account → credential-source mapping may change between registration
+    // passes; login verdicts are re-judged from a fresh cache each time.
+    loginAuthCache = undefined;
     for (const account of accounts) {
       const id = account?.id?.trim();
       if (!id) {
@@ -1244,6 +1326,7 @@ export default definePluginEntry({
       api.registerProvider(buildCatalogProvider(normalized));
     }
     registerPoolBackend(api, cfg.pool, accounts, seen, execMode, { launch });
+    void warmLoginAuth(accounts.filter((a) => seen.has(a.id.trim()))).catch(() => {});
 
     // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
     {
@@ -1743,7 +1826,7 @@ export function registerPoolBackend(
     return preparedForLaunch(launch, ctx, env, transport);
   };
   api.registerCliBackend(backend);
-  api.registerProvider(buildCatalogProvider(poolAccount));
+  api.registerProvider(buildCatalogProvider(poolAccount, members));
   registeredIds.add(poolId);
   logger.info(
     `[multi-clawd] pool "${poolId}" active — accounts: ${memberIds.join(" → ")}, threshold: ${

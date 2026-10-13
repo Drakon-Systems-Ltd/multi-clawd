@@ -817,6 +817,18 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
 
 ## Known limitations
 
+- **Control UI shows the pool as unavailable on OpenClaw 2026.10 (multi-clawd
+  ≤ 2.1.0).** OpenClaw 2026.10 computes model availability per provider, and
+  a plugin provider backed by a Claude *login* (a `native` or `configDir`
+  account) had no credential to show it — so **Settings → Models** greyed out
+  every `clawd/*` and `claw<N>/*` row with "missing auth" and showed a
+  different model than the configured primary, even though agent turns worked.
+  `openclaw gateway call models.list --json` shows the same rows as
+  `available: false, unavailableReason: "missing-auth"`. Fixed in **2.1.1**:
+  a usable login now reports as available, a dead one still reports
+  "missing-auth", and the direct API transport keeps refusing CLI-login
+  accounts as before. Update with `multi-clawd update`.
+
 - **Shim window persistence is sequential-safe, not concurrent-writer-safe.**
   `persistState()` in `src/shim.ts` does a read-merge-write on every save so a
   turn that only reports one window type (say `five_hour`) doesn't clobber

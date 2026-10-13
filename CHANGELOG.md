@@ -6,6 +6,32 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw 2026.10: pool and account models shown as unavailable
+  ("missing-auth").** OpenClaw 2026.10 derives each provider's model
+  availability from the synthetic credential the provider returns, and a
+  `native` / `configDir` account had no setup token to return — so the Control
+  UI's Models picker greyed out every `clawd/*` and `claw<N>/*` row and
+  substituted another model for the configured primary, while turns kept
+  working. CLI-login accounts now prove their login the way the login-health
+  probe judges it (an unexpired stored access token, or a successful turn
+  since it expired — never mere presence) and answer with OpenClaw's own
+  non-secret `oauth:<provider>` marker; the pool reports signed-in when any
+  member does, always with its own marker (a member's real token never rides
+  out under the pool's id); a dead login still reports nothing, so
+  "missing-auth" stays honest — including a login the Claude CLI has rejected
+  on a real turn (`credential_failed`), whatever the stored credential looks
+  like at rest. Per-account token accounts are unchanged. The marker is
+  refused in `prepareRuntimeAuth`, so the direct API transport (`openclaw
+  infer model run --model clawd/...`) keeps failing closed for CLI-login
+  accounts and for the pool instead of putting a placeholder on the wire or
+  riding one member's token around the pool. The host's synchronous hook is
+  served from a verdict cache only; the credential source (on macOS the
+  Keychain, via `security`) is read asynchronously — warmed at registration,
+  refreshed in the background when a verdict is older than 30s, fed by the
+  login-health probe — so catalog discovery never blocks on it. No token
+  value leaves the resolver. Ships as 2.1.1. (#39)
+
 ## [2.1.0] - 2026-10-13
 
 > **Requires OpenClaw 2026.8.1 or later** (peer and compat minimums raised). Older hosts keep the legacy node + shim launch automatically.

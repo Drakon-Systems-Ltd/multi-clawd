@@ -23,7 +23,7 @@
  *
  * Peer-free on purpose (doctor imports it): nothing here may import `openclaw`.
  */
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -340,6 +340,49 @@ const SECURITY_TIMEOUT_MS = 10_000;
 const SECURITY_ITEM_NOT_FOUND = 44;
 
 type ExecFile = (file: string, args: string[], options: Record<string, unknown>) => string;
+
+/** Async twin of ExecFile: resolves stdout, rejects with the exec error. */
+export type ExecFileAsync = (
+  file: string,
+  args: string[],
+  options: Record<string, unknown>,
+) => Promise<string>;
+
+function defaultExecFileAsync(file: string, args: string[], options: Record<string, unknown>): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(file, args, options as never, (err, stdout) => {
+      if (err) reject(err);
+      else resolvePromise(String(stdout));
+    });
+  });
+}
+
+/**
+ * The same Keychain read as `readKeychainItem` below, without blocking the
+ * event loop: the host's synthetic-auth surface is synchronous, so the read
+ * that feeds it must happen off that path (runtime-auth.ts). Identical
+ * command, timeout and status mapping; a timed-out or killed `security` is
+ * `unreadable`, never an exception.
+ */
+export async function readKeychainItemAsync(
+  service: string,
+  account: string,
+  deps: { exec?: ExecFileAsync } = {},
+): Promise<KeychainRead> {
+  const exec = deps.exec ?? defaultExecFileAsync;
+  try {
+    const data = await exec("security", ["find-generic-password", "-s", service, "-a", account, "-w"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: SECURITY_TIMEOUT_MS,
+    });
+    return { status: "found", data: data.replace(/\n$/, "") };
+  } catch (err) {
+    const status = (err as { status?: unknown; code?: unknown } | null)?.status ??
+      (err as { code?: unknown } | null)?.code;
+    return status === SECURITY_ITEM_NOT_FOUND ? { status: "absent" } : { status: "unreadable" };
+  }
+}
 
 /**
  * The real system I/O. Every Keychain read names both service and account
