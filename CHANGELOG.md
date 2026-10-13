@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-13
+
 ### Fixed
 - **OpenClaw 2026.10: pool and account models shown as unavailable
   ("missing-auth").** OpenClaw 2026.10 derives each provider's model
