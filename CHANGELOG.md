@@ -6,6 +6,18 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **CLI-login availability at cache boundaries.** A fresh login is seen as
+  soon as the cached token reaches its expiry bound inside the 30s window.
+  A login proven by a recent successful turn no longer flickers to
+  "unavailable" at each 30s boundary while its credential is refreshed: it
+  can be served for at most one extra window, never past the 24h proof.
+  The credential file is never read inside the synchronous host hook. (#41)
+- **Clarified the 2.1.1 credential-failure veto.** Any current credential
+  failure record vetoes the marker, including `credential_unverified` when a
+  failure is older than 15 minutes and no successful turn has cleared it:
+  the login stays dead until proven. (#41)
+
 ## [2.1.1] - 2026-10-13
 
 ### Fixed

@@ -24,7 +24,7 @@
  *
  * The host's hook is synchronous, so it is served from a verdict cache only:
  * the credential-source read (a file on Linux, the Keychain via `security` on
- * macOS, which can block for seconds) runs asynchronously — warmed at
+ * macOS, which can block for seconds) starts after the hook returns — warmed at
  * registration, refreshed in the background when a verdict goes stale, and
  * fed by the login-health probe on its cadence. A login the Claude CLI has
  * rejected on a real turn (health state `credential_failed`) answers nothing
@@ -35,6 +35,7 @@
  */
 import {
   ACCESS_TOKEN_EXPIRY_SKEW_MS,
+  AUTH_PROOF_FRESH_MS,
   CLAUDE_KEYCHAIN_SERVICE,
   assessAccountCredential,
   keychainServiceForConfigDir,
@@ -136,11 +137,11 @@ export interface LoginAuthCache {
   /**
    * The host's synchronous surface: a cached verdict or nothing, never a
    * credential-source read. A missing or stale verdict starts one background
-   * refresh; a stale `ok` keeps being served until the access token itself
-   * would expire. A current `credential_failed` health record vetoes at once.
+   * refresh; a stale `ok` is served only within its token or proof bound.
+   * A current credential failure record vetoes at once.
    */
   peek(account: CredentialAccountShape, providerId: string, nowMs?: number): RuntimeAuthResult | undefined;
-  /** Re-judge one account's credential source off the event loop. Never rejects. */
+  /** Re-judge one account's credential source after yielding. Never rejects. */
   refresh(account: CredentialAccountShape, nowMs?: number): Promise<void>;
   /** Adopt a verdict the login-health probe has just computed. */
   record(accountId: string, check: CredentialCheck, nowMs?: number): void;
@@ -150,7 +151,7 @@ interface CachedVerdict {
   check: CredentialCheck;
   /** Served without a refresh until here. */
   freshUntil: number;
-  /** Never served past here (an `ok` is bounded by the token's own expiry). */
+  /** Never served past here (an `ok` is bounded by its token or proof). */
   hardUntil: number;
 }
 
@@ -178,22 +179,29 @@ export function createLoginAuthCache(options: {
   const eligible = loginAuthEligible;
 
   const store = (accountId: string, check: CredentialCheck, nowMs: number): void => {
-    // An `ok` backed by an unexpired token may be served, stale, until that
-    // token would expire; an `ok` proven by a recent turn (token already
-    // expired) and every other verdict only for the TTL.
+    // A token-backed `ok` may be served until its token bound. A proof-only
+    // `ok` gets one extra TTL at most, capped by the successful turn's proof.
     const tokenBound =
       check.status === "ok" && check.expiresAt !== undefined
         ? check.expiresAt - ACCESS_TOKEN_EXPIRY_SKEW_MS
         : undefined;
-    // A token-backed verdict is capped at tokenBound, whether that falls
-    // inside or outside the TTL window — never served once the token itself
-    // is within its expiry skew. A success-proven verdict with no token
-    // expiry (tokenBound undefined) keeps the plain TTL.
-    const hardUntil = tokenBound !== undefined && tokenBound > nowMs ? tokenBound : nowMs + ttlMs;
+    // Other verdicts retain the plain TTL. Without a known success time,
+    // a proof-only `ok` also retains that conservative bound.
+    let hardUntil = nowMs + ttlMs;
+    if (tokenBound !== undefined && tokenBound > nowMs) {
+      hardUntil = tokenBound;
+    } else if (check.status === "ok") {
+      const lastSuccessAt = health(accountId).lastSuccessAt;
+      if (lastSuccessAt !== undefined) {
+        hardUntil = Math.min(nowMs + 2 * ttlMs, lastSuccessAt + AUTH_PROOF_FRESH_MS);
+      }
+    }
     cache.set(accountId, { check, freshUntil: nowMs + ttlMs, hardUntil });
   };
 
   const judge = async (account: CredentialAccountShape, nowMs: number): Promise<void> => {
+    // Even the Linux file reader is synchronous: leave the host hook first.
+    await Promise.resolve();
     let io = options.io;
     if (io.platform === "darwin" && options.readKeychainItemAsync) {
       const dir = account.native ? "~/.claude" : account.configDir;
@@ -232,7 +240,7 @@ export function createLoginAuthCache(options: {
       if (!eligible(account)) return undefined;
       if (health(account.id).failed) return undefined;
       const hit = cache.get(account.id);
-      if (!hit || hit.freshUntil <= nowMs) void refresh(account, nowMs);
+      if (!hit || hit.freshUntil <= nowMs || hit.hardUntil <= nowMs) void refresh(account, nowMs);
       if (!hit || hit.hardUntil <= nowMs) return undefined;
       return loginRuntimeAuth(hit.check, { providerId, accountId: account.id, nowMs });
     },

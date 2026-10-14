@@ -224,6 +224,8 @@ describe("createLoginAuthCache", () => {
     expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
     expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
     expect(cache.peek(native, "claw1", NOW)).toBeUndefined();
+    expect(reads).toBe(0); // the synchronous hook has not started the read
+    await Promise.resolve();
     expect(reads).toBe(1);
     release!();
     await cache.refresh(native, NOW); // joins the in-flight refresh
