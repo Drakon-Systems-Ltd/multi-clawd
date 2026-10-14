@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-10-14
+
 ### Fixed
 - **CLI-login availability at cache boundaries.** A fresh login is seen as
   soon as the cached token reaches its expiry bound inside the 30s window.
