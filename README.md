@@ -284,16 +284,15 @@ claude-cli/claude-fable-5        # main login
 
 ## Platform support
 
-multi-clawd is pure Node (no native modules, no shell-outs) and mirrors the
-bundled `claude-cli` backend 1:1 — it runs anywhere OpenClaw's normal Claude
-Code backend runs.
+multi-clawd uses Node without native modules. External commands are run with
+argument arrays, never through a shell string. Launch mode varies by platform.
 
 | Platform | Status |
 |---|---|
 | Linux | ✅ Verified in production (x64 and arm64) |
-| macOS | ✅ Supported — no platform-specific code paths |
+| macOS | ✅ Supported — reads Claude logins from the Keychain through the `security` CLI and schedules the optional watchdog with a launchd plist in `~/Library/LaunchAgents/` |
 | Windows (WSL2) | ✅ Supported — OpenClaw's recommended gateway runtime on Windows; follow the Linux instructions inside WSL |
-| Windows (native) | ⚠️ Expected to work (the gateway spawns `claude` for this plugin exactly as it does for the bundled backend), not yet verified by us — reports welcome |
+| Windows (native) | ⚠️ Not yet verified by us — verified launch is not implemented on Windows; it falls back to the legacy node + shim launch, so the v2.1.0 verified-launch fix for OpenClaw 2026.10.2 setup authority ("Ask OpenClaw") does not apply there. Reports welcome. |
 
 ## Install
 
@@ -745,9 +744,10 @@ What to know:
 
 - **Why a native or config-dir login needs its own token.** That login is a
   rotating one-time OAuth grant, and a copy of it breaks on the next refresh.
-  multi-clawd never reads Claude's own credential files. Run `claude
-  setup-token` signed in as that account and store the token. `setup` walks
-  you through it.
+  multi-clawd never copies that login into a direct profile. (The usage poll
+  and login checks do read Claude's credential files, but never copy or
+  rewrite them.) Run `claude setup-token` signed in as that account and store
+  the token. `setup` walks you through it.
 - **Already stored a profile yourself?** Adopt it with
   `"direct": { "profileId": "anthropic:<id>" }`. It gets ordered, never
   rewritten.
@@ -849,11 +849,11 @@ callsite (the ones static scanners flag) and why each exists.
 
 | Surface | What multi-clawd does |
 |---|---|
-| Network | **Zero egress of its own.** The only network activity is npm/registry traffic during `install`/`update`, and the Claude Code subprocesses talking to Anthropic exactly as the bundled backend does. No telemetry, no analytics, no vendor endpoints. |
-| Credentials | Reads each account's setup-token at launch (file, or a secret-manager reference resolved by your gateway) and passes it **only** via the child process env. Never written elsewhere, never logged, never printed — log redaction is covered by dedicated tests. |
-| Files read | `~/.openclaw/openclaw.json` (config), account config dirs you declare (e.g. `~/.claw2`), token files you declare. |
-| Files written | `~/.openclaw/state/multi-clawd/<account>.json` (local usage-health telemetry, stays on the box), config backups the wizard takes before merging, and — only if you accept the wizard's watchdog step — one systemd user unit / launchd plist pointing at the installed watchdog script. |
-| Processes | Spawns the `claude` CLI per turn (same as the bundled backend). The optional watchdog may restart the OpenClaw gateway when the eviction signature appears — that's its entire job, documented below. |
+| Network | The gateway plugin polls `https://api.anthropic.com/api/oauth/usage` for eligible pooled accounts on an interval (default 120000 ms / 2 minutes); `pool.usagePoll.enabled: false` disables that poll. `multi-clawd usage` requests the same endpoint on demand. `doctor` runs `npm view` when its registry cache is stale; install and update commands contact the package registry. Claude Code subprocesses make their own provider requests. No plugin telemetry or analytics endpoint. |
+| Credentials | Reads declared setup-token files or gateway-resolved `oauthTokenRef` values for Claude child launches; reads each eligible account's `.credentials.json` access token for the usage poll; reads Claude login credentials from files or the macOS Keychain via the `security` CLI for login checks and runtime auth; reads account identity for file-backed logins from `.claude.json` (`~/.claude.json` for a native login, or the account config dir). Setup tokens are passed to Claude through the child environment. |
+| Files read | `~/.openclaw/openclaw.json`, declared account config dirs and token files, Claude `.credentials.json` and `.claude.json` files as described above, and local state files. |
+| Files written | Under `~/.openclaw/state/multi-clawd/` by default: `<id>.json`, `<id>.usage.json`, `pool-<id>.sticky.json`, `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes `~/.openclaw/openclaw.json` and a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher. |
+| Processes | Launches Claude Code and the node + shim transport; CLI, setup and doctor run npm, OpenClaw, Claude and OS scheduler commands; the optional watchdog checks OpenClaw logs and may restart the gateway; Hermes integration runs its Python bridge. See [SECURITY.md](SECURITY.md) for the process-call table. |
 | Consent | The wizard asks before every write, merges non-destructively, and never overwrites an existing account entry. `--dry-run` previews everything. |
 
 Housekeeping:
