@@ -15,9 +15,9 @@ credit you (unless you'd rather we didn't), and note it in the CHANGELOG.
 
 ## How credentials are handled
 
-- **Tokens are never logged and never appear in a command line.** They are
-  passed to the Claude CLI child process through its environment only, so they
-  cannot leak into a process list, a shell history, or a log file.
+- **Tokens are never logged and never appear in a command line.** Claude CLI
+  child launches receive setup tokens through their environment; direct-route
+  OpenClaw commands receive them on stdin.
 - **Secret references are preferred over token files.** `oauthTokenRef` uses
   the same `{source, provider, id}` shape as the rest of `openclaw.json` and
   resolves through the gateway's own configured secret providers (1Password,
@@ -34,8 +34,9 @@ credit you (unless you'd rather we didn't), and note it in the CHANGELOG.
   environment variables covering authentication, runtime, and telemetry are
   cleared before each launch, so one account's credential cannot bleed into
   another account's session.
-- **State files are written `0600`,** atomically (temp file + rename), and
-  contain rate-limit telemetry only — never credentials.
+- **Per-account health and usage files are written `0600`,** using temporary
+  files and rename, and contain rate-limit data rather than credentials. Other
+  state files include model, alert, registry and watchdog data.
 
 ## Permissions
 
@@ -48,20 +49,25 @@ nothing and Claude keeps its default prompt-honouring behaviour.
 ## Why static scanners flag this package
 
 Automated scans flag multi-clawd for `dangerous_exec`. That is expected and
-correct: starting Claude Code processes *is* the product. Every such callsite
-is listed here so you can check them yourself.
+correct: starting Claude Code processes *is* the product. Every source file
+that calls a child-process API is listed here so you can check it yourself.
 
 | Location | What it runs | Why |
 | --- | --- | --- |
-| `dist/shim.js` | the `claude` binary | The core function: launches Claude Code for the selected account. Argv is built from a fixed base list plus your configured model; no shell. |
-| `dist/watchdog-schedule.js` | `node <bundled script>` | Runs the eviction watchdog on a timer. Path is the package's own script. |
-| `scripts/cli.mjs` | `node <bundled script>` | The CLI dispatching to its own subcommands. |
-| `scripts/setup.mjs` | `launchctl` / `systemctl` | Loads the watchdog timer during setup on macOS/Linux. |
-| `dist/openclaw-runner.js` | the `openclaw` CLI (or `directRoute.openclawCommand`) | Direct route only (v1.9, accounts with `direct`): reads and writes the `anthropic` auth profiles and order through OpenClaw's own subcommands (`models auth list`/`order get`/`order set`/`paste-token`, `secrets apply`, `models status`). A setup-token only ever travels on the child's stdin. Never spawned without `direct` configured. |
+| `dist/shim.js` | selected `claude` executable | Launches Claude Code for the selected account and, when an in-turn retry is armed, relaunches it for a sibling account. |
+| `dist/shim-transport.js` | `node <shim>` | Runs the shim for an execute-transport turn. |
+| `dist/credential-store.js` | `security find-generic-password` / `security dump-keychain` | Reads a macOS Keychain login or inventories Keychain item attributes for credential checks. |
+| `dist/watchdog-schedule.js` | generated `watchdog-launcher.mjs` runs `node <bundled eviction-watchdog.mjs>` | Renders the state-dir launcher that a systemd user timer or launchd agent runs. The launcher resolves the current install before spawning its bundled watchdog script. |
+| `dist/openclaw-runner.js` | the `openclaw` CLI (or `directRoute.openclawCommand`) | Direct route only: reads and writes the `anthropic` auth profiles and order through OpenClaw subcommands. A setup token travels on the child's stdin. |
+| `scripts/cli.mjs` | `npm view` / `npm i -g`, `openclaw --version`, `openclaw` plugin install and gateway restart, `claude` login/status commands, `launchctl` / `systemctl`, and `node <bundled script>` | Checks and updates the CLI/plugin, handles account login, dispatches subcommands and repairs watchdog scheduling. |
+| `scripts/setup.mjs` | `claude --version`, `launchctl` / `systemctl` | Checks the Claude CLI and loads or repairs optional watchdog scheduling. |
+| `scripts/doctor.mjs` | `npm view`, `claude --version`, `openclaw models auth list` / `openclaw agent`, `launchctl` / `systemctl` | Checks registry version when its cache is stale, inspects auth and watchdog status, and optionally probes accounts. |
+| `scripts/eviction-watchdog.mjs` | `openclaw logs --plain` / `openclaw gateway restart` | Detects the eviction signature and restarts the gateway when the watchdog's conditions are met. |
+| `scripts/hermes.mjs` | Python interpreter with `-c` / bundled bridge | Checks Python availability and runs the Hermes bridge. |
 
-None of these pass a string to a shell — they are direct process spawns with
-argument arrays, so there is no quoting or injection surface. Paths are
-package-internal or derived from your home directory, never from remote input.
+None of these pass a command string to a shell: child-process calls use an
+executable and argument array. The launcher generated by `watchdog-schedule`
+uses the same form.
 
 ## Things you should decide for yourself
 
