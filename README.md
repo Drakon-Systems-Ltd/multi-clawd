@@ -374,6 +374,8 @@ cd multi-clawd && npm install && npm run build
 openclaw plugins install "$(pwd)"
 ```
 
+npm 10 and 11 both work here because the lockfile is committed.
+
 ```powershell
 # Windows (native, PowerShell)
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
