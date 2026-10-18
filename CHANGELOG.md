@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-10-18
+
 ### Fixed
 - Source installs now work on npm 10 (Node 22) because the repo ships a
   `package-lock.json`. (#48)
