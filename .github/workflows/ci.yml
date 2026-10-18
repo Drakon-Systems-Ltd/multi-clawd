@@ -31,6 +31,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      # npm 10 (bundled with Node 22) crashes resolving this dev tree
+      # ("Cannot read properties of null (reading 'edgesOut')"); npm 11
+      # installs it. Node 22 still runs the build and tests.
+      - name: Use npm 11 on Node 22
+        if: matrix.node == 22
+        run: npm install -g npm@11 --no-audit --no-fund
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - run: npm test
