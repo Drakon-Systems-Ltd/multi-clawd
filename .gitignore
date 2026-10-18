@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-package-lock.json
+# Commit package-lock.json: npm 10 cannot resolve the dev tree without it (#48); npm never publishes it.
 pnpm-lock.yaml
 yarn.lock
 
