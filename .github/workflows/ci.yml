@@ -1,0 +1,36 @@
+name: CI
+
+# Pull-request and push checks: install, build and run the test suite.
+# Read-only: no secrets, no publish or deploy steps, and the checkout
+# token is not persisted. Mirrors the install/build/test steps the
+# publish workflow already runs, so a PR is checked before it merges.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: npm test
