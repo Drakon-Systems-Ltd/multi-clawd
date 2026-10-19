@@ -6,6 +6,11 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- Pool `weeklyUtilizationThreshold` lets day/week/month-scale quota windows rotate at a
+  separate fraction. It defaults to `utilizationThreshold`; paid overage still
+  uses the general threshold when `rotateOnOverage` is enabled. (#55)
+
 ### Fixed
 - **Documented and pinned the availability window after a login is lost.**
   When an account's stored login goes missing or unreadable, its cached

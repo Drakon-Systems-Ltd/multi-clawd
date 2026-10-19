@@ -1378,6 +1378,7 @@ interface PoolConfig {
   /** Account ids in preference order; the first is the home account. */
   accounts?: string[];
   utilizationThreshold?: number;
+  weeklyUtilizationThreshold?: number;
   staleAfterMs?: number;
   /**
    * Rotate on `seven_day_overage_included` utilization — spending against
@@ -1544,6 +1545,7 @@ export function registerPoolBackend(
   }
   const options = {
     utilizationThreshold: pool.utilizationThreshold,
+    weeklyUtilizationThreshold: pool.weeklyUtilizationThreshold,
     staleAfterMs: pool.staleAfterMs,
     rotateOnOverage: pool.rotateOnOverage,
   };
@@ -1920,6 +1922,7 @@ export function startDirectOrderSync(params: {
   const intervalMs = Math.max(15_000, params.directRoute?.intervalMs ?? 60_000);
   const healthOptions = {
     utilizationThreshold: params.pool?.utilizationThreshold,
+    weeklyUtilizationThreshold: params.pool?.weeklyUtilizationThreshold,
     staleAfterMs: params.pool?.staleAfterMs,
     rotateOnOverage: params.pool?.rotateOnOverage,
   };
@@ -2054,6 +2057,7 @@ export function startUsagePoll(params: {
   const warnThreshold = effectiveUsageWarnThreshold(pool.usagePoll);
   const healthOptions = {
     utilizationThreshold: pool.utilizationThreshold,
+    weeklyUtilizationThreshold: pool.weeklyUtilizationThreshold,
     staleAfterMs: pool.staleAfterMs,
     rotateOnOverage: pool.rotateOnOverage,
   };
@@ -2121,7 +2125,7 @@ export function startUsagePoll(params: {
   logger.info(
     `[multi-clawd] usage poll: reading live usage for ${members.map((m) => m.id).join(", ")} every ${Math.round(
       intervalMs / 1000,
-    )}s — rotate at ${Math.round((pool.utilizationThreshold ?? 0.85) * 100)}%, warn at ${Math.round(warnThreshold * 100)}%${
+    )}s — rotate at ${Math.round((pool.utilizationThreshold ?? 0.85) * 100)}%${pool.weeklyUtilizationThreshold !== undefined ? ` (weekly ${Math.round(pool.weeklyUtilizationThreshold * 100)}%)` : ""}, warn at ${Math.round(warnThreshold * 100)}%${
       skipped.length > 0 ? `; not polled: ${skipped.join("; ")}` : ""
     }`,
   );
