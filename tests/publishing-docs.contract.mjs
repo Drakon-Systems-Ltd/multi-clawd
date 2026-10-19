@@ -69,6 +69,14 @@ test("retry guidance uses an exact scoped-version read and warns it is not idemp
   assert.match(doc, /never in a loop/);
 });
 
+test("a failed registry query is inconclusive, and the ClawHub echo is not registry proof", () => {
+  assert.match(doc, /explicitly absent/);
+  assert.match(doc, /\*\*inconclusive\*\*, not "missing"/);
+  assert.match(clawhubWf, /echo "Published \$PACKAGE_NAME@\$VERSION to ClawHub"/);
+  assert.match(doc, /\*\*not\*\* a read of the\s+registry/);
+  assert.match(doc, /record it as unverified/);
+});
+
 test("no stale manual-only, stored-token or tag-rewriting instructions", () => {
   assert.doesNotMatch(doc, /never CI/i);
   assert.doesNotMatch(doc, /npm whoami|npm login|NPM_TOKEN|NODE_AUTH_TOKEN|automation token/);

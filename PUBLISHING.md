@@ -114,8 +114,12 @@ Each piece of evidence covers only its own channel:
   (no version) reports the `latest` dist-tag, which is not the same question.
   A provenance attestation on the npm version page shows it came from the
   workflow.
-- **ClawHub:** the `Publish to ClawHub` run ended with
-  `Published @drakon-systems/multi-clawd@X.Y.Z to ClawHub`.
+- **ClawHub:** the `Publish to ClawHub` run is green and ended with
+  `Published @drakon-systems/multi-clawd@X.Y.Z to ClawHub`. That line is the
+  workflow's own `echo` after the CLI returned success — it is evidence the
+  run completed, **not** a read of the registry. Treat ClawHub publication as
+  confirmed only once ClawHub itself shows version `X.Y.Z` for the package;
+  until then record it as unverified.
 
 A successful OIDC run with provenance is the evidence that Trusted Publishing
 works. Who published an *earlier* version, or which identity once owned the
@@ -138,8 +142,14 @@ Before re-running anything:
    npm view @drakon-systems/multi-clawd@X.Y.Z version
    ```
    - Prints `X.Y.Z` → it is published. **Stop.** Do not re-run the workflow.
-   - Prints nothing / not found → it is not (yet) visible. Fix the cause shown
-     in the log first; a re-run of an unchanged failure only fails again.
+   - The registry answered and the version is explicitly absent (the command
+     succeeds with empty output, or npm reports `E404` for that version) → it
+     is not (yet) visible. Fix the cause shown in the log first; a re-run of
+     an unchanged failure only fails again.
+   - The query itself failed (network error, timeout, auth or other non-404
+     registry error) → the result is **inconclusive**, not "missing". Do not
+     re-run on it; repeat the read-only check until the registry gives a
+     definite answer.
 3. Re-run once, deliberately — never in a loop until it goes green. The
    workflow also has a `workflow_dispatch` trigger for this. Note that on
    manual dispatch the tag check is **skipped** (it only runs for the release
