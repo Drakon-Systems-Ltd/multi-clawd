@@ -6,6 +6,15 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **Documented and pinned the availability window after a login is lost.**
+  When an account's stored login goes missing or unreadable, its cached
+  verdict keeps it (and a pool it alone keeps signed in) available for at
+  most one 30s window, then only until the background re-check finishes and
+  marks it unavailable; never past the token expiry, or for a proof-only
+  login past two windows or the 24h proof. A recorded CLI failure still
+  removes it at once. Tests and docs only; no behaviour change. (#52)
+
 ## [2.1.3] - 2026-10-18
 
 ### Fixed

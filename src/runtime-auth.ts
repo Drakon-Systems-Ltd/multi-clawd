@@ -181,6 +181,9 @@ export function createLoginAuthCache(options: {
   const store = (accountId: string, check: CredentialCheck, nowMs: number): void => {
     // A token-backed `ok` may be served until its token bound. A proof-only
     // `ok` gets one extra TTL at most, capped by the successful turn's proof.
+    // This is the bounded stale-serving window when the stored login goes
+    // missing or unreadable (#52): the next completed refresh stores the
+    // non-ok verdict. Pinned by tests/runtime-auth-source-loss-52.test.ts.
     const tokenBound =
       check.status === "ok" && check.expiresAt !== undefined
         ? check.expiresAt - ACCESS_TOKEN_EXPIRY_SKEW_MS

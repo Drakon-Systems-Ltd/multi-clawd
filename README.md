@@ -830,6 +830,13 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
   a usable login now reports as available, a dead one still reports
   "missing-auth", and the direct API transport keeps refusing CLI-login
   accounts as before. Update with `multi-clawd update`.
+  If an account's stored login is deleted or becomes unreadable, the account
+  can stay available for up to one 30-second cache window, and after that only
+  until the background re-check started then finishes and marks it
+  unavailable. Even if that re-check stalls, it is never served past its
+  access-token expiry or, for a login proven only by a recent successful turn,
+  past two windows or 24 hours after that turn. A CLI login failure recorded
+  on a real turn removes it at once.
 
 - **Shim window persistence is sequential-safe, not concurrent-writer-safe.**
   `persistState()` in `src/shim.ts` does a read-merge-write on every save so a
