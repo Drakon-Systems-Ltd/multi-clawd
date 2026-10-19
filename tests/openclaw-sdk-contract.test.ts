@@ -60,10 +60,22 @@ describe("current OpenClaw plugin SDK contract", () => {
       on: (name: string) => hooks.push(name),
     };
 
-    plugin.register(api as never);
+    // The launch mode depends on whether `claude` is on PATH; pin it to "not
+    // found" so this test sees the legacy launch on every machine.
+    const savedPath = process.env.PATH;
+    const savedBin = process.env.MULTI_CLAWD_CLAUDE_BIN;
+    process.env.PATH = "";
+    delete process.env.MULTI_CLAWD_CLAUDE_BIN;
+    try {
+      plugin.register(api as never);
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedBin !== undefined) process.env.MULTI_CLAWD_CLAUDE_BIN = savedBin;
+    }
 
     expect(backends).toHaveLength(1);
     expect(backends[0]).toMatchObject({ id: "claw1", config: { command: process.execPath } });
+    expect((backends[0] as { runtimeArtifact?: unknown }).runtimeArtifact).toBeUndefined();
     expect(providers).toHaveLength(1);
     expect(providers[0]).toMatchObject({ id: "claw1", auth: [] });
     expect(hooks).toContain("heartbeat_prompt_contribution");

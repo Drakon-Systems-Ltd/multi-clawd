@@ -753,7 +753,7 @@ async function usageCommand(args) {
   for (const a of accounts) {
     const row = { id: a.id, label: a.label };
     if (a.oauthTokenFile || a.oauthTokenRef) {
-      row.skipped = "token-based login — not polled (stream telemetry only)";
+      row.skipped = "setup-token login — not polled: the usage endpoint needs the user:profile scope, setup-tokens carry only user:inference (stream telemetry only)";
     } else if (!a.native && !a.configDir) {
       row.skipped = "no login dir";
     } else {

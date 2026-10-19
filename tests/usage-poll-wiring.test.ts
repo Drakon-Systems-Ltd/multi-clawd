@@ -301,10 +301,10 @@ describe("what the poll must not do", () => {
 
   test("a token-based account is not polled: its credentials file is another login's", () => {
     expect(usagePollCredentialsFile({ id: "claw3", oauthTokenRef: { source: "exec", provider: "vault", id: "op://Vault/Item/field" } })).toMatchObject({
-      reason: expect.stringContaining("token-based"),
+      reason: expect.stringContaining("setup-token login"),
     });
     expect(usagePollCredentialsFile({ id: "claw3", configDir: "/tmp/x", oauthTokenFile: "/tmp/t" })).toMatchObject({
-      reason: expect.stringContaining("token-based"),
+      reason: expect.stringContaining("setup-token login"),
     });
     expect(usagePollCredentialsFile({ id: "claw1", native: true })).toEqual({ file: join(home.dir, ".claude", ".credentials.json") });
     expect(usagePollCredentialsFile({ id: "claw2", configDir: claw2Dir })).toEqual({ file: join(claw2Dir, ".credentials.json") });
@@ -316,7 +316,7 @@ describe("what the poll must not do", () => {
       logger: { info: (m) => info.push(m), warn: () => {} },
     });
     expect(r).toEqual({ active: true, members: ["claw1"] });
-    expect(info.at(-1)).toContain("not polled: claw3 (token-based login");
+    expect(info.at(-1)).toContain("not polled: claw3 (setup-token login");
   });
 
   test("a tick that cannot read an account leaves that account's live alert — and the pool-wide one — exactly as they were", async () => {

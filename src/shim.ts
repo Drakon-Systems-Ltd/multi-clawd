@@ -46,11 +46,18 @@ import { parseModelLimitError, recordModelLimit } from "./shim-core.js";
 import { canonicalModelId } from "./models.js";
 import {
   buildRetryEnv,
-  chooseRetryAccount,
+  chooseLaunchableRetryAccount,
+  materializeRetryAccount,
   parseRetryRoster,
   retryArming,
   RETRY_ROSTER_ENV,
 } from "./retry-plan.js";
+import {
+  CLAUDE_ARGV0_ENV,
+  CLAUDE_BIN_ENV,
+  parseClaudeBinOverride,
+  resolveExecutable,
+} from "./claude-command.js";
 import {
   effectiveConfigDir,
   handoverForLaunch,
@@ -60,20 +67,43 @@ import {
   snapshotResumeTranscript,
 } from "./session-handover.js";
 
-function resolveClaudeCommand(): { command: string; prependArgs: string[] } {
-  const override = process.env.MULTI_CLAWD_CLAUDE_BIN;
-  if (override) {
-    try {
-      const parsed = JSON.parse(override);
-      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((p) => typeof p === "string")) {
-        return { command: parsed[0], prependArgs: parsed.slice(1) };
-      }
-    } catch {
-      // not JSON — treat as a plain binary path
-    }
-    return { command: override, prependArgs: [] };
+/**
+ * The one claude executable this launch may exec. When the plugin's verified
+ * transport launches us it names that executable in MULTI_CLAWD_CLAUDE_BIN,
+ * and the shim must run exactly it or nothing: falling back to whatever
+ * `claude` is on PATH would run a different binary under a verified name. So
+ * a set-but-unusable value fails the launch (exit 127) instead. Unset keeps
+ * the original behaviour, `claude` from PATH.
+ */
+function resolveClaudeCommand(): { command: string; prependArgs: string[]; argv0?: string } {
+  const raw = process.env[CLAUDE_BIN_ENV];
+  const argv0 = process.env[CLAUDE_ARGV0_ENV] || undefined;
+  // Ours alone: neither claude nor any tool it starts needs to see them.
+  delete process.env[CLAUDE_BIN_ENV];
+  delete process.env[CLAUDE_ARGV0_ENV];
+  const override = parseClaudeBinOverride(raw);
+  if (!override) {
+    if (argv0) refuseLaunch(`${CLAUDE_ARGV0_ENV} is set without ${CLAUDE_BIN_ENV}`);
+    return { command: "claude", prependArgs: [] };
   }
-  return { command: "claude", prependArgs: [] };
+  const requested = override.kind === "argv" ? override.command : override.value;
+  const command = resolveExecutable(requested, process.env.PATH);
+  if (!command) {
+    refuseLaunch(`${CLAUDE_BIN_ENV}=${requested} is not an executable file`);
+  }
+  if (argv0 && override.kind === "argv" && override.prependArgs.length > 0) {
+    refuseLaunch(`${CLAUDE_ARGV0_ENV} cannot apply to an interpreter-form ${CLAUDE_BIN_ENV}`);
+  }
+  return {
+    command,
+    prependArgs: override.kind === "argv" ? override.prependArgs : [],
+    ...(argv0 ? { argv0 } : {}),
+  };
+}
+
+function refuseLaunch(why: string): never {
+  process.stderr.write(`[multi-clawd shim] refusing to launch claude: ${why}\n`);
+  process.exit(127);
 }
 
 // Mutable: an in-turn retry (#19) moves this process onto a sibling account,
@@ -157,7 +187,7 @@ function persistState(): void {
   }
 }
 
-const { command, prependArgs } = resolveClaudeCommand();
+const { command, prependArgs, argv0: claudeArgv0 } = resolveClaudeCommand();
 // Tier degradation (v0.3.5): the pool's prepareExecution decides, we enforce.
 // The OpenClaw runner appends `--model <requested>` after any hook-provided
 // argv (last-wins), so the swap must happen here, in the process we own.
@@ -183,6 +213,10 @@ if (modelOverride) {
 // Decided before a byte exists, because whether the preamble must be held back
 // is a property of the launch, not of what the stream turns out to contain.
 const retryRoster = parseRetryRoster(process.env[RETRY_ROSTER_ENV]);
+// The roster is the shim's business only. The claude child — and every tool
+// process it starts — gets no view of which siblings exist or where their
+// credentials live (retry-plan.ts #2).
+delete process.env[RETRY_ROSTER_ENV];
 // #24: a resumed launch can be retried only if its conversation can follow it.
 // Snapshot the transcript NOW — after the ordinary handover, before the child
 // exists — because the child writes to it before it is ever refused. Pool
@@ -203,6 +237,7 @@ if (!retryArmed && retryRoster.length > 0 && arming.reason) {
 let child = spawn(command, childArgs, {
   stdio: ["pipe", "pipe", "inherit"],
   env: process.env,
+  ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
 });
 // stdin must be REPLAYABLE while a retry is possible: the prompt was written
 // to the first child and the second one needs the same bytes. Capped, because
@@ -400,11 +435,18 @@ function readSiblingState(file: string) {
 function attemptRetry(): boolean {
   if (!retryArmed || retryUsed) return false;
   const model = effectiveModelId();
-  const target = chooseRetryAccount({
+  const target = chooseLaunchableRetryAccount({
     roster: retryRoster,
     readState: readSiblingState,
     modelId: model,
     nowMs: Date.now(),
+    // A token-file sibling's token is read here, at the moment of the retry,
+    // and goes only into the retried child's env (retry-plan.ts #2).
+    materialize: (account) => materializeRetryAccount(account, (path) => readFileSync(path, "utf8")),
+    onSkip: (id, reason) =>
+      process.stderr.write(
+        `[multi-clawd shim] not retrying onto ${id}: its declared credential did not resolve (${reason})\n`,
+      ),
   });
   if (!target) {
     process.stderr.write(
@@ -466,6 +508,7 @@ function attemptRetry(): boolean {
   child = spawn(command, childArgs, {
     stdio: ["pipe", "pipe", "inherit"],
     env: buildRetryEnv(process.env, target),
+    ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
   });
   attachChildHandlers();
   for (const chunk of stdinReplay) child.stdin.write(chunk);
@@ -543,8 +586,8 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
  * A clean exit with no auth failure in the stream proves this account's login
  * works right now, so any recorded credential failure is stale and must be
  * cleared — otherwise an account that has since been re-authenticated stays
- * benched until CREDENTIAL_FAILED_TTL_MS runs out (#8, "clear on a successful
- * execution"). Conditional on a failure actually being on disk so the common
+ * benched, and then reported unproven, until something else clears it (#8,
+ * "clear on a successful execution"). Conditional on a failure actually being on disk so the common
  * path adds no write at all.
  */
 function clearRecordedAuthFailureOnSuccess(): void {
@@ -557,7 +600,9 @@ function clearRecordedAuthFailureOnSuccess(): void {
       `[multi-clawd shim] auth recovered for ${accountId} — credential exclusion cleared\n`,
     );
   } catch {
-    // clearing is best-effort; the TTL is the backstop
+    // Best-effort. A failed clear leaves the record standing (it no longer
+    // expires), and while a proven sibling serves this account is not picked
+    // again; `multi-clawd login <id>` or `doctor --probe` clears it then.
   }
 }
 

@@ -4,6 +4,187 @@ All notable changes to multi-clawd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); the project adopts semantic
 versioning from v1.0.
 
+## [Unreleased]
+
+### Fixed
+- **Documented and pinned the availability window after a login is lost.**
+  When an account's stored login goes missing or unreadable, its cached
+  verdict keeps it (and a pool it alone keeps signed in) available until the
+  30s window from its last assessment ends. The first check after that starts
+  a background re-check, and the account stays available only while it is
+  pending. A token-backed login is refused at access-token expiry minus 60s
+  (equality refuses), even inside the first window; a proof-only login,
+  whose stored token can already be expired, is refused at the earlier of
+  assessment + two windows or the 24h proof. A recorded CLI failure still
+  removes it at once. Tests and docs only; no behaviour change. (#52)
+
+## [2.1.3] - 2026-10-18
+
+### Fixed
+- Source installs now work on npm 10 (Node 22) because the repo ships a
+  `package-lock.json`. (#48)
+
+## [2.1.2] - 2026-10-14
+
+### Fixed
+- **CLI-login availability at cache boundaries.** A fresh login is seen as
+  soon as the cached token reaches its expiry bound inside the 30s window.
+  A login proven by a recent successful turn no longer flickers to
+  "unavailable" at each 30s boundary while its credential is refreshed: it
+  can be served for at most one extra window, never past the 24h proof.
+  The credential file is never read inside the synchronous host hook. (#41)
+- **Clarified the 2.1.1 credential-failure veto.** Any current credential
+  failure record vetoes the marker, including `credential_unverified` when a
+  failure is older than 15 minutes and no successful turn has cleared it:
+  the login stays dead until proven. (#41)
+
+## [2.1.1] - 2026-10-13
+
+### Fixed
+- **OpenClaw 2026.10: pool and account models shown as unavailable
+  ("missing-auth").** OpenClaw 2026.10 derives each provider's model
+  availability from the synthetic credential the provider returns, and a
+  `native` / `configDir` account had no setup token to return — so the Control
+  UI's Models picker greyed out every `clawd/*` and `claw<N>/*` row and
+  substituted another model for the configured primary, while turns kept
+  working. CLI-login accounts now prove their login the way the login-health
+  probe judges it (an unexpired stored access token, or a successful turn
+  since it expired — never mere presence) and answer with OpenClaw's own
+  non-secret `oauth:<provider>` marker; the pool reports signed-in when any
+  member does, always with its own marker (a member's real token never rides
+  out under the pool's id); a dead login still reports nothing, so
+  "missing-auth" stays honest — including a login the Claude CLI has rejected
+  on a real turn (`credential_failed`), whatever the stored credential looks
+  like at rest. Per-account token accounts are unchanged. The marker is
+  refused in `prepareRuntimeAuth`, so the direct API transport (`openclaw
+  infer model run --model clawd/...`) keeps failing closed for CLI-login
+  accounts and for the pool instead of putting a placeholder on the wire or
+  riding one member's token around the pool. The host's synchronous hook is
+  served from a verdict cache only; the credential source (on macOS the
+  Keychain, via `security`) is read asynchronously — warmed at registration,
+  refreshed in the background when a verdict is older than 30s, fed by the
+  login-health probe — so catalog discovery never blocks on it. No token
+  value leaves the resolver. Ships as 2.1.1. (#39)
+
+## [2.1.0] - 2026-10-13
+
+> **Requires OpenClaw 2026.8.1 or later** (peer and compat minimums raised). Older hosts keep the legacy node + shim launch automatically.
+
+### Fixed
+- **OpenClaw 2026.10.2 "Ask OpenClaw" / setup authority.** OpenClaw now verifies
+  the CLI backend's executable before minting setup authority, and rejected
+  multi-clawd's `node` + shim command ("executable cannot be bound to one
+  durable absolute owner"). The backend now registers the real `claude`
+  executable with the same `runtimeArtifact` as OpenClaw's built-in
+  `claude-cli` backend, so the host verifies the program that actually runs.
+  Nothing of multi-clawd's, and never `node`, is added to that authority.
+
+### Changed
+- **Agent turns run through an `execute` transport** that launches the shim
+  pinned to the verified claude realpath (`MULTI_CLAWD_CLAUDE_BIN`), keeping
+  mid-turn account failover, rate-limit capture, resume handover and model
+  degrade. The transport refuses any other binary, interpreter prefix or
+  foreign `argv0`, and follows the host's live-session lifecycle.
+- **Side-question turns** (setup probe, `/btw`) are launched and verified by
+  OpenClaw directly with the pool-chosen healthy account; they have no in-turn
+  failover, and a wholly limited pool is logged rather than degraded.
+- **Launch mode is chosen by probing host capabilities**, not a version string;
+  the chosen mode and reason are logged at startup. If `claude` cannot be
+  resolved, on Windows, or on hosts without execute-transport support, the
+  previous node + shim launch is kept unchanged.
+- Host live-session capacity refusals are never attributed to an account.
+
+### Security
+- README documents that verified authority is basename-only for a native
+  install (parity with the built-in backend) and that `MULTI_CLAWD_CLAUDE_BIN`
+  is operator-trusted; the shim exits 127 rather than falling back to PATH if
+  it is set but not executable.
+
+## [2.0.0] - 2026-10-10
+
+> **Breaking:** a pool account that declares a setup-token (`oauthTokenFile` / `oauthTokenRef`) whose token does not resolve is now refused, even when it also has a `configDir` — it no longer falls back to that directory's own login. Remove the token source from such an account if you relied on the fallback.
+
+### Fixed
+- **Login health now needs proof, not presence.** The credential-source check
+  (login probe and `doctor`) used to pass any account whose Keychain item
+  merely EXISTED, so an item holding an expired access token whose refresh
+  token had already been rotated away read "credential source looks alive"
+  while every real turn failed "OAuth session expired and could not be
+  refreshed". The stored `claudeAiOauth` credential is now judged on its
+  expiry: `ok` only with an unexpired access token, or an expired one followed
+  by a successful turn (within 24h) proving the refresh works; otherwise
+  `unverified` — reported as a warning, never as alive. A stored credential
+  with no refresh token and an expired access token is `broken`; one that
+  records no expiry is `unverified`. Only the CLI's own evidence counts as
+  proof: the usage poll's windows do not, because the poll authenticates with
+  the credentials file, which can be a different copy. A Keychain item that
+  exists but cannot be read (locked, access refused, timed out) is reported as
+  not checked, never as missing. The Keychain
+  is read under an explicit account (`-a`, the Claude CLI's own user-name
+  rule), never by service alone, so a stray same-service item cannot stand in
+  for the CLI's copy; macOS falls back to `.credentials.json` exactly when the
+  CLI does. Token values are reduced to expiry metadata where they are read and
+  never logged or printed.
+- **A recorded auth failure no longer expires into "healthy".** Past its
+  15-minute hard exclusion a failure used to stop binding, and the account
+  read `ok` again with no successful turn in between. It now reads
+  `credential_unverified` until observed success (a successful turn through
+  the shim, `multi-clawd login <id>`, or `doctor --probe`) clears it: never
+  chosen over a proven member, re-tested only when no proven member can serve
+  (so an out-of-band fix is still found), and the pool's credential alert
+  stays raised under the same key until the verdict ends. Failed credential
+  records are also no longer pruned by the 14-day state retention.
+- **`doctor` ignores an inherited `CLAUDE_CONFIG_DIR` for the native
+  account.** Run inside an agent session served by the pool, doctor inherited
+  the serving account's config dir and resolved the native login from it,
+  reporting two distinct logins as "the SAME Claude login". A native child
+  always runs with the variable cleared, so doctor now resolves native from
+  the real home and prints an info line saying the value was ignored.
+
+### Added
+- **`doctor`: credential split-store check.** Per account, warns when more
+  than one copy of the same login's OAuth credential exists — several Keychain
+  items for the account's service under different `acct` values, or the
+  Keychain item plus a plaintext `.credentials.json`. Refresh tokens rotate,
+  so once the copies diverge only the one refreshed last can still refresh,
+  and a tool reading another sees a login that is not the one in use. Each
+  copy is listed with its location, account label, expiry and which one the
+  Claude CLI reads. The remedy proves the CLI's copy first, moves a stray file
+  aside (reversible) only after a passing probe, deletes a stray Keychain item
+  only after a fresh login, never touches the CLI's own copy, and offers no
+  cleanup at all while that copy cannot be read. The Keychain is listed
+  attributes-only (`security dump-keychain` without `-d`).
+
+### Setup-token pool accounts at parity
+
+- **In-turn retry onto setup-token siblings.** The retry roster used to drop
+  every `oauthTokenFile` / `oauthTokenRef` account, so in a pool made only of
+  setup-token accounts a mid-launch limit fell straight through to the host's
+  chain. Token-file accounts are now offered to the shim by the PATH of their
+  token file; the shim reads it only when it actually retries, and the value
+  goes into that one child. The original protection holds: no token value is
+  ever distributed through the roster (a value handed in anyway is dropped),
+  and the shim now removes the roster from the claude child's env entirely. `oauthTokenRef` accounts
+  stay next-launch rotation only — a reference has no file the shim could
+  read. A sibling whose token does not resolve is skipped, never launched.
+- **Breaking: fail closed even with a `configDir`.** A declared token that resolves
+  empty no longer falls back to the account's `configDir` login; the account
+  is refused, the pool launches on a sibling, and a
+  `credential-unresolved:<id>` alert says which account and why (cleared on
+  its next good launch). If you relied on a token account quietly running on
+  its `configDir` login when the token was missing, remove the token source
+  from that account (it is then a plain `configDir` account).
+- **Token files must hold only the token.** `claude setup-token > file`
+  captures the whole screen around the token. Such a file is now refused with
+  a precise message (never mined for the token: the screen may wrap it), in
+  the launch path, the login probe and `doctor`. README setup no longer tells
+  you to redirect.
+- **Usage polling and setup-tokens, documented.** Setup-tokens carry only
+  `user:inference`; the usage endpoint needs `user:profile` and answers 403
+  (upstream anthropics/claude-code#11985). Token accounts remain unpolled;
+  `doctor`, `usage` and the log now give that reason, and rotation from
+  stream telemetry is covered by tests for token pools.
+
 ## [1.10.1] - 2026-10-04
 
 ### Fixed

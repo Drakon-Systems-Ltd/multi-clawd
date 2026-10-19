@@ -312,10 +312,23 @@ is abandoned immediately. Sticky state persists at
   operator via the normal channel (e.g. Telegram) instead of dying as
   journal lines. Errors persist 6h, info 30min, deduped by key.
 - A 15-min login-health probe checks each account's credential *source*
-  (file shape / macOS keychain presence / credentials.json access token /
-  ref resolution) without spending quota, and raises an alert on the
-  ok→broken transition — registration success no longer masks dead logins
-  (a native silent-login-death class).
+  (token-file shape / stored OAuth credential / ref resolution) without
+  spending quota, and raises an alert on the ok→broken transition —
+  registration success no longer masks dead logins (a native
+  silent-login-death class).
+- **Proof, not presence.** A stored OAuth credential (macOS Keychain item,
+  else `.credentials.json`, in the CLI's own order) is `ok` only when its
+  access token is unexpired, or expired but followed by a successful turn
+  (a shim telemetry window, or an explicit ok record, within 24h) proving the
+  refresh works — the shim's evidence only, never the usage poll's, which
+  rides the credentials file and so may be a different copy. Expired and
+  unproven is `unverified`: one info line per
+  transition, no alert, selection-neutral — it is routine for an idle account
+  and also exactly what a dead refresh token looks like at rest, so it is
+  reported as neither alive nor dead. The Keychain is always read under an
+  explicit `acct` (the CLI's `$USER` → OS user → `claude-code-user` rule):
+  `find-generic-password -s` alone returns whichever same-service item it
+  finds first. Token strings are reduced to metadata where they are read.
 - **Ref-backed probe failure classification (v0.3.x).** A `oauthTokenRef`
   probe no longer declares a login dead on the first empty resolve: a
   transient provider outage (op timeout, ENETUNREACH — `resolveDetailed`
@@ -381,7 +394,11 @@ tested (`src/watchdog-core.ts`).
 - `npm run doctor` (`scripts/doctor.mjs`): one command that says whether a
   box is actually ready — manifest/config key agreement (prints the exact
   strip plan for the --force trap; `--preflight`), dist freshness, claude
-  CLI presence, per-account credential health (values never printed),
+  CLI presence, per-account credential health judged on expiry and proof
+  (values never printed), a credential split-store check (more than one copy
+  of a login's OAuth credential — rotating refresh tokens let the copies
+  diverge silently, leaving all but one unable to refresh), native identity
+  resolved with any inherited `CLAUDE_CONFIG_DIR` ignored,
   telemetry state ages, pool membership + sticky, watchdog presence, and an
   optional `--probe` end-to-end turn.
 - `npm install` now triggers `prepare` → build, killing the
@@ -534,13 +551,19 @@ dimension:
   exhausted account still authenticates, so it can serve a degraded tier or
   produce a real quota error; a rejected one can do neither. When nothing is
   usable, selection therefore prefers a member that can at least authenticate.
-- **Bounded at 15 minutes.** Long enough that one dead login cannot consume a
-  run's fallback rungs, short enough that a login fixed out-of-band re-probes
-  on roughly the login-probe cadence rather than staying benched. Explicit
-  clears end it immediately: a successful turn through the shim, or
-  `multi-clawd login <account>`. The periodic login probe is deliberately NOT
-  a clear — it checks credential *sources*, and a present credential being a
-  rejected session is the whole failure mode.
+- **Hard exclusion for 15 minutes; cleared only by observed success.** Long
+  enough that one dead login cannot consume a run's fallback rungs. Past it
+  the record does NOT expire into health (it once did, and the account read
+  `ok` with no successful turn in between): it reads `credential_unverified`,
+  which is never chosen over a proven member and is used only as a re-test
+  when nothing proven can serve, so a login fixed out-of-band is still found
+  — and one still dead re-records and is benched again. The pool's
+  `credential:<pool>:<id>` alert stays raised under the same key while either
+  verdict holds. A failed record is exempt from the 14-day state pruning.
+  Clears: a successful turn through the shim, `multi-clawd login <account>`,
+  or `doctor --probe` (a real turn). The periodic login probe is deliberately
+  NOT a clear — it checks credential *sources*, and a present credential
+  being a rejected session is the whole failure mode.
 - **All members broken is a hard error, once.** There is no account to rotate
   to and no tier to degrade into, so the pool fails the launch with a single
   error naming re-authentication instead of relaunching the same rejected

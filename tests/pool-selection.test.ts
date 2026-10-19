@@ -23,7 +23,7 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.dir, default: { ...actual, homedir: () => home.dir } };
 });
 
-const { registerPoolBackend, healthStateFile } = await import("../src/index.js");
+const { registerPoolBackend, healthStateFile, pendingOperatorAlerts } = await import("../src/index.js");
 
 const NOW_S = () => Math.floor(Date.now() / 1000);
 
@@ -207,17 +207,66 @@ describe("credential-health failover wiring (#8)", () => {
     expect(await chosenAccount("clawd/claude-fable-5", { minDwellMs: 0 })).toContain("claw1");
   });
 
-  test("the exclusion ages out on its own, so a login fixed out-of-band recovers", async () => {
-    // 16 minutes old: past CREDENTIAL_FAILED_TTL_MS. Nothing cleared it
-    // explicitly, so the account is re-tried (and if still dead, the very next
-    // launch records it again).
+  test("past the exclusion a failure is unproven, never healthy: a proven sibling keeps serving", async () => {
+    // 16 minutes old: past CREDENTIAL_FAILED_TTL_MS, and nothing has cleared
+    // it. It used to expire into health and win home again with no successful
+    // turn in between, so every 15 minutes a real turn landed on a dead login.
     writeState(
       "claw1",
       { five_hour: { status: "allowed", seenAt: Date.now() } },
       { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() - 16 * 60 * 1000 },
     );
     writeAllowedQuota("claw2");
-    expect(await chosenAccount()).toContain("claw1");
+    expect(await chosenAccount()).toContain("claw2");
+  });
+
+  test("an unproven login is re-tested when no proven member can serve, so an out-of-band fix is found", async () => {
+    const { prepare, logs } = registerPool();
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() - 16 * 60 * 1000 },
+    );
+    writeState("claw2", {
+      five_hour: { status: "rejected", resetsAt: NOW_S() + 3600, seenAt: Date.now() },
+    });
+    const { env } = await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
+    expect(env.MULTI_CLAWD_ACCOUNT_ID).toBe("claw1");
+    expect(logs.info.join("\n")).toMatch(/re-test a login last rejected/);
+  });
+
+  test("the credential alert outlives the TTL and ends only on observed success", async () => {
+    // Inside the TTL: excluded.
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: Date.now() - 60 * 1000 },
+    );
+    writeAllowedQuota("claw2");
+    await chosenAccount();
+    expect(pendingOperatorAlerts(Date.now()) ?? "").toMatch(/account "claw1" is excluded/);
+
+    // Crossing the TTL keeps the same key raised — one alert, now "unproven".
+    const failedAt = Date.now() - 16 * 60 * 1000; // past the hard exclusion
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "failed", reason: SESSION_EXPIRED, seenAt: failedAt },
+    );
+    writeAllowedQuota("claw2");
+    await chosenAccount();
+    const alerts = pendingOperatorAlerts(Date.now()) ?? "";
+    expect(alerts).toMatch(/account "claw1" is unproven/);
+    expect(alerts).not.toMatch(/account "claw1" is excluded/);
+
+    // A successful turn through the shim writes an ok record: the alert ends.
+    writeState(
+      "claw1",
+      { five_hour: { status: "allowed", seenAt: Date.now() } },
+      { status: "ok", seenAt: Date.now() },
+    );
+    await chosenAccount();
+    expect(pendingOperatorAlerts(Date.now()) ?? "").not.toMatch(/account "claw1" is (unproven|excluded)/);
   });
 
   test("every login dead: one hard auth error naming re-authentication, not a launch", async () => {

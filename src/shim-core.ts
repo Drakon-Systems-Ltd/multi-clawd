@@ -298,12 +298,19 @@ export function mergeHealthStates(
   }
   // Credential record: newer `seenAt` wins, exactly like the windows — so a
   // clear ("ok") written by a later successful launch beats the stale "failed"
-  // still on disk, and vice versa. Pruned by the same retention horizon.
+  // still on disk, and vice versa. An "ok" record is pruned by the same
+  // retention horizon; a "failed" one never is, because dropping it would turn
+  // an unresolved auth failure back into a clean bill of health with no
+  // success in between. Only observed success ends it.
   let credential = disk.credential;
   if (live.credential && (!credential || live.credential.seenAt >= credential.seenAt)) {
     credential = live.credential;
   }
-  if (now !== undefined && credential && now - credential.seenAt > pruneAfterMs) {
+  if (
+    now !== undefined &&
+    credential?.status === "ok" &&
+    now - credential.seenAt > pruneAfterMs
+  ) {
     credential = undefined;
   }
   const updatedAt = Math.max(disk.updatedAt ?? 0, live.updatedAt ?? 0);
@@ -628,8 +635,8 @@ export function parseAuthFailure(line: string): { reason: string } | undefined {
 /**
  * Record a definitive runtime auth failure against this account, so the NEXT
  * pooled launch excludes it instead of re-selecting the same dead login on
- * every fallback rung. The reader (health.ts) bounds this with
- * CREDENTIAL_FAILED_TTL_MS.
+ * every fallback rung. The reader (health.ts) bounds the hard exclusion with
+ * CREDENTIAL_FAILED_TTL_MS; the record itself stands until observed success.
  */
 export function recordCredentialFailure(
   state: AccountHealthState,

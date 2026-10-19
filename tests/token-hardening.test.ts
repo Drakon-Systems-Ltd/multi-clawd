@@ -133,14 +133,41 @@ describe("child env fails closed on an unresolved credential", () => {
     ).toThrow(/claw4/);
   });
 
-  test("a declared configDir is that account's own login, so it stays a valid fallback", () => {
+  test("a declared configDir is NOT a fallback for a declared token — still refused", () => {
+    // The dir may hold no login at all, or an older login of another account:
+    // the operator declared the token, so the token is the credential.
+    expect(() =>
+      buildAccountChildEnv(
+        { id: "claw2", oauthTokenRef: REF, configDir: "/isolated/claw2" },
+        undefined,
+        "/state/claw2.json",
+      ),
+    ).toThrow(/claw2.*declares a token source but none resolved/);
+    expect(() =>
+      buildAccountChildEnv(
+        { id: "claw2", oauthTokenFile: "~/.t", configDir: "/isolated/claw2" },
+        "  \n ",
+        "/state/claw2.json",
+      ),
+    ).toThrow(/claw2/);
+  });
+
+  test("a token account with a configDir gets both when the token resolves", () => {
     const env = buildAccountChildEnv(
-      { id: "claw2", oauthTokenRef: REF, configDir: "/isolated/claw2" },
-      undefined,
+      { id: "claw2", oauthTokenFile: "~/.t", configDir: "/isolated/claw2" },
+      SECRET,
       "/state/claw2.json",
     );
     expect(env.CLAUDE_CONFIG_DIR).toBe("/isolated/claw2");
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(SECRET);
+  });
+
+  test("the refusal message carries no token material", () => {
+    try {
+      buildAccountChildEnv({ id: "claw2", oauthTokenFile: "~/.t", configDir: "/d" }, " ", "/s");
+    } catch (err) {
+      expect(String(err)).not.toContain("sk-ant");
+    }
   });
 
   test("native accounts are unaffected — they are meant to carry no credential", () => {

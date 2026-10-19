@@ -23,12 +23,21 @@
  *      over (session-handover.ts), as it stood before the refused attempt
  *      wrote to it, so a resumed launch is armed when that snapshot exists and
  *      is refused exactly as before when it does not (#24).
- *   2. SECRET-FREE SIBLINGS ONLY. Retrying onto a token-bearing account would
- *      mean shipping that account's OAuth token into every child's environment,
- *      so one compromised child sees the whole pool instead of its own login.
- *      A `native` or `configDir` account needs no secret to switch to — just a
- *      path — so those retry and token accounts keep today's next-launch
- *      rotation.
+ *   2. NO SECRET VALUES IN THE ROSTER. The roster rides in every pooled
+ *      launch's environment (the shim's), so a sibling's token value placed
+ *      there would put every account's credential in every launch. The roster therefore carries
+ *      only what a same-user process could already find in the plugin config:
+ *      a config-dir PATH, or a token-file PATH — and the shim removes it from
+ *      the env before starting the claude child. (Paths are not isolation: a
+ *      same-user process can read a sibling's files. The guarantee is that no
+ *      credential VALUE is distributed through the roster.) The shim reads a sibling's
+ *      token file only at the moment it retries onto that sibling, and the
+ *      value goes into that one child's env and nowhere else. A secret-
+ *      reference account (`oauthTokenRef`) has no path to hand over — its
+ *      value exists only after the gateway's secret provider resolves it — so
+ *      it keeps next-launch rotation. A sibling whose token file does not
+ *      yield exactly one token is skipped, never launched on another login
+ *      (the 1.7.3 fail-closed rule, applied to the retry).
  *   3. ONE RETRY. The second account's own limit is a real answer about the
  *      pool, not something to keep spending turns on.
  */
@@ -38,6 +47,7 @@ import {
   type HealthOptions,
   type PoolVerdict,
 } from "./health.js";
+import { parseSetupTokenFile } from "./account-env.js";
 import { resumeSessionId } from "./session-handover.js";
 import type { AccountHealthState } from "./shim-core.js";
 
@@ -48,7 +58,15 @@ export interface RetryAccount {
   stateFile: string;
   /** Credential env for the account. Secret-free by construction (see #2 above). */
   env: Record<string, string>;
+  /**
+   * Absolute path of the account's setup-token file, for a token-file account.
+   * Read by the shim at retry time only (see #2 above) — never the value.
+   */
+  tokenFile?: string;
 }
+
+/** A roster entry made launchable: its token, when it has one, read and applied. */
+export type MaterializedRetry = { account: RetryAccount } | { error: string };
 
 export const RETRY_ROSTER_ENV = "MULTI_CLAWD_RETRY_ACCOUNTS";
 
@@ -59,6 +77,9 @@ export const RETRY_ROSTER_ENV = "MULTI_CLAWD_RETRY_ACCOUNTS";
  * identity and spend the wrong subscription under the sibling's name.
  */
 const CREDENTIAL_ENV_KEYS = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+/** The only env a roster entry may carry: a path, never a secret. */
+const ROSTER_ENV_KEYS = ["CLAUDE_CONFIG_DIR"];
 
 /** Tolerant parse of the roster env var — a malformed roster disables retry, never breaks a turn. */
 export function parseRetryRoster(raw: string | undefined): RetryAccount[] {
@@ -73,16 +94,19 @@ export function parseRetryRoster(raw: string | undefined): RetryAccount[] {
   const out: RetryAccount[] = [];
   for (const entry of parsed) {
     if (!entry || typeof entry !== "object") continue;
-    const e = entry as { id?: unknown; stateFile?: unknown; env?: unknown };
+    const e = entry as { id?: unknown; stateFile?: unknown; env?: unknown; tokenFile?: unknown };
     if (typeof e.id !== "string" || !e.id) continue;
     if (typeof e.stateFile !== "string" || !e.stateFile) continue;
     const env: Record<string, string> = {};
     if (e.env && typeof e.env === "object") {
       for (const [k, v] of Object.entries(e.env as Record<string, unknown>)) {
-        if (typeof v === "string") env[k] = v;
+        // Allow-list: a roster entry may only name a config dir. A token VALUE
+        // (or any other variable) handed over anyway is dropped (see #2 above).
+        if (typeof v === "string" && ROSTER_ENV_KEYS.includes(k)) env[k] = v;
       }
     }
-    out.push({ id: e.id, stateFile: e.stateFile, env });
+    const tokenFile = typeof e.tokenFile === "string" && e.tokenFile ? e.tokenFile : undefined;
+    out.push({ id: e.id, stateFile: e.stateFile, env, ...(tokenFile ? { tokenFile } : {}) });
   }
   return out;
 }
@@ -118,7 +142,7 @@ export function retryArming(
   } = {},
 ): RetryArming {
   if (roster.length === 0) {
-    return { armed: false, reason: "no secret-free sibling account to retry onto" };
+    return { armed: false, reason: "no sibling account the shim can retry onto" };
   }
   if (isResumeLaunch(argv) && !opts.resumeReady) {
     return {
@@ -193,4 +217,55 @@ export function buildRetryEnv(
   env.MULTI_CLAWD_STATE_FILE = account.stateFile;
   env[RETRY_ROSTER_ENV] = "";
   return env;
+}
+
+/**
+ * Read a token-file sibling's token, at retry time, into its env. Accounts
+ * without a token file pass through unchanged. Failure is a skip for THIS
+ * sibling: a declared token that does not resolve must not launch on whatever
+ * login its config dir (or the default dir) happens to hold.
+ */
+export function materializeRetryAccount(
+  account: RetryAccount,
+  readFile: (path: string) => string,
+): MaterializedRetry {
+  if (!account.tokenFile) return { account };
+  let raw: string;
+  try {
+    raw = readFile(account.tokenFile);
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    return { error: `token file unreadable${typeof code === "string" && /^E[A-Z]+$/.test(code) ? ` (${code})` : ""}` };
+  }
+  const read = parseSetupTokenFile(raw, "token file");
+  if ("error" in read) return { error: read.error };
+  return {
+    account: { ...account, env: { ...account.env, CLAUDE_CODE_OAUTH_TOKEN: read.token } },
+  };
+}
+
+/**
+ * `chooseRetryAccount`, then make the pick launchable; a sibling whose
+ * credential cannot be materialized is dropped and the choice re-run over the
+ * rest. Each skip is reported (account id and reason only — never content).
+ */
+export function chooseLaunchableRetryAccount(params: {
+  roster: RetryAccount[];
+  readState: (stateFile: string) => AccountHealthState | undefined;
+  modelId?: string;
+  nowMs: number;
+  options?: HealthOptions;
+  materialize: (account: RetryAccount) => MaterializedRetry;
+  onSkip?: (accountId: string, reason: string) => void;
+}): RetryAccount | undefined {
+  let remaining = params.roster;
+  while (remaining.length > 0) {
+    const pick = chooseRetryAccount({ ...params, roster: remaining });
+    if (!pick) return undefined;
+    const ready = params.materialize(pick);
+    if ("account" in ready) return ready.account;
+    params.onSkip?.(pick.id, ready.error);
+    remaining = remaining.filter((a) => a !== pick);
+  }
+  return undefined;
 }

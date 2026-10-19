@@ -23,6 +23,7 @@ export type HealthVerdict =
   | "near_limit"
   | "exhausted"
   | "credential_failed"
+  | "credential_unverified"
   | "no_data";
 
 export interface AccountHealth {
@@ -70,14 +71,18 @@ export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
 /**
  * How long a runtime credential failure (session_expired / invalid login,
  * captured reactively by the shim — see parseAuthFailure) keeps an account out
- * of pool selection. The bound matters in both directions: long enough that a
- * single dead login cannot consume every clawd/* fallback rung of a run (the
- * #8 trace burned four rungs in seconds), short enough that a login fixed
- * OUT-OF-BAND (`claude auth login` run directly, a token rotated behind a
- * secret ref) is re-probed within the same cadence as the 15-minute login
- * probe instead of staying benched indefinitely. Explicit clears — a
- * successful launch through the shim, or `multi-clawd login <id>` — end the
- * exclusion immediately; this TTL is only the backstop.
+ * of pool selection outright (`credential_failed`). Long enough that a single
+ * dead login cannot consume every clawd/* fallback rung of a run (the #8 trace
+ * burned four rungs in seconds).
+ *
+ * Past this bound the failure does NOT expire into health. It used to: the
+ * record simply stopped binding, the account read `ok` again with no
+ * successful turn in between, and every surface reported a healthy login that
+ * the very next real turn found dead. The record now stands until a
+ * successful turn through the shim (or `multi-clawd login <id>`) clears it;
+ * past the TTL it reads `credential_unverified`, which selection uses only as
+ * a re-test when no proven account can serve — so a login fixed out-of-band
+ * is still found again, but never by assuming it was.
  */
 export const CREDENTIAL_FAILED_TTL_MS = 15 * 60 * 1000;
 
@@ -280,7 +285,7 @@ function windowAppliesToModel(
 
 /**
  * The credential verdict for an account, or undefined when its login is not
- * known-broken (never observed, explicitly cleared, or aged past the TTL).
+ * known-broken (never observed, or explicitly cleared by observed success).
  *
  * Split out so the pool's "is EVERY member credential-broken?" check can ask
  * the same question the classifier asks, rather than re-deriving it from a
@@ -292,17 +297,55 @@ export function credentialFailureFor(
 ): AccountHealth | undefined {
   const credential = state?.credential;
   if (!credential || credential.status !== "failed") return undefined;
-  // Positive evidence only, and only while it is fresh: past the TTL the
-  // failure stops binding so a fixed login is retried (and, if it is still
-  // dead, the very next launch re-records it).
-  if (nowMs - credential.seenAt > CREDENTIAL_FAILED_TTL_MS) return undefined;
+  const age = Math.max(0, nowMs - credential.seenAt);
+  const ageText = age < 90 * 60000 ? `${Math.round(age / 60000)}m` : `${Math.round(age / 3600000)}h`;
+  const detail = credential.reason ? `: ${credential.reason}` : "";
+  if (age <= CREDENTIAL_FAILED_TTL_MS) {
+    return {
+      verdict: "credential_failed",
+      resumeAt: credential.seenAt + CREDENTIAL_FAILED_TTL_MS,
+      reason: `login rejected by the Claude CLI ${ageText} ago${detail} — re-authenticate this account`,
+    };
+  }
+  // Past the hard exclusion, but nothing has shown the login works again: the
+  // failure is still the latest evidence, so it is reported, not forgotten.
   return {
-    verdict: "credential_failed",
-    resumeAt: credential.seenAt + CREDENTIAL_FAILED_TTL_MS,
-    reason: `login rejected by the Claude CLI ${Math.round(
-      (nowMs - credential.seenAt) / 60000,
-    )}m ago${credential.reason ? `: ${credential.reason}` : ""} — re-authenticate this account`,
+    verdict: "credential_unverified",
+    observedAt: credential.seenAt,
+    reason:
+      `login rejected by the Claude CLI ${ageText} ago${detail} and not proven since — ` +
+      `re-authenticate, or prove it with \`multi-clawd doctor --probe\``,
   };
+}
+
+/**
+ * Key prefix of the usage poll's windows. Mirrors usage-poll.ts's
+ * USAGE_WINDOW_PREFIX (that module imports this one, so it is not imported
+ * back); a test pins the two together.
+ */
+const POLL_WINDOW_PREFIX = "usage:";
+
+/**
+ * The last time the Claude CLI's login for this account is known to have been
+ * accepted (epoch ms): an explicit "ok" credential record, or a window the
+ * shim recorded from a CLI turn — those are only ever written from a response
+ * the API sent back to an authenticated request. Undefined while a credential
+ * failure is outstanding: evidence from before a failure proves nothing after
+ * it.
+ *
+ * The usage poll's `usage:` windows are excluded on purpose. The poll
+ * authenticates with the token in `.credentials.json`, which on a split store
+ * is a different copy from the one the CLI reads, so its success says nothing
+ * about the CLI's credential.
+ */
+export function lastAuthSuccessAt(state: AccountHealthState | undefined): number | undefined {
+  if (!state || state.credential?.status === "failed") return undefined;
+  let latest = state.credential?.status === "ok" ? state.credential.seenAt : undefined;
+  for (const [key, w] of Object.entries(state.windows ?? {})) {
+    if (key.startsWith(POLL_WINDOW_PREFIX)) continue;
+    if (typeof w.seenAt === "number" && (latest === undefined || w.seenAt > latest)) latest = w.seenAt;
+  }
+  return latest;
 }
 
 export function classifyAccountHealth(
@@ -319,10 +362,10 @@ export function classifyAccountHealth(
   // Credential health outranks every quota rule (#8). An account whose OAuth
   // session the CLI has definitively rejected cannot serve ANY model at ANY
   // utilization, so this is checked before the windows are even read — the bug
-  // was precisely that quota `allowed` kept re-electing a dead login. Bounded
-  // by CREDENTIAL_FAILED_TTL_MS so a login fixed out-of-band re-probes instead
-  // of staying benched forever; an explicit clear (successful launch, live
-  // probe, re-auth) writes an "ok" record and ends it immediately.
+  // was precisely that quota `allowed` kept re-electing a dead login. Past
+  // CREDENTIAL_FAILED_TTL_MS it softens to `credential_unverified` (a re-test
+  // candidate) but never back to a quota verdict; only an explicit clear
+  // (successful launch, live probe, re-auth) writes an "ok" record and ends it.
   const credentialFailure = credentialFailureFor(state, nowMs);
   if (credentialFailure) return credentialFailure;
 
@@ -603,7 +646,9 @@ export interface PoolVerdict {
  * `credential_failed` is unusable in the strongest sense: an exhausted account
  * would at least authenticate, so it stays behind near-limit as a last resort,
  * whereas a rejected login cannot serve a single token. It is therefore in
- * neither pass here.
+ * neither pass here. `credential_unverified` is not either: its latest
+ * evidence is still a rejection, so it is a re-test (fallbackPoolAccount),
+ * not a choice.
  */
 export function choosePoolAccount(pool: PoolVerdict[]): string | undefined {
   const usable = pool.find((a) => a.verdict === "ok" || a.verdict === "no_data");
@@ -615,7 +660,9 @@ export function choosePoolAccount(pool: PoolVerdict[]): string | undefined {
  * Whether EVERY member's login is known-broken. The one state where a pooled
  * launch has nothing to fall back to and must surface a hard auth error naming
  * re-authentication (#8) instead of relaunching a dead account down every rung.
- * Empty pools are never "all broken".
+ * Empty pools are never "all broken". `credential_unverified` does not count:
+ * it is past its hard exclusion and due a re-test, and refusing it forever
+ * would leave a pool whose logins were all fixed out-of-band refusing anyway.
  */
 export function allCredentialFailed(pool: PoolVerdict[]): boolean {
   return pool.length > 0 && pool.every((a) => a.verdict === "credential_failed");
@@ -656,10 +703,13 @@ export function overdueProbeAccount(pool: PoolVerdict[], nowMs: number): string 
 
 /**
  * Last-resort account when nothing is usable: an exhausted member overdue a
- * re-probe if there is one (see `overdueProbeAccount`), otherwise the first
- * member that can at least AUTHENTICATE, so an unusable-pool launch fails with
- * the real quota error (which the chain and the degrade ladder both
- * understand) rather than with an auth error from a dead login that a
+ * re-probe if there is one (see `overdueProbeAccount`), then a member whose
+ * rejected login is past its hard exclusion and due a re-test (a login fixed
+ * out-of-band is found again here, and a successful turn clears the record;
+ * one still dead re-records and is benched again), otherwise the first member
+ * that can at least AUTHENTICATE, so an unusable-pool launch fails with the
+ * real quota error (which the chain and the degrade ladder both understand)
+ * rather than with an auth error from a dead login that a
  * healthier-credentialled member would not have produced. Falls back to the
  * home account when every member is credential-broken — the caller raises the
  * hard auth error in that case.
@@ -670,6 +720,8 @@ export function overdueProbeAccount(pool: PoolVerdict[], nowMs: number): string 
 export function fallbackPoolAccount(pool: PoolVerdict[], nowMs?: number): string {
   const probe = nowMs === undefined ? undefined : overdueProbeAccount(pool, nowMs);
   if (probe) return probe;
+  const retest = pool.find((a) => a.verdict === "credential_unverified");
+  if (retest) return retest.id;
   return (pool.find((a) => a.verdict !== "credential_failed") ?? pool[0]).id;
 }
 

@@ -78,6 +78,10 @@ const CLI_ENTRY_MODULES = [
   // v1.10 live usage (`usage`)
   "usage-poll.ts",
   "account-env.ts",
+  // doctor's credential judgement and split-store check
+  "login-health.ts",
+  "credential-store.ts",
+  "account-identity.ts",
 ];
 
 describe("the CLI runs without the openclaw peer", () => {

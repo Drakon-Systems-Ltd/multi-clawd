@@ -159,6 +159,10 @@ const VERDICT_WORDS: Record<string, string> = {
   // credential_failed is "go and log this account back in". Same-looking
   // wording would send the operator to the wrong fix.
   credential_failed: "LOGIN REJECTED — excluded from the pool until it is re-authenticated",
+  // Not healthy: the rejection is still the latest evidence. Only a turn that
+  // succeeds (or a re-login) ends it.
+  credential_unverified:
+    "LOGIN UNPROVEN — last rejected and not proven since; used only as a re-test when nothing proven can serve",
 };
 
 export function renderExplanation(model: ExplainModel): string {

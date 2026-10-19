@@ -17,7 +17,8 @@ beforeAll(() => {
 });
 
 function scenario(opts: {
-  roster?: Array<{ id: string; stateFile: string; env: Record<string, string> }>;
+  roster?: Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }>;
+  extraEnv?: Record<string, string>;
   args?: string[];
   limitFor?: string;
   emitLimitLate?: boolean;
@@ -39,6 +40,7 @@ function scenario(opts: {
   if (opts.holdMaxMs) env.MULTI_CLAWD_HOLD_MAX_MS = String(opts.holdMaxMs);
   if (opts.emitLimitLate) env.FAKE_CLAUDE_EMIT_LIMIT = "1";
   if (opts.roster) env[RETRY_ROSTER_ENV] = JSON.stringify(opts.roster);
+  Object.assign(env, opts.extraEnv ?? {});
   const res = spawnSync(process.execPath, [SHIM, ...(opts.args ?? STREAM_ARGS)], {
     input: "the prompt\n",
     encoding: "utf8",
@@ -165,5 +167,104 @@ describe("in-turn retry after a reactive model limit (#19)", () => {
       "result",
     ]);
     expect(armed.res.status).toBe(0);
+  });
+});
+
+/**
+ * Token-file siblings (all-token pools): the roster names the sibling's token
+ * FILE, and the shim reads it only when it retries. Before this, a pool whose
+ * members were all setup-token accounts had no sibling at all and every
+ * mid-launch limit fell through to the host's chain.
+ */
+describe("in-turn retry onto a token-file sibling", () => {
+  const TOKEN = "sk-ant-oat01-FAKE-sibling-token-value";
+  const LAUNCHED = "sk-ant-oat01-FAKE-launched-account-token";
+
+  function tokenRoster(contents: string | undefined, configDir?: string) {
+    const dir = mkdtempSync(join(tmpdir(), "mc-tok-"));
+    const tokenFile = join(dir, "claw2.token");
+    if (contents !== undefined) writeFileSync(tokenFile, contents, { mode: 0o600 });
+    return [
+      {
+        id: "claw2",
+        stateFile: join(dir, "claw2.json"),
+        env: configDir ? { CLAUDE_CONFIG_DIR: configDir } : {},
+        tokenFile,
+      },
+    ];
+  }
+
+  test("the sibling is launched with ITS token, read from its file at retry time", () => {
+    const { res } = scenario({
+      limitFor: "claw1",
+      roster: tokenRoster(`${TOKEN}\n`),
+      // The launched account's own token and dir must not leak into the retry.
+      extraEnv: { CLAUDE_CODE_OAUTH_TOKEN: LAUNCHED, CLAUDE_CONFIG_DIR: "/tmp/claude-one", FAKE_CLAUDE_EXPECT_TOKEN: TOKEN },
+    });
+    const result = records(res.stdout).find((r) => r.type === "result");
+    expect(result?.served_by).toBe("claw2");
+    expect(result?.oauth_token_matches).toBe(true);
+    // No configDir on the sibling: the launched account's dir is cleared, so it
+    // runs in the default dir on its own token.
+    expect(result?.config_dir).toBeNull();
+    expect(res.stdout).not.toContain("reached your");
+    expect(res.status).toBe(0);
+    // Never echoed anywhere.
+    expect(res.stderr).not.toContain(TOKEN);
+    expect(res.stdout).not.toContain(TOKEN);
+  });
+
+  test("a token-file sibling with a configDir gets both", () => {
+    const { res } = scenario({
+      limitFor: "claw1",
+      roster: tokenRoster(`${TOKEN}\n`, "/tmp/claude-two"),
+      extraEnv: { FAKE_CLAUDE_EXPECT_TOKEN: TOKEN },
+    });
+    const result = records(res.stdout).find((r) => r.type === "result");
+    expect(result?.served_by).toBe("claw2");
+    expect(result?.config_dir).toBe("/tmp/claude-two");
+    expect(result?.oauth_token_matches).toBe(true);
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["empty", "  \n"],
+    ["captured with the setup-token screen text", `Opening browser to sign in\n\n${TOKEN}\n\nUse this token by setting...\n`],
+  ])("a sibling whose token file is %s is skipped, never launched on another login", (_label, contents) => {
+    const { res } = scenario({
+      limitFor: "claw1",
+      roster: tokenRoster(contents, "/tmp/claude-two"),
+      extraEnv: { CLAUDE_CODE_OAUTH_TOKEN: LAUNCHED },
+    });
+    // Fail closed: the turn's limit passes through to the host's chain.
+    expect(res.stdout).toContain("reached your");
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("not retrying onto claw2");
+    expect(res.stderr).not.toContain("retrying this turn on claw2");
+    expect(res.stderr).not.toContain(TOKEN);
+  });
+
+  test("the claude child never sees the roster — first attempt or retry", () => {
+    // No limit: the FIRST child serves the turn, and must not have inherited
+    // the roster (sibling ids and credential paths are the shim's business).
+    const first = scenario({ roster: tokenRoster(`${TOKEN}\n`) });
+    const r1 = records(first.res.stdout).find((r) => r.type === "result");
+    expect(r1?.served_by).toBe("claw1");
+    expect(r1?.saw_retry_roster).toBe(false);
+    const retried = scenario({ limitFor: "claw1", roster: tokenRoster(`${TOKEN}\n`) });
+    const r2 = records(retried.res.stdout).find((r) => r.type === "result");
+    expect(r2?.served_by).toBe("claw2");
+    expect(r2?.saw_retry_roster).toBe(false);
+  });
+
+  test("a token VALUE smuggled into a roster env is dropped, and the file still decides", () => {
+    const roster = tokenRoster(`${TOKEN}\n`).map((r) => ({
+      ...r,
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-FAKE-smuggled" },
+    }));
+    const { res } = scenario({ limitFor: "claw1", roster, extraEnv: { FAKE_CLAUDE_EXPECT_TOKEN: TOKEN } });
+    const result = records(res.stdout).find((r) => r.type === "result");
+    expect(result?.served_by).toBe("claw2");
+    expect(result?.oauth_token_matches).toBe(true);
   });
 });

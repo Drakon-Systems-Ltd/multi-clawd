@@ -20,12 +20,12 @@
 ## 1. Preflight
 
 ```bash
-openclaw --version    # need >= 2026.6
+openclaw --version    # need >= 2026.8.1
 which claude          # Claude Code CLI must be on PATH
 node --version
 ```
 
-If OpenClaw is older than 2026.6, stop and tell your human to upgrade first.
+If OpenClaw is older than 2026.8.1, stop and tell your human to upgrade first.
 If `claude` is missing: `npm install -g @anthropic-ai/claude-code`.
 
 ## 2. Install + configure — one wizard does it

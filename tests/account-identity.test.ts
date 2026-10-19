@@ -5,6 +5,7 @@ import {
   formatPlan,
   identityFilePaths,
   maskEmail,
+  nativeDefaultConfigDir,
   parseIdentityFile,
   resolveAccountIdentity,
   type IdentityIo,
@@ -223,5 +224,48 @@ describe("findDuplicateLogins", () => {
       { accountId: "claw2", email: "a@example.com", ...base },
     ]);
     expect(dupes[0].accountIds).toEqual(["claw1", "claw2"]);
+  });
+});
+
+describe("nativeDefaultConfigDir: an inherited CLAUDE_CONFIG_DIR never decides the native login", () => {
+  test("unset: the real home's default dir, nothing ignored", () => {
+    expect(nativeDefaultConfigDir({}, "/home/example")).toEqual({ dir: "/home/example/.claude" });
+  });
+
+  test("set (e.g. inside a session served by another account): ignored and reported", () => {
+    expect(nativeDefaultConfigDir({ CLAUDE_CONFIG_DIR: "/home/example/.claw2" }, "/home/example")).toEqual({
+      dir: "/home/example/.claude",
+      ignored: "/home/example/.claw2",
+    });
+  });
+
+  test("the inherited dir can no longer make two logins look like one", () => {
+    // native reads the home login; claw2 reads its own dir. With the inherited
+    // value honoured, native resolved from claw2's dir and both matched.
+    const files: Record<string, string> = {
+      "/home/example/.claude.json": JSON.stringify({
+        oauthAccount: { accountUuid: "uuid-a", emailAddress: "a@example.com", profileFetchedAt: 1 },
+      }),
+      "/home/example/.claw2/.claude.json": JSON.stringify({
+        oauthAccount: { accountUuid: "uuid-b", emailAddress: "b@example.com", profileFetchedAt: 2 },
+      }),
+    };
+    const ioFor = (defaultConfigDir: string): IdentityIo => ({
+      readFile: (p) => {
+        if (!(p in files)) throw new Error("ENOENT");
+        return files[p];
+      },
+      expandHome: (p) => p.replace(/^~/, "/home/example"),
+      defaultConfigDir,
+      homeDir: "/home/example",
+    });
+    const accounts = [
+      { id: "claw1", native: true },
+      { id: "claw2", configDir: "~/.claw2" },
+    ];
+    const inherited = ioFor("/home/example/.claw2");
+    expect(findDuplicateLogins(accounts.map((a) => resolveAccountIdentity(a, inherited)))).toHaveLength(1);
+    const fixed = ioFor(nativeDefaultConfigDir({ CLAUDE_CONFIG_DIR: "/home/example/.claw2" }, "/home/example").dir);
+    expect(findDuplicateLogins(accounts.map((a) => resolveAccountIdentity(a, fixed)))).toHaveLength(0);
   });
 });

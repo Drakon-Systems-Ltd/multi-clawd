@@ -1,6 +1,6 @@
 {
   "name": "@drakon-systems/multi-clawd",
-  "version": "1.10.1",
+  "version": "2.1.3",
   "description": "Multi-account Claude Code failover for OpenClaw — register additional Claude (Max/Pro) logins as first-class CLI backends and keep the full skills/MCP harness across every account. Also imports those accounts' setup tokens into Hermes Agent's Anthropic credential pool.",
   "type": "module",
   "license": "MIT",
@@ -30,8 +30,8 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.8.1",
+      "minGatewayVersion": "2026.8.1"
     }
   },
   "main": "./dist/index.js",
@@ -61,10 +61,10 @@
     "setup": "node scripts/setup.mjs",
     "sync-manifest": "node -e \"const fs=require('fs');const m=JSON.parse(fs.readFileSync('openclaw.plugin.json','utf8'));m.version=process.env.npm_package_version||JSON.parse(fs.readFileSync('package.json','utf8')).version;fs.writeFileSync('openclaw.plugin.json',JSON.stringify(m,null,2)+'\\n')\"",
     "sync-readme-tag": "node scripts/sync-readme-tag.mjs",
-    "version": "npm run sync-manifest && npm run sync-readme-tag && git add openclaw.plugin.json README.md"
+    "version": "npm run sync-manifest && npm run sync-readme-tag && git add openclaw.plugin.json README.md package-lock.json"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.6"
+    "openclaw": ">=2026.8.1"
   },
   "peerDependenciesMeta": {
     "openclaw": {

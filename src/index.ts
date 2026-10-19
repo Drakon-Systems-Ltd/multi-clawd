@@ -25,8 +25,11 @@
  *   applies `clearEnv` to the host env first and merges prepared env after,
  *   so stripping the main account's ambient Claude vars is safe.
  * - `resolveSyntheticAuth` mirrors the bundled backend's synthetic auth so
- *   status/failover surfaces treat the backend as authenticated (mode
- *   "token") without an OpenClaw auth profile.
+ *   status/failover surfaces treat the backend as authenticated without an
+ *   OpenClaw auth profile: a token account reports its token (mode "token");
+ *   a CLI-login account reports the host's non-secret `oauth:<provider>`
+ *   marker when its stored login is usable (runtime-auth.ts, #39), which is
+ *   what OpenClaw >= 2026.10 needs to list the models as available.
  */
 import {
   definePluginEntry,
@@ -52,6 +55,8 @@ import { resolveBaseModelIds } from "./catalog-source.js";
 import {
   allCredentialFailed,
   classifyAccountHealth,
+  credentialFailureFor,
+  lastAuthSuccessAt,
   overdueProbeAccount,
   pickPoolAccountForLaunch,
 } from "./health.js";
@@ -94,7 +99,10 @@ import {
 export { healthStateFile, usageStateFile, clearAccountCredentialFailure };
 import {
   accountConfigDir,
+  AccountCredentialError,
   buildAccountChildEnv,
+  credentialFailureText,
+  parseSetupTokenFile,
   tokenFileModeWarning,
   validateAccountTokenSources,
 } from "./account-env.js";
@@ -104,25 +112,35 @@ import {
   type KnownModelsState,
 } from "./model-currency.js";
 import {
-  checkAccountCredential,
-  keychainServiceForConfigDir,
+  assessAccountCredential,
   createRefProbeTracker,
   type CredentialIo,
   type RefProbeTracker,
 } from "./login-health.js";
-import { execFileSync } from "node:child_process";
+import { createSystemCredentialIo, readKeychainItemAsync } from "./credential-store.js";
+import {
+  createLoginAuthCache,
+  loginAuthEligible,
+  poolRuntimeAuth,
+  refuseRuntimeAuthMarker,
+  type LoginAuthCache,
+  type RuntimeAuthResult,
+} from "./runtime-auth.js";
 import { collectDirectMembers, type DirectConfig } from "./direct-route.js";
 import { createDirectOrderController, isValidAgentId } from "./direct-sync.js";
 import { createOpenclawRunner } from "./openclaw-runner.js";
 import { materialiseRuntime } from "./runtime-home.js";
+import { CLAUDE_ARGV0_ENV, CLAUDE_BIN_ENV, resolveClaudeExecutable } from "./claude-command.js";
+import { createShimExecute } from "./shim-transport.js";
 
 // OpenClaw 2026.8.1 accidentally ships these runtime subpaths without their
 // declaration files. Derive the backend contract from the stable registration
-// API instead; this remains valid on the declared 2026.6+ compatibility range.
+// API instead; this remains valid on the declared 2026.8.1+ compatibility range.
 type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
 type CliBackendPrepareExecution = NonNullable<CliBackendPlugin["prepareExecution"]>;
 type CliBackendPrepareExecutionContext = Parameters<CliBackendPrepareExecution>[0];
 type CliBackendPreparedExecution = Awaited<ReturnType<CliBackendPrepareExecution>>;
+type CliBackendExecuteFn = NonNullable<NonNullable<CliBackendPreparedExecution>["execute"]>;
 
 const CLI_FRESH_WATCHDOG_DEFAULTS = {
   noOutputTimeoutRatio: 0.8,
@@ -328,30 +346,62 @@ function ingestAlertSpool(): void {
 const LOGIN_PROBE_INTERVAL_MS = 15 * 60 * 1000;
 const LOGIN_PROBE_INITIAL_DELAY_MS = 45 * 1000;
 
-const realCredentialIo: CredentialIo = {
-  readFile: (p) => readFileSync(expandHome(p), "utf8"),
-  keychainHasClaudeCredentials: () => keychainHasService("Claude Code-credentials"),
-  keychainHasClaudeCredentialsForDir: (dir) =>
-    keychainHasService(keychainServiceForConfigDir(expandHome(dir))),
-  platform: process.platform,
-};
+/**
+ * Created on first use: the Keychain account it carries is read from the
+ * environment, and a probe pass is the first thing that needs it.
+ */
+let realCredentialIo: CredentialIo | undefined;
 
-/** Metadata-only keychain probe (no `-w`): the secret is never read. */
-function keychainHasService(service: string): boolean {
-  try {
-    execFileSync("security", ["find-generic-password", "-s", service], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Login verdicts served to the host's synchronous synthetic-auth surface
+ * (#39). The surface only ever reads this cache; the credential source is
+ * read asynchronously (warmed at registration, refreshed in the background
+ * when stale, fed by the probe), judged by the same rules as the probe with
+ * the account's health state as evidence — a recent successful turn proves
+ * a refresh, a current `credential_failed` record vetoes outright.
+ */
+let loginAuthCache: LoginAuthCache | undefined;
+let loginAuthWarm: Promise<void> = Promise.resolve();
+function loginAuth(): LoginAuthCache {
+  return (loginAuthCache ??= createLoginAuthCache({
+    io: (realCredentialIo ??= createSystemCredentialIo()),
+    readKeychainItemAsync: (service, account) => readKeychainItemAsync(service, account),
+    health: (accountId) => {
+      const state = readHealthState(accountId);
+      return {
+        lastSuccessAt: lastAuthSuccessAt(state),
+        failed: credentialFailureFor(state, Date.now()) !== undefined,
+      };
+    },
+  }));
 }
 
 /**
- * Periodic login-health probe: credential *sources* are checked (file shape,
- * keychain presence, credentials.json token) so a dead login raises an
- * operator alert instead of silently failing every turn behind a
- * successfully-registered backend. Ref-backed accounts are validated through
- * the async resolver. No quota is spent.
+ * Judge every CLI-login account once, off the registration path, so the
+ * host's first catalog discovery finds a verdict instead of a cold cache.
+ * Exported with its completion so a test can await what a gateway only waits
+ * for in passing.
+ */
+export function warmLoginAuth(accounts: AccountConfig[]): Promise<void> {
+  const cache = loginAuth();
+  loginAuthWarm = Promise.all(
+    accounts.filter(loginAuthEligible).map((account) => cache.refresh(account)),
+  ).then(() => undefined);
+  return loginAuthWarm;
+}
+
+/** Resolves when the most recent registration's warm-up has finished. */
+export function loginAuthWarmed(): Promise<void> {
+  return loginAuthWarm;
+}
+
+/**
+ * Periodic login-health probe: credential *sources* are judged on evidence
+ * (an unexpired stored access token, or a successful turn since it expired —
+ * never mere presence) so a dead login raises an operator alert instead of
+ * silently failing every turn behind a successfully-registered backend.
+ * Ref-backed accounts are validated through the async resolver. No quota is
+ * spent.
  */
 /**
  * Probe state, deliberately at MODULE scope rather than inside
@@ -378,9 +428,10 @@ const lastProbeStatus = new Map<string, string>();
  * declared dead kept winning every rung for hours.
  *
  * Written on EVERY credential-broken observation, not just the transition into
- * it: the record is TTL-bounded (CREDENTIAL_FAILED_TTL_MS, 15m) and the probe
- * runs on the same 15m cadence, so a transition-only write would let the
- * exclusion lapse under a login that is still dead.
+ * it: the hard exclusion is bounded (CREDENTIAL_FAILED_TTL_MS, 15m, after which
+ * the account is only `credential_unverified`) and the probe runs on the same
+ * 15m cadence, so a transition-only write would let the exclusion soften under
+ * a login that is still dead.
  *
  * Best-effort, like every other health write: no state file is worth a turn.
  */
@@ -423,11 +474,14 @@ export async function runLoginHealthProbe(
     resolver?: TokenRefResolver;
     io?: CredentialIo;
     nowMs?: number;
+    /** Account health state, for proof of a recent successful turn. */
+    readHealth?: (accountId: string) => AccountHealthState | undefined;
   } = {},
 ): Promise<void> {
   const now = deps.nowMs ?? Date.now();
   const resolver = deps.resolver ?? activeTokenResolver;
-  const io = deps.io ?? realCredentialIo;
+  const io = deps.io ?? (realCredentialIo ??= createSystemCredentialIo());
+  const readHealth = deps.readHealth ?? readHealthState;
   for (const account of accounts) {
     let status: string;
     let reason: string | undefined;
@@ -450,9 +504,14 @@ export async function runLoginHealthProbe(
       reason = outcome.reason;
       cause = outcome.cause;
     } else {
-      const check = checkAccountCredential(account, io);
+      const check = assessAccountCredential(account, io, {
+        proof: { lastSuccessAt: lastAuthSuccessAt(readHealth(account.id)) },
+        nowMs: now,
+      });
+      // The same verdict feeds the host's availability surface on this cadence.
+      if (!deps.io) loginAuth().record(account.id, check, now);
       status = check.status;
-      reason = check.reason;
+      reason = check.status === "ok" ? check.detail : check.reason;
     }
     const previous = lastProbeStatus.get(account.id);
     lastProbeStatus.set(account.id, status);
@@ -489,9 +548,21 @@ export async function runLoginHealthProbe(
       const text = `account "${account.id}" login looks dead (${reason ?? "unknown"}) — turns on it will fail until fixed`;
       logger.error(`[multi-clawd] ${text}`);
       raiseAlert({ key: `login:${account.id}`, severity: "error", text });
+    } else if (status === "unverified" && previous !== "unverified") {
+      // Stored, but its access token has expired and nothing since proves the
+      // refresh works. Routine for an idle account, and also exactly what a
+      // login with a dead refresh token looks like at rest — so it is said,
+      // once per transition, and it is never reported as alive. Selection-
+      // neutral and no alert: a turn that fails records the failure itself.
+      logger.info(`[multi-clawd] account "${account.id}" login unverified: ${reason ?? "unproven"}`);
+    } else if (status === "unknown" && previous !== "unknown" && reason) {
+      // e.g. a locked Keychain: said once per transition, so it is not silent.
+      logger.info(`[multi-clawd] account "${account.id}" login could not be checked: ${reason}`);
     } else if (status === "degraded" && previous !== "degraded") {
       // Transient — one operator-visible info line per transition, no alert.
       logger.info(`[multi-clawd] account "${account.id}" login degraded: ${reason ?? "resolver error"}`);
+    } else if (status === "ok" && previous === "unverified") {
+      logger.info(`[multi-clawd] account "${account.id}" login verified: ${reason ?? "ok"}`);
     } else if (status === "ok" && (previous === "broken" || previous === "degraded")) {
       logger.info(`[multi-clawd] account "${account.id}" login recovered`);
       alertState = clearAlert(alertState, `login:${account.id}`);
@@ -499,8 +570,19 @@ export async function runLoginHealthProbe(
       // NOT cleared here: any credential record this account carries. A probe
       // "ok" means the credential SOURCE resolves, which is not proof the
       // session is accepted — clearing on presence would un-bench a dead login
-      // on the next tick and restore #8. The TTL, a successful turn through the
-      // shim, or `multi-clawd login <id>` end the exclusion.
+      // on the next tick and restore #8. Only a successful turn through the
+      // shim, or `multi-clawd login <id>`, ends the record.
+    }
+    // The source alerts describe what the probe SEES, so they end whenever it
+    // stops seeing a missing source — whatever the status in between was (an
+    // `unverified` or `unknown` pass must not latch them), and whatever this
+    // process remembers (a restart forgets `previous`; the alert outlives it).
+    // Recorded credential failures keep their own alert, ended only by success.
+    if (status === "ok") {
+      alertState = clearAlert(alertState, `login:${account.id}`);
+      alertState = clearAlert(alertState, `login-resolver:${account.id}`);
+    } else if ((status === "unverified" || status === "unknown") && cause === undefined) {
+      alertState = clearAlert(alertState, `login:${account.id}`);
     }
   }
 }
@@ -551,7 +633,21 @@ function peekToken(account: AccountConfig): string | undefined {
   if (account.oauthTokenFile) {
     const path = expandHome(account.oauthTokenFile);
     warnIfTokenFileExposed(path);
-    return readFileSync(path, "utf8").trim();
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      throw new AccountCredentialError(
+        `[multi-clawd] account "${account.id}": token file ${account.oauthTokenFile} unreadable` +
+          (typeof code === "string" ? ` (${code})` : ""),
+      );
+    }
+    const read = parseSetupTokenFile(raw, `token file ${account.oauthTokenFile}`);
+    if ("error" in read) {
+      throw new AccountCredentialError(`[multi-clawd] account "${account.id}": ${read.error}`);
+    }
+    return read.token;
   }
   if (isSecretRefShape(account.oauthTokenRef)) {
     return activeTokenResolver?.peek(account.oauthTokenRef);
@@ -560,6 +656,21 @@ function peekToken(account: AccountConfig): string | undefined {
   throw new Error(
     `[multi-clawd] account "${account.id}" needs oauthTokenFile, oauthTokenRef, or configDir`,
   );
+}
+
+/**
+ * What this account proves to the host's synthetic-auth surface: a token
+ * account its setup token; a CLI-login account the non-secret marker when its
+ * stored login is judged usable (#39). Throws like peekToken for an
+ * unreadable token file; the provider hook catches.
+ */
+function resolveAccountRuntimeAuth(account: AccountConfig): RuntimeAuthResult | undefined {
+  const token = peekToken(account);
+  if (token) return { apiKey: token, source: `multi-clawd ${account.id} token`, mode: "token" };
+  // A ref whose cache is cold answers nothing until the launch path warms it.
+  if (account.oauthTokenFile || isSecretRefShape(account.oauthTokenRef)) return undefined;
+  // Cache only: the credential source is never read on this synchronous path.
+  return loginAuth().peek(account, account.id);
 }
 
 /** Launch-path token access: resolves refs via the gateway's secret providers. */
@@ -633,6 +744,138 @@ if (!SHIM_RUNTIME.stable) {
 }
 const SHIM_PATH = SHIM_RUNTIME.shimPath;
 
+/**
+ * The runtime artifact the bundled `claude-cli` backend declares, verbatim.
+ * OpenClaw 2026.10 binds a verified setup owner (the dashboard custodian) only
+ * to a command whose package tree it can hash; this names Claude Code's own
+ * package and its native executable basenames. Never ours, never `node`.
+ */
+export const CLAUDE_RUNTIME_ARTIFACT = Object.freeze({
+  kind: "bundled-package-tree" as const,
+  packageName: "@anthropic-ai/claude-code",
+  entrypoint: "command" as const,
+  nativeExecutableNames: Object.freeze(["claude", "claude.exe"]),
+});
+
+/**
+ * How a backend launches Claude Code.
+ *
+ * - `verified` (OpenClaw >= 2026.8.1 with `claude` resolvable): the backend's
+ *   command IS the claude executable, declared with Claude Code's runtime
+ *   artifact so the host can verify it. Side-question turns (setup probe,
+ *   /btw) run it directly; agent turns run through the shim via the execute
+ *   transport, which keeps failover, rate-limit capture, handover and degrade.
+ * - `legacy`: node + shim exactly as every release before this one. Used when
+ *   claude cannot be resolved or the host cannot run plugin transports; the
+ *   host's verified-owner check then fails exactly as it did before.
+ */
+export type BackendLaunch =
+  | {
+      kind: "verified";
+      claudeCommand: string;
+      shimPath: string;
+      /** Where the claude path came from: PATH lookup or an operator override. */
+      claudeSource?: "path" | "override";
+      log?: (line: string) => void;
+    }
+  | { kind: "legacy"; shimPath: string; reason?: string };
+
+/**
+ * Whether this host's CLI runner honours a prepared `execute` transport.
+ *
+ * The transport itself is invisible from the plugin API, and a version string
+ * cannot be trusted to be present, so this probes a positive capability that
+ * shipped in the SAME release as the transport (OpenClaw 2026.8.1 final; it is
+ * absent from 2026.8.1-beta.3, 2026.7.x and 2026.6.x, all of which also lack
+ * the transport): `runtime.agent.runCommandFromIngress` and
+ * `runtime.hooks.dispatchHookAgentTurn`. BOTH must be present: a false
+ * positive would register bare claude on a host that ignores the transport
+ * and silently lose the shim, while a false negative only keeps today's
+ * legacy launch. (The runner's own target selection is checked against an
+ * installed OpenClaw dist in tests/host-execute-target.test.ts.)
+ *
+ * Reads are guarded: in metadata registration modes the runtime is a Proxy
+ * that throws on any property access.
+ */
+export function hostRunsExecuteTransports(runtime: unknown): boolean {
+  try {
+    const rt = runtime as {
+      agent?: { runCommandFromIngress?: unknown };
+      hooks?: { dispatchHookAgentTurn?: unknown };
+    } | undefined;
+    return (
+      typeof rt?.agent?.runCommandFromIngress === "function" &&
+      typeof rt?.hooks?.dispatchHookAgentTurn === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decide the launch mode once per registration. A host without the execute
+ * transport keeps the legacy launch: it would ignore the transport and run
+ * claude bare, losing the shim (failover, capture, handover) on every turn.
+ */
+export function resolveBackendLaunch(params: {
+  hostSupportsExecute: boolean;
+  env?: Readonly<Record<string, string | undefined>>;
+  platform?: NodeJS.Platform;
+  shimPath?: string;
+  log?: (line: string) => void;
+}): BackendLaunch {
+  const shimPath = params.shimPath ?? SHIM_PATH;
+  if (!params.hostSupportsExecute) {
+    return {
+      kind: "legacy",
+      shimPath,
+      reason:
+        "this OpenClaw does not expose runtime.agent.runCommandFromIngress and " +
+        "runtime.hooks.dispatchHookAgentTurn, so it is treated as not running plugin execute " +
+        "transports (needs >= 2026.8.1)",
+    };
+  }
+  const claude = resolveClaudeExecutable(params.env ?? process.env, params.platform ?? process.platform);
+  if (!claude.ok) return { kind: "legacy", shimPath, reason: claude.reason };
+  return {
+    kind: "verified",
+    claudeCommand: claude.command,
+    claudeSource: claude.source,
+    shimPath,
+    ...(params.log ? { log: params.log } : {}),
+  };
+}
+
+/** Shim-only steering vars: meaningless (and the roster private) to a bare claude. */
+const SHIM_ONLY_ENV = [
+  RETRY_ROSTER_ENV,
+  SESSION_DIRS_ENV,
+  "MULTI_CLAWD_MODEL_OVERRIDE",
+  CLAUDE_BIN_ENV,
+  CLAUDE_ARGV0_ENV,
+];
+
+/**
+ * The prepared execution for one launch. Legacy: env only, as always.
+ * Verified side-question turns: env only, minus the shim's steering vars —
+ * OpenClaw runs (and verifies) the claude command itself, on the account the
+ * pool already chose. Verified agent turns: env plus the shim transport.
+ */
+function preparedForLaunch(
+  launch: BackendLaunch,
+  ctx: CliBackendPrepareExecutionContext,
+  env: Record<string, string>,
+  transport: CliBackendExecuteFn | undefined,
+): CliBackendPreparedExecution {
+  if (launch.kind === "legacy") return { env };
+  if (ctx.executionMode === "side-question") {
+    for (const key of SHIM_ONLY_ENV) delete env[key];
+    return { env };
+  }
+  if (!transport) throw new Error("[multi-clawd] verified launch is missing its shim transport");
+  return { env, execute: transport };
+}
+
 
 /** Catalog ids observed on previous runs — the baseline for "this model is new". */
 function knownModelsFile(): string {
@@ -702,7 +945,21 @@ function checkModelCurrency(catalogIds: readonly string[], chainRefs: readonly s
   }
 }
 
-export function buildBackend(account: AccountConfig, execMode?: string): CliBackendPlugin {
+export function buildBackend(
+  account: AccountConfig,
+  execMode?: string,
+  launch: BackendLaunch = { kind: "legacy", shimPath: SHIM_PATH },
+): CliBackendPlugin {
+  const verified = launch.kind === "verified";
+  // Plain claude argv: the shim (when one runs) is the transport's business.
+  const shimPrefix = verified ? [] : [launch.shimPath];
+  const transport = verified
+    ? (createShimExecute({
+        configuredCommand: launch.claudeCommand,
+        shimPath: launch.shimPath,
+        ...(launch.log ? { log: launch.log } : {}),
+      }) satisfies CliBackendExecuteFn)
+    : undefined;
   const backend: CliBackendPlugin = {
     id: account.id,
     liveTest: {
@@ -715,6 +972,7 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
       },
     },
     // Full harness — mirror the bundled claude-cli backend.
+    ...(verified ? { runtimeArtifact: CLAUDE_RUNTIME_ARTIFACT } : {}),
     bundleMcp: true,
     bundleMcpMode: "claude-config-file",
     // `selectable` + an enforcement strategy is what lets OpenClaw 2026.8.2 hand
@@ -728,12 +986,13 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     config: {
-      // Spawn our transparent shim (which spawns `claude`) so the plugin can
-      // observe rate_limit_event records for near-limit account rotation.
-      // process.execPath = the node running the gateway; always present.
-      command: process.execPath,
-      args: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode)],
-      resumeArgs: [SHIM_PATH, ...BASE_ARGS, ...permissionModeArgs(execMode), "--resume", "{sessionId}"],
+      // Verified: the real claude executable, so the host can bind it as a
+      // setup owner; agent turns still run through the shim via the execute
+      // transport (shim-transport.ts). Legacy: node (the gateway's own, always
+      // present) running our transparent shim, which spawns `claude`.
+      command: verified ? launch.claudeCommand : process.execPath,
+      args: [...shimPrefix, ...BASE_ARGS, ...permissionModeArgs(execMode)],
+      resumeArgs: [...shimPrefix, ...BASE_ARGS, ...permissionModeArgs(execMode), "--resume", "{sessionId}"],
       forkArg: "--fork-session",
       resumeAtArg: "--resume-session-at",
       output: "jsonl",
@@ -787,11 +1046,12 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
     },
     // The crux: point this backend's Claude Code process at its own login.
     async prepareExecution(
-      _ctx: CliBackendPrepareExecutionContext,
+      ctx: CliBackendPrepareExecutionContext,
     ): Promise<CliBackendPreparedExecution> {
-      return { env: await buildAccountEnv(account) };
+      return preparedForLaunch(launch, ctx, await buildAccountEnv(account), transport);
     },
   };
+  launchTransports.set(backend, { launch, transport });
   // Older OpenClaw gateways still read `sessionArg`. 2026.8.1 types dropped it
   // in favour of `sessionArgs`; unknown fields are ignored.
   Object.assign(backend.config, { sessionArg: "--session-id" });
@@ -802,31 +1062,52 @@ export function buildBackend(account: AccountConfig, execMode?: string): CliBack
  * The siblings the shim may re-spawn onto when a model limit lands mid-launch
  * (#19), in the pool's own preference order.
  *
- * Secret-free accounts only, and that is a security decision rather than an
- * implementation limit: handing the shim a sibling's OAuth token would put
- * every account's credential in every child's environment, so one compromised
- * child would own the pool instead of one login. A `native` or `configDir`
- * account is switched to with a path, so it costs nothing to offer; a
- * token-backed account keeps today's next-launch rotation.
+ * Paths only, never secret values, and that is a security decision rather
+ * than an implementation limit: the roster rides in every pooled launch's env
+ * (the shim's — it strips it before starting claude), so a sibling's token
+ * VALUE there would distribute every account's credential to every launch. A
+ * `native` or `configDir` account is switched to with a path; a token-file
+ * account is offered by the PATH of its token file, which the shim reads only
+ * when it actually retries onto that account (a same-user process could read
+ * that path from the plugin config anyway — handing it over grants nothing).
+ * A secret-reference account has no path to offer, so it keeps next-launch
+ * rotation. See retry-plan.ts #2.
  */
+/** Per-backend launch + transport, so the pool's own prepareExecution can reuse them. */
+const launchTransports = new WeakMap<
+  CliBackendPlugin,
+  { launch: BackendLaunch; transport: CliBackendExecuteFn | undefined }
+>();
+
 export function buildRetryRoster(
   members: AccountConfig[],
   launchedId: string,
-): Array<{ id: string; stateFile: string; env: Record<string, string> }> {
-  const roster: Array<{ id: string; stateFile: string; env: Record<string, string> }> = [];
+): Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }> {
+  const roster: Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }> = [];
   for (const member of members) {
     if (member.id === launchedId) continue;
-    if (member.oauthTokenFile || member.oauthTokenRef) continue;
+    // Native wins over any declared token (validateAccountTokenSources), and a
+    // file wins over a ref — the same precedence the launch path applies.
+    const tokenFile = !member.native && member.oauthTokenFile ? expandHome(member.oauthTokenFile) : undefined;
+    if (!member.native && !tokenFile && member.oauthTokenRef) continue;
+    // No credential source at all: the launch path refuses it, and an empty
+    // env here would retry on the machine's default login.
+    if (!member.native && !tokenFile && !member.configDir) continue;
     const stateFile = healthStateFile(member.id);
-    // No token to resolve, so this never touches the secret provider — a
-    // launch-path 1Password call per sibling would be a real cost for a
-    // contingency that usually does not happen.
-    const env = buildAccountChildEnv(member, undefined, stateFile);
+    // No token resolved here, so this never touches the secret provider or a
+    // token file — a launch-path read per sibling would be a real cost for a
+    // contingency that usually does not happen. The credential half is built
+    // without the token source; the shim adds the token at retry time.
+    const env = buildAccountChildEnv(
+      { ...member, oauthTokenFile: undefined, oauthTokenRef: undefined },
+      undefined,
+      stateFile,
+    );
     // The shim gets the credential half only; its own identity vars are set
     // at retry time from the roster entry.
     delete env.MULTI_CLAWD_ACCOUNT_ID;
     delete env.MULTI_CLAWD_STATE_FILE;
-    roster.push({ id: member.id, stateFile, env });
+    roster.push({ id: member.id, stateFile, env, ...(tokenFile ? { tokenFile } : {}) });
   }
   return roster;
 }
@@ -859,24 +1140,31 @@ export function isRuntimelessRegistration(api: unknown): boolean {
  * route through an API transport: the run executor checks the CLI-backend
  * registry first (isCliProvider) and drives the Claude Code subprocess.
  */
-function buildCatalogProvider(account: AccountConfig): ProviderPlugin {
+function buildCatalogProvider(account: AccountConfig, members?: AccountConfig[]): ProviderPlugin {
   return {
     id: account.id,
     label: account.label ?? `Claude Code (${account.id})`,
     auth: [],
     resolveSyntheticAuth: () => {
       try {
-        // Sync surface: warm ref-cache or file read only — never blocks.
-        const token = peekToken(account);
-        if (!token) return undefined;
-        return {
-          apiKey: token,
-          source: `multi-clawd ${account.id} token`,
-          mode: "token",
-        };
+        // Sync surface: warm ref-cache, token-file read or cached login
+        // verdict only — never blocks. A pool is signed in when any member is.
+        return members
+          ? poolRuntimeAuth(
+              account.id,
+              members.map((member) => () => resolveAccountRuntimeAuth(member)),
+            )
+          : resolveAccountRuntimeAuth(account);
       } catch {
         return undefined;
       }
+    },
+    // The direct API transport (`infer model run`, side completions) asks
+    // here before building a request. A CLI-login account's marker is not a
+    // bearer: refuse it so that path fails closed, exactly as before #39.
+    prepareRuntimeAuth: async (ctx) => {
+      refuseRuntimeAuthMarker(ctx);
+      return undefined;
     },
     // Async on purpose: mirrors the bundled claude-cli catalog at catalog-build
     // time (falling back to the built-in list), so new subscription models
@@ -994,7 +1282,29 @@ export default definePluginEntry({
         permissionModeArgs(execMode).length ? "bypassPermissions" : "default (no override)"
       }`,
     );
+    const launchLogger = api.logger;
+    const launch = resolveBackendLaunch({
+      hostSupportsExecute: hostRunsExecuteTransports(api.runtime),
+      log: (line) => launchLogger.info(line),
+    });
+    if (launch.kind === "verified") {
+      api.logger.info(
+        `[multi-clawd] launch mode: verified — claude ${launch.claudeCommand} (from ${
+          launch.claudeSource === "override" ? "MULTI_CLAWD_CLAUDE_BIN" : "PATH"
+        }) is the backend command; host runs execute transports ` +
+          `(runtime.agent.runCommandFromIngress + runtime.hooks.dispatchHookAgentTurn present), ` +
+          `so agent turns run through shim ${launch.shimPath} and side-questions run claude directly`,
+      );
+    } else {
+      api.logger.warn(
+        `[multi-clawd] launch mode: legacy node+shim — ${launch.reason ?? "unknown reason"}; ` +
+          `failover is unchanged, but OpenClaw cannot verify this backend as a setup owner`,
+      );
+    }
     const seen = new Set<string>();
+    // Account → credential-source mapping may change between registration
+    // passes; login verdicts are re-judged from a fresh cache each time.
+    loginAuthCache = undefined;
     for (const account of accounts) {
       const id = account?.id?.trim();
       if (!id) {
@@ -1012,10 +1322,11 @@ export default definePluginEntry({
       }
       seen.add(id);
       const normalized = { ...account, id };
-      api.registerCliBackend(buildBackend(normalized, execMode));
+      api.registerCliBackend(buildBackend(normalized, execMode, launch));
       api.registerProvider(buildCatalogProvider(normalized));
     }
-    registerPoolBackend(api, cfg.pool, accounts, seen, execMode);
+    registerPoolBackend(api, cfg.pool, accounts, seen, execMode, { launch });
+    void warmLoginAuth(accounts.filter((a) => seen.has(a.id.trim()))).catch(() => {});
 
     // Operator alerts ride the agent's heartbeat prompt; login probe fills them.
     {
@@ -1126,8 +1437,8 @@ function mergeStoredHealth(
  * End a recorded credential failure for one account (#8) — the explicit
  * re-authentication path (`multi-clawd login <id>`) and any surface that has
  * PROVEN the login works again. Exported so those out-of-band flows can
- * un-bench an account immediately instead of waiting out
- * CREDENTIAL_FAILED_TTL_MS.
+ * un-bench an account immediately: a recorded failure no longer expires on its
+ * own (past CREDENTIAL_FAILED_TTL_MS it reads `credential_unverified`).
  *
  * Deliberately NOT wired to the periodic login probe: that probe checks
  * credential SOURCES (keychain item present, token file well-formed, ref
@@ -1202,7 +1513,7 @@ export function registerPoolBackend(
   accounts: AccountConfig[],
   registeredIds: Set<string>,
   execMode?: string,
-  deps?: { resolver?: TokenRefResolver },
+  deps?: { resolver?: TokenRefResolver; launch?: BackendLaunch },
 ): void {
   const logger = api.logger;
   if (!pool) return;
@@ -1246,7 +1557,8 @@ export function registerPoolBackend(
   const stickyFile = join(
     homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
   );
-  const backend = buildBackend(poolAccount, execMode);
+  const backend = buildBackend(poolAccount, execMode, deps?.launch);
+  const { launch, transport } = launchTransports.get(backend)!;
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
     const now = Date.now();
     // Model-aware (v0.3.6): a model-scoped rejected window (reactive 429
@@ -1307,6 +1619,15 @@ export function registerPoolBackend(
         `[multi-clawd] pool ${poolId}: every account is exhausted for ${requestedModel} — ` +
           `launching on ${decision.account} to re-test a rejection last seen ` +
           `${Math.round((now - observedAt) / 3600000)}h ago`,
+      );
+    } else if (
+      poolVerdicts.find((v) => v.id === decision.account)?.verdict === "credential_unverified"
+    ) {
+      // Nothing proven can serve, so the launch re-tests a login whose last
+      // evidence is a rejection. A question, not a rotation: no rotation alert.
+      logger.info(
+        `[multi-clawd] pool ${poolId}: no proven account can serve ${requestedModel} — ` +
+          `launching on ${decision.account} to re-test a login last rejected by the Claude CLI`,
       );
     } else if (decision.account !== previousAccount) {
       const home = verdicts[0];
@@ -1379,6 +1700,16 @@ export function registerPoolBackend(
             v.health.reason ?? "its login was rejected by the Claude CLI"
           }. Fix with \`multi-clawd login ${v.id}\`.`,
         });
+      } else if (v.health.verdict === "credential_unverified") {
+        // Same key, same latch: past the hard exclusion is not recovery. The
+        // alert ends only when the verdict does, i.e. on observed success.
+        raiseAlert({
+          key,
+          severity: "error",
+          text: `pool ${poolId}: account "${v.id}" is unproven — ${
+            v.health.reason ?? "its login was last rejected by the Claude CLI"
+          }. Fix with \`multi-clawd login ${v.id}\`.`,
+        });
       } else {
         alertState = clearAlert(alertState, key);
       }
@@ -1405,6 +1736,7 @@ export function registerPoolBackend(
       try {
         env = await buildAccountEnv(candidate, deps?.resolver);
         launched = candidate;
+        alertState = clearAlert(alertState, `credential-unresolved:${candidate.id}`);
         if (candidate.id !== chosen.id) {
           logger.warn(
             `[multi-clawd] pool ${poolId}: ${chosen.id}'s credential did not resolve — ` +
@@ -1413,7 +1745,18 @@ export function registerPoolBackend(
         }
         break;
       } catch (err) {
-        unresolved.push(`${candidate.id} (${(err as Error).message})`);
+        const why = credentialFailureText(err);
+        unresolved.push(`${candidate.id} (${why})`);
+        // Skipped, never launched on another login — and said so, because a
+        // pool that quietly routes around a broken token file looks healthy
+        // right up to the day the sibling runs out too.
+        raiseAlert({
+          key: `credential-unresolved:${candidate.id}`,
+          severity: "error",
+          text:
+            `pool ${poolId}: account "${candidate.id}" was skipped — its declared credential did ` +
+            `not resolve, so it will not launch on any other login (${why})`,
+        });
       }
     }
     if (!env) {
@@ -1454,7 +1797,22 @@ export function registerPoolBackend(
             requestedModel: ctx.modelId,
             ladder,
           });
-      if (degradation) {
+      // A verified side-question (setup probe, /btw) is run by OpenClaw
+      // itself, without the shim — and the shim is the only thing that can
+      // swap the model: OpenClaw appends `--model <requested>` after every
+      // hook-provided argv, and prepareExecution has no supported way to
+      // change it. The account choice above already avoids any account
+      // limited for this model while one is not; only a wholly exhausted pool
+      // reaches here, and that is said plainly rather than claimed as a degrade.
+      const runsWithoutShim = launch.kind === "verified" && ctx.executionMode === "side-question";
+      if (degradation && runsWithoutShim) {
+        logger.warn(
+          `[multi-clawd] pool ${poolId}: side-question runs ${ctx.modelId} undegraded on ${
+            (launched ?? chosen).id
+          } — every account is limited for it, and the degrade ladder (${degradation.model}) ` +
+            `can only be applied by the shim, which OpenClaw does not run for side-questions`,
+        );
+      } else if (degradation) {
         env.MULTI_CLAWD_MODEL_OVERRIDE = degradation.model;
         const line = `pool ${poolId}: degrading ${ctx.modelId} → ${degradation.model} on ${chosen.id} (${degradation.reason})`;
         logger.info(`[multi-clawd] ${line}`);
@@ -1465,10 +1823,10 @@ export function registerPoolBackend(
         );
       }
     }
-    return { env };
+    return preparedForLaunch(launch, ctx, env, transport);
   };
   api.registerCliBackend(backend);
-  api.registerProvider(buildCatalogProvider(poolAccount));
+  api.registerProvider(buildCatalogProvider(poolAccount, members));
   registeredIds.add(poolId);
   logger.info(
     `[multi-clawd] pool "${poolId}" active — accounts: ${memberIds.join(" → ")}, threshold: ${
@@ -1632,16 +1990,29 @@ export function stopUsagePoll(): void {
   usageController = undefined;
 }
 
+/** Why a setup-token account is never usage-polled (doctor and `usage` repeat it). */
+export const USAGE_TOKEN_ACCOUNT_REASON =
+  "setup-token login — the usage endpoint needs the user:profile scope and setup-tokens carry only " +
+  "user:inference, so usage comes from stream telemetry only";
+
 /**
  * The `.credentials.json` the poll may read for an account, or the reason it
  * may not. Only a login the CLI keeps in a config dir of its own is readable
- * AND attributable: a token-based account (`oauthTokenFile` / `oauthTokenRef`)
- * runs in the default dir on a token of its own, so the file there belongs to
- * a different account and must not be read as this one.
+ * AND attributable. A token-based account (`oauthTokenFile` / `oauthTokenRef`)
+ * is not polled at all:
+ *   - any `.credentials.json` in its dir is not the credential it runs on, so
+ *     must not be read as this account; and
+ *   - its own setup-token cannot be used instead. `claude setup-token` grants
+ *     only the `user:inference` scope and the usage endpoint requires
+ *     `user:profile`: it answers 403 `oauth_scope_insufficient` (verified
+ *     against the live endpoint, Oct 2026; upstream anthropics/claude-code
+ *     #11985, still open). Polling would be a guaranteed failure per tick.
+ * Such accounts are steered by the shim's stream telemetry, which the
+ * selection rules already handle on their own (USAGE_TOKEN_ACCOUNT_REASON).
  */
 export function usagePollCredentialsFile(account: AccountConfig): { file: string } | { reason: string } {
   if (account.oauthTokenFile || account.oauthTokenRef) {
-    return { reason: "token-based login — usage is read from its own stream telemetry only" };
+    return { reason: USAGE_TOKEN_ACCOUNT_REASON };
   }
   if (!account.native && !account.configDir) {
     return { reason: "no login dir to read credentials from" };
