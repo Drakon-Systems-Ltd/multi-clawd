@@ -38,8 +38,9 @@ npm-debug.log*
 .vscode/
 .idea/
 
-# Plugin Inspector output
-reports/
+# Plugin Inspector output (the tracked class-radar reports are the only exception)
+reports/*
+!reports/multi-clawd-class-radar/
 
 # Python bytecode from the bundled Hermes bridge — never commit, never publish
 # (a .pyc embeds the source, defeating the no-comments-in-dist rule)
