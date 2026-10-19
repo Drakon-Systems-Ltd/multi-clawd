@@ -6,7 +6,8 @@
  *
  * Secret references are never printed — only the provider name.
  */
-import { DEFAULT_UTILIZATION_THRESHOLD } from "./health.js";
+import { DEFAULT_UTILIZATION_THRESHOLD, choosePoolAccount, poolStrategy, type PoolVerdict, type PoolStrategy } from "./health.js";
+import { decideStickySelection, type StickyEntry } from "./sticky.js";
 
 export interface ExplainAccount {
   id: string;
@@ -24,6 +25,7 @@ export interface ExplainPool {
   utilizationThreshold?: number;
   weeklyUtilizationThreshold?: number;
   minDwellMs?: number;
+  strategy?: PoolStrategy;
   degrade?: { ladder?: string[]; pins?: unknown[] };
 }
 
@@ -40,6 +42,7 @@ export interface ExplainModel {
   chain?: { primary?: string; fallbacks?: string[] };
   health: Array<{ id: string; verdict: string; detail?: string; usage?: ExplainUsage[] }>;
   stickyAccount?: string;
+  stickyEntry?: StickyEntry;
   /** Clock for usage reset countdowns; defaults to Date.now() at render time. */
   nowMs?: number;
   /** The direct `anthropic/*` route; absent when no account opted in. */
@@ -180,13 +183,14 @@ export function renderExplanation(model: ExplainModel): string {
     const generalThreshold = model.pool.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
     const weeklyThreshold = model.pool.weeklyUtilizationThreshold ?? generalThreshold;
     lines.push(`POOL  ${model.pool.id}  (${model.pool.accounts.join(" → ")})`);
-    lines.push(
-      `  Every Claude launch runs on the first account below its threshold;`,
-    );
-    lines.push(
-      `  the home account reclaims work`,
-    );
-    lines.push(`  automatically once its window resets.`);
+    lines.push(`  Strategy: ${poolStrategy(model.pool.strategy)}.`);
+    if (poolStrategy(model.pool.strategy) === "reset-aware") {
+      lines.push("  Healthy accounts with a live seven-day reset are preferred by soonest reset.");
+    } else {
+      lines.push("  Every Claude launch runs on the first account below its threshold;");
+      lines.push("  the home account reclaims work");
+      lines.push("  automatically once its window resets.");
+    }
     lines.push(`  Thresholds: general ${Math.round(generalThreshold * 100)}%, weekly ${Math.round(weeklyThreshold * 100)}%${model.pool.weeklyUtilizationThreshold === undefined ? " (follows general)" : ""}.`);
     lines.push(`  The weekly threshold applies to day/week/month quota windows; overage uses the general threshold.`);
     const ladder = model.pool.degrade?.ladder ?? [];
@@ -231,9 +235,36 @@ export function renderExplanation(model: ExplainModel): string {
       );
     }
     if (model.pool) {
+      const strategy = poolStrategy(model.pool.strategy);
+      const verdicts: PoolVerdict[] = model.pool.accounts.map((id) => {
+        const h = model.health.find((row) => row.id === id);
+        return {
+          id,
+          verdict: h?.verdict as PoolVerdict["verdict"] ?? "no_data",
+          sevenDayResetsAt: (h?.usage?.find((u) => u.window === "usage:seven_day" && u.resetsAt !== undefined && u.resetsAt > nowMs)
+            ?? h?.usage?.find((u) => u.window === "seven_day" && u.resetsAt !== undefined && u.resetsAt > nowMs))?.resetsAt,
+        };
+      });
+      if (verdicts.length) {
+        const preferred = choosePoolAccount(verdicts, strategy);
+        const decision = decideStickySelection({ verdicts, sticky: model.stickyEntry, nowMs, minDwellMs: model.pool.minDwellMs, strategy });
+        const picked = verdicts.find((v) => v.id === decision.account);
+        let reason: string;
+        if (preferred && decision.account !== preferred) reason = "sticky dwell keeps this usable account";
+        else if (strategy === "ordered") reason = picked?.verdict === "near_limit" ? "first near-limit member in pool order" : "first healthy member in pool order";
+        else if (picked?.verdict === "ok" && picked.sevenDayResetsAt !== undefined) reason = `seven-day window resets soonest (in ${relativeUntil(picked.sevenDayResetsAt, nowMs)})`;
+        else if (picked?.verdict === "ok") reason = "first healthy member without live seven-day reset data";
+        else if (picked?.verdict === "no_data") reason = "first member without live health data";
+        else reason = "no healthy member; using the existing fallback";
+        lines.push(`  strategy: ${strategy} — picked ${decision.account}: ${reason}`);
+      } else {
+        lines.push(`  strategy: ${strategy}`);
+      }
       lines.push(
         model.stickyAccount
-          ? `  pool is rotated onto ${model.stickyAccount} (returns home when the home window resets)`
+          ? strategy === "reset-aware"
+            ? `  pool is on ${model.stickyAccount} (dwell applies while it remains usable)`
+            : `  pool is rotated onto ${model.stickyAccount} (returns home when the home window resets)`
           : `  pool is on its home account (no rotation active)`,
       );
     }
