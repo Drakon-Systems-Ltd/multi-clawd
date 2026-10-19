@@ -554,7 +554,8 @@ error.
   "pool": {
     "id": "clawd",
     "accounts": ["claw1", "claw2"],   // preference order; first = home
-    "utilizationThreshold": 0.85,     // hand over at 85% of any window
+    "utilizationThreshold": 0.85,     // default hand-over for every window
+    "weeklyUtilizationThreshold": 0.97, // optional: weekly quota at 97%; paid overage stays at 85%
     "minDwellMs": 600000,             // v0.3: anti-flap dwell before returning home
     "degrade": {                      // v0.3.5: last step before provider drop
       "ladder": ["claude-opus-4-8"],  // whole pool exhausted → same account, lower tier
@@ -630,6 +631,7 @@ from the provider** on a timer — the same figures the Claude CLI's own
   "id": "clawd",
   "accounts": ["claw1", "claw2"],
   "utilizationThreshold": 0.85,     // hand over here (unchanged)
+  "weeklyUtilizationThreshold": 0.97, // optional: weekly quota at 97%; paid overage stays at 85%
   "usagePoll": {                    // v1.10 — on by default
     "intervalMs": 120000,           // every 2 min (minimum 60000)
     "warnThreshold": 0.95           // operator alert from here

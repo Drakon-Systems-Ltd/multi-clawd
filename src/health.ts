@@ -48,6 +48,8 @@ export interface AccountHealth {
 export interface HealthOptions {
   /** Rotate when any window's utilization reaches this fraction. Default 0.85. */
   utilizationThreshold?: number;
+  /** Day-scoped quota windows use this fraction when set; otherwise utilizationThreshold. */
+  weeklyUtilizationThreshold?: number;
   /** Ignore state older than this. Default 6 hours. */
   staleAfterMs?: number;
   /**
@@ -145,8 +147,8 @@ const MODEL_WINDOW_PREFIX = "model:";
  * `seven_day_overage_included`). Matched on the key's own unit segment because
  * the counts are spelled as words, not digits.
  *
- * The distinction earns its keep in one place only: whether a bare
- * `allowed_warning` is worth rotating on. Observed telemetry (both accounts,
+ * The distinction governs bare warnings and the separate weekly threshold.
+ * Observed telemetry (both accounts,
  * every observation held since 21 Jul 2026) shows the 5-hour window arriving
  * with a status and a reset time and NEVER a utilization number, while the
  * weekly windows carry a percentage — so a rule that waits for a number can
@@ -355,7 +357,7 @@ export function classifyAccountHealth(
   requestedModel?: string,
 ): AccountHealth {
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
-  const threshold = options.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
+  const generalThreshold = options.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
 
   if (!state) return { verdict: "no_data" };
 
@@ -523,6 +525,11 @@ export function classifyAccountHealth(
         reason: `${window} rejected ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; ${Math.round(resetLessBlockMs(window) / 3600000)}h block)`,
       };
     }
+    // A named, non-hour period is a long quota window. Paid overage remains
+    // governed by the general threshold when rotateOnOverage is enabled (#14).
+    const threshold = isPeriodWindow(window) && !isShortWindow(window) && !isOverageWindow(window)
+      ? options.weeklyUtilizationThreshold ?? generalThreshold
+      : generalThreshold;
     if (
       typeof w.utilization === "number" &&
       w.utilization >= threshold &&

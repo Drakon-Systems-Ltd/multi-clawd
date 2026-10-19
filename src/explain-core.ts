@@ -21,6 +21,7 @@ export interface ExplainPool {
   id: string;
   accounts: string[];
   utilizationThreshold?: number;
+  weeklyUtilizationThreshold?: number;
   minDwellMs?: number;
   degrade?: { ladder?: string[]; pins?: unknown[] };
 }
@@ -181,9 +182,12 @@ export function renderExplanation(model: ExplainModel): string {
       `  Every Claude launch runs on the first account that is NOT nearly maxed`,
     );
     lines.push(
-      `  out — hand-over at ${pct}% of any rate window, home account reclaims`,
+      `  out — hand-over at ${pct}% of ${model.pool.weeklyUtilizationThreshold !== undefined ? "other rate windows" : "any rate window"}, home account reclaims`,
     );
     lines.push(`  automatically once its window resets.`);
+    if (model.pool.weeklyUtilizationThreshold !== undefined) {
+      lines.push(`  The weekly quota window hands over at ${Math.round(model.pool.weeklyUtilizationThreshold * 100)}%.`);
+    }
     const ladder = model.pool.degrade?.ladder ?? [];
     if (ladder.length > 0) {
       lines.push(`  If the WHOLE pool is exhausted: step down to ${ladder.join(" → ")} first.`);

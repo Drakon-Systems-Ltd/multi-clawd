@@ -200,6 +200,7 @@ async function loadDirect(config) {
   const runner = run.createOpenclawRunner(directRoute.openclawCommand ?? "openclaw");
   const healthOptions = {
     utilizationThreshold: pool?.utilizationThreshold,
+    weeklyUtilizationThreshold: pool?.weeklyUtilizationThreshold,
     staleAfterMs: pool?.staleAfterMs,
     rotateOnOverage: pool?.rotateOnOverage,
   };
@@ -676,6 +677,7 @@ async function explain() {
     }
     const h = health.classifyAccountHealth(state, {
       utilizationThreshold: pool?.utilizationThreshold,
+      weeklyUtilizationThreshold: pool?.weeklyUtilizationThreshold,
       staleAfterMs: pool?.staleAfterMs,
     }, now);
     let detail = h.reason;
@@ -684,6 +686,7 @@ async function explain() {
     }
     const usage = health.summarizeWindowUsage(state, {
       utilizationThreshold: pool?.utilizationThreshold,
+      weeklyUtilizationThreshold: pool?.weeklyUtilizationThreshold,
       staleAfterMs: pool?.staleAfterMs,
     }, now);
     return { id: a.id, verdict: h.verdict, detail, usage };
@@ -742,11 +745,13 @@ async function usageCommand(args) {
   const pool = pc.pool ? { ...pc.pool, id: pc.pool.id?.trim() || "clawd", accounts: pc.pool.accounts ?? [] } : undefined;
   const healthOptions = {
     utilizationThreshold: pool?.utilizationThreshold,
+    weeklyUtilizationThreshold: pool?.weeklyUtilizationThreshold,
     staleAfterMs: pool?.staleAfterMs,
     rotateOnOverage: pool?.rotateOnOverage,
   };
   const warnThreshold = up.effectiveUsageWarnThreshold(pool?.usagePoll);
   const rotateAt = pool?.utilizationThreshold ?? 0.85;
+  const weeklyRotateAt = pool?.weeklyUtilizationThreshold;
   const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
   const now = Date.now();
   const rows = [];
@@ -797,13 +802,17 @@ async function usageCommand(args) {
     const mins = Math.max(0, Math.round((resetsAt * 1000 - now) / 60000));
     return mins < 90 ? ` (resets in ~${mins}m)` : mins < 36 * 60 ? ` (resets in ~${Math.round(mins / 60)}h)` : ` (resets in ~${Math.round(mins / 1440)}d)`;
   };
-  const mark = (u) => (u >= 1 ? "⛔" : u >= warnThreshold ? "🔴" : u >= rotateAt ? "🟠" : "🟢");
-  console.log(`\n${BOLD}🦞 multi-clawd — live usage${RESET}  ${DIM}(rotate at ${pct(rotateAt)}, warn at ${pct(warnThreshold)})${RESET}\n`);
+  const mark = (u, window) => {
+    const weekly = window && health.isPeriodWindow(window) && !health.isShortWindow(window) && !health.isOverageWindow(window);
+    const threshold = weekly ? weeklyRotateAt ?? rotateAt : rotateAt;
+    return u >= 1 ? "⛔" : u >= warnThreshold ? "🔴" : u >= threshold ? "🟠" : "🟢";
+  };
+  console.log(`\n${BOLD}🦞 multi-clawd — live usage${RESET}  ${DIM}(rotate at ${pct(rotateAt)}${weeklyRotateAt !== undefined ? `, weekly ${pct(weeklyRotateAt)}` : ""}, warn at ${pct(warnThreshold)})${RESET}\n`);
   for (const r of rows) {
     console.log(`  ${BOLD}${r.id}${RESET}${r.label ? ` ${DIM}— ${r.label}${RESET}` : ""}   pool verdict: ${r.verdict}${r.reason ? ` ${DIM}(${r.reason})${RESET}` : ""}`);
     if (r.snapshot) {
       for (const [w, u] of Object.entries(r.snapshot.windows)) {
-        console.log(`     ${mark(u.utilization)} ${up.usageWindowLabel(w).padEnd(12)} ${pct(u.utilization).padStart(4)}${until(u.resetsAt)}`);
+        console.log(`     ${mark(u.utilization, w)} ${up.usageWindowLabel(w).padEnd(12)} ${pct(u.utilization).padStart(4)}${until(u.resetsAt)}`);
       }
       for (const s of r.snapshot.scoped) {
         console.log(`     ${mark(s.utilization)} ${`${s.label} model`.padEnd(12)} ${pct(s.utilization).padStart(4)}${until(s.resetsAt)}`);

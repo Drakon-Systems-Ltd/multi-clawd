@@ -118,6 +118,16 @@ const accounts = () => [
 const pool = (extra: Record<string, unknown> = {}) => ({ id: "clawd", accounts: ["claw1", "claw2"], ...extra });
 
 describe("the poll feeds the selector", () => {
+  test("status line shows the weekly threshold only when configured", () => {
+    const configured = makeApi({ accounts: accounts(), pool: pool({ weeklyUtilizationThreshold: 0.97 }) });
+    plugin.register(configured.api as never);
+    expect(configured.info.find((m) => m.includes("usage poll: reading live usage"))).toContain("rotate at 85% (weekly 97%)");
+
+    const defaulted = makeApi({ accounts: accounts(), pool: pool() });
+    plugin.register(defaulted.api as never);
+    expect(defaulted.info.find((m) => m.includes("usage poll: reading live usage"))).toContain("rotate at 85%, warn at 95%");
+  });
+
   test("a 5-hour window at 90% rotates the next launch off home; 100% is exhausted until the provider's reset", async () => {
     const endpoint = fakeEndpoint({ "tok-one": usageBody(90), "tok-two": usageBody(5) });
     const { api, prepare, info } = makeApi({ accounts: accounts(), pool: pool() });

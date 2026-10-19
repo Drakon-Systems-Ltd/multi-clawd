@@ -47,6 +47,12 @@
             "type": "number",
             "description": "Hand over when any rate-limit window's utilization reaches this fraction. Default 0.85."
           },
+          "weeklyUtilizationThreshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Hand over when a day-scoped quota window (such as seven_day) reaches this fraction. Defaults to utilizationThreshold. The seven_day_overage_included window keeps using utilizationThreshold when rotateOnOverage is true."
+          },
           "staleAfterMs": {
             "type": "number",
             "description": "Ignore health data older than this. Default 21600000 (6h)."

@@ -529,6 +529,7 @@ else {
     const healthOptions = {
       staleAfterMs: pool.staleAfterMs,
       utilizationThreshold: pool.utilizationThreshold,
+      weeklyUtilizationThreshold: pool.weeklyUtilizationThreshold,
       rotateOnOverage: pool.rotateOnOverage,
     };
     const verdicts = members.map((id) => ({
@@ -876,6 +877,7 @@ if (accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) {
         readHealth,
         healthOptions: {
           utilizationThreshold: pool?.utilizationThreshold,
+          weeklyUtilizationThreshold: pool?.weeklyUtilizationThreshold,
           staleAfterMs: pool?.staleAfterMs,
           rotateOnOverage: pool?.rotateOnOverage,
         },
