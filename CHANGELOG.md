@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-19
+
 ### Added
 - Pool `weeklyUtilizationThreshold` lets day/week/month-scale quota windows rotate at a
   separate fraction. It defaults to `utilizationThreshold`; paid overage still
@@ -31,6 +33,12 @@ versioning from v1.0.
   "Published" line is the workflow's own message, not a registry read, and a
   failed `npm view` is inconclusive, not "missing". A CI-collected test keeps
   the runbook in step with the workflows. Docs and tests only.
+- **First public-source class radar** at
+  `reports/multi-clawd-class-radar/2026-10-18.md`. It compares multi-clawd with
+  10 standalone Claude Code multi-account switchers, proxies and wrappers, plus
+  OpenClaw core's auth-profile rotation and ClawHub, using only public READMEs
+  and docs. Competitor capabilities are recorded as claimed, not verified. The
+  report lives in the repo only and is not part of the npm package. Docs only. (#58)
 
 ## [2.1.3] - 2026-10-18
 
