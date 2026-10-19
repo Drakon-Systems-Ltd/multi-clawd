@@ -18,6 +18,15 @@ versioning from v1.0.
   assessment + two windows or the 24h proof. A recorded CLI failure still
   removes it at once. Tests and docs only; no behaviour change. (#52)
 
+### Documentation
+- **`PUBLISHING.md` now matches the release workflows.** It covers the
+  committed lockfile (`npm ci` for local checks), landing the version bump
+  through a pull request before tagging, re-running the ClawHub workflow with
+  an explicit `version`, and what counts as evidence: the ClawHub
+  "Published" line is the workflow's own message, not a registry read, and a
+  failed `npm view` is inconclusive, not "missing". A CI-collected test keeps
+  the runbook in step with the workflows. Docs and tests only.
+
 ## [2.1.3] - 2026-10-18
 
 ### Fixed

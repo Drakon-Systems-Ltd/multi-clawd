@@ -22,12 +22,18 @@ workflows:
 Pushing a tag on its own publishes **nothing**; neither workflow has a `push`
 trigger. A draft release does not fire `published` until it is published.
 
+A third workflow, `.github/workflows/ci.yml`, runs on every pull request and on
+pushes to `master`: install, `npm run build`, `npm test` on Node 22 and 24, with
+`contents: read` only. It never publishes; a green CI run is not evidence of a
+release.
+
 `npm-publish.yml`, on the release event:
 
 1. checks that the release tag (`vX.Y.Z`) matches `package.json` `version`,
    and fails if not;
-2. `npm install --no-audit --no-fund` — **not** `npm ci`: the repo gitignores
-   `package-lock.json`, and `npm ci` refuses to run without a lockfile;
+2. `npm install --no-audit --no-fund` on Node 24 (npm 11), resolving against
+   the committed `package-lock.json` (`npm install` may adjust it inside the
+   run; the lockfile is never shipped in the package);
 3. `npm run build` (`tsc`);
 4. `npm test` (`vitest run` — already non-watch, no extra flags needed);
 5. `npm publish --access public --provenance`.
@@ -62,19 +68,25 @@ the bump — which is why step 2 re-runs it.
 1. **Clean tree, green build and tests, on an up-to-date `master`:**
    ```bash
    git switch master && git pull
-   npm install && npm run build && npm test
+   npm ci && npm run build && npm test
    ```
+   `npm ci` installs exactly the committed `package-lock.json` and does not
+   rewrite it. The publish workflows run on Node 24 (npm 11). CI's Node 22
+   lane upgrades to npm 11 first (see the comment in `ci.yml`); the committed
+   lockfile also lets npm 10 install the tree.
 
 2. **Bump the version, sync the derived files, update the changelog:**
    ```bash
-   npm version <X.Y.Z> --no-git-tag-version         # package.json
+   npm version <X.Y.Z> --no-git-tag-version         # package.json + package-lock.json
    npm run sync-manifest                            # openclaw.plugin.json
    npm run sync-readme-tag                          # README's pinned SETUP-AGENT.md URL
    npm test                                         # re-run: guards the syncs
    ```
-   The two sync commands are **not optional** — see the warning above. Then
-   add the release's items under a new `## [X.Y.Z] - <date>` heading in
-   CHANGELOG.md.
+   The two sync commands are **not optional** — see the warning above.
+   `npm version` itself bumps the version in `package-lock.json` (that is not
+   a hook); `tests/package-lock.test.ts` fails if the lockfile and
+   `package.json` disagree. Then move the `## [Unreleased]` items under a new
+   `## [X.Y.Z] - <date>` heading in CHANGELOG.md.
 
 3. **Inspect the package contents locally** (dry run — uploads nothing):
    ```bash
@@ -84,14 +96,18 @@ the bump — which is why step 2 re-runs it.
    `dependencies` block** (openclaw is peer-only), nothing under `src/` or
    `tests/`. Also run the pre-commit scan in `CLAUDE.md`.
 
-4. **Commit, tag that commit, push:**
+4. **Land the bump on `master`, then tag the merged commit:**
+   commit `package.json`, `package-lock.json`, `openclaw.plugin.json`,
+   `README.md` and `CHANGELOG.md` on a release branch and merge it through a
+   pull request (CI runs on it). Then tag the commit on `master` that carries
+   the bump:
    ```bash
-   git commit -am "chore(release): X.Y.Z"
+   git switch master && git pull
    git tag vX.Y.Z
-   git push && git push origin vX.Y.Z
+   git push origin vX.Y.Z
    ```
    The tag must point at the commit that carries the bumped `package.json`,
-   or the workflow's tag check fails.
+   or the workflow's tag check fails. Pushing the tag publishes nothing.
 
 5. **Publish the GitHub Release** — this is the step that publishes:
    ```bash
@@ -163,6 +179,20 @@ If the fix needs a source change, ship it as a **new patch version**. Never
 move, delete or re-point a tag that a release was cut from, and never try to
 replace a published version.
 
+## When the ClawHub workflow fails
+
+Same rule: read the log, check ClawHub for version `X.Y.Z` before re-running,
+and re-run once, deliberately. `clawhub-publish.yml` has a `workflow_dispatch`
+input `version`; without it the run falls back to the most recent git tag
+(`git describe --tags`), which may not be the release you mean. The leading
+`v` is optional. On dispatch there is no release body, so the changelog text is
+taken from the `## [X.Y.Z]` section of CHANGELOG.md. The run publishes the
+package built from the ref you dispatch from, so dispatch from the release tag
+and pass the version explicitly:
+```bash
+gh workflow run clawhub-publish.yml --ref vX.Y.Z -f version=X.Y.Z
+```
+
 ## Manual (emergency) publishing
 
 Publishing from a workstation bypasses the workflow's checks and carries no
@@ -185,14 +215,15 @@ upgrading the plugin on a host (`openclaw plugins install|update`,
 against it are host operations: they need their own authorisation from whoever
 operates that host and are verified on that host — not as part of a release.
 
-For reference, the host-side commands look like this:
+For reference, a host-side upgrade installs the pinned package, then restarts
+that host's OpenClaw gateway (an interruption for anything it is serving, so
+only when that host's operator has agreed), then probes it:
 ```bash
 openclaw plugins install @drakon-systems/multi-clawd --pin
-openclaw gateway restart
 npx @drakon-systems/multi-clawd doctor --probe
 ```
 A host moving from a path-installed `multi-clawd` to the registry package
-uninstalls the path install first (`openclaw plugins uninstall multi-clawd`).
+first removes the path install through OpenClaw's plugin uninstall command.
 Plugin identity is keyed by the manifest `id` (`multi-clawd`), independent of
 the npm package name, so config and health-state under
 `plugins.entries["multi-clawd"]` are expected to carry over — confirm that on
