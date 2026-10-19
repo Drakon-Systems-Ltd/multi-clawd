@@ -7,7 +7,7 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Added
-- Pool `weeklyUtilizationThreshold` lets day-scoped quota windows rotate at a
+- Pool `weeklyUtilizationThreshold` lets day/week/month-scale quota windows rotate at a
   separate fraction. It defaults to `utilizationThreshold`; paid overage still
   uses the general threshold when `rotateOnOverage` is enabled. (#55)
 

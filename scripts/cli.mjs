@@ -803,7 +803,7 @@ async function usageCommand(args) {
     return mins < 90 ? ` (resets in ~${mins}m)` : mins < 36 * 60 ? ` (resets in ~${Math.round(mins / 60)}h)` : ` (resets in ~${Math.round(mins / 1440)}d)`;
   };
   const mark = (u, window) => {
-    const weekly = window && health.isPeriodWindow(window) && !health.isShortWindow(window) && !health.isOverageWindow(window);
+    const weekly = window && health.isLongQuotaWindow(window);
     const threshold = weekly ? weeklyRotateAt ?? rotateAt : rotateAt;
     return u >= 1 ? "⛔" : u >= warnThreshold ? "🔴" : u >= threshold ? "🟠" : "🟢";
   };

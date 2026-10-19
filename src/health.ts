@@ -48,7 +48,7 @@ export interface AccountHealth {
 export interface HealthOptions {
   /** Rotate when any window's utilization reaches this fraction. Default 0.85. */
   utilizationThreshold?: number;
-  /** Day-scoped quota windows use this fraction when set; otherwise utilizationThreshold. */
+  /** Day/week/month-scale quota windows use this fraction when set; otherwise utilizationThreshold. */
   weeklyUtilizationThreshold?: number;
   /** Ignore state older than this. Default 6 hours. */
   staleAfterMs?: number;
@@ -60,7 +60,7 @@ export interface HealthOptions {
   rotateOnOverage?: boolean;
 }
 
-const DEFAULT_UTILIZATION_THRESHOLD = 0.85;
+export const DEFAULT_UTILIZATION_THRESHOLD = 0.85;
 const DEFAULT_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 
 /**
@@ -147,7 +147,7 @@ const MODEL_WINDOW_PREFIX = "model:";
  * `seven_day_overage_included`). Matched on the key's own unit segment because
  * the counts are spelled as words, not digits.
  *
- * The distinction governs bare warnings and the separate weekly threshold.
+ * The distinction governs bare warnings.
  * Observed telemetry (both accounts,
  * every observation held since 21 Jul 2026) shows the 5-hour window arriving
  * with a status and a reset time and NEVER a utilization number, while the
@@ -192,6 +192,11 @@ export function isPeriodWindow(window: string): boolean {
  */
 export function isOverageWindow(window: string): boolean {
   return /overage/i.test(window);
+}
+
+/** Day/week/month-scale quota windows use the optional weekly threshold. */
+export function isLongQuotaWindow(window: string): boolean {
+  return /(^|_)(days?|weeks?|months?)(_|$)/.test(window) && !isOverageWindow(window);
 }
 
 /**
@@ -525,9 +530,9 @@ export function classifyAccountHealth(
         reason: `${window} rejected ${Math.round((nowMs - w.seenAt) / 60000)}m ago (no reset time; ${Math.round(resetLessBlockMs(window) / 3600000)}h block)`,
       };
     }
-    // A named, non-hour period is a long quota window. Paid overage remains
+    // A day/week/month period is a long quota window. Paid overage remains
     // governed by the general threshold when rotateOnOverage is enabled (#14).
-    const threshold = isPeriodWindow(window) && !isShortWindow(window) && !isOverageWindow(window)
+    const threshold = isLongQuotaWindow(window)
       ? options.weeklyUtilizationThreshold ?? generalThreshold
       : generalThreshold;
     if (

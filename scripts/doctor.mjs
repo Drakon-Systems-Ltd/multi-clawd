@@ -301,6 +301,7 @@ const { summarizeWindowUsage, classifyAccountHealth, overdueProbeAccount, lastAu
     "overdueProbeAccount",
     "lastAuthSuccessAt",
   ]);
+const { DEFAULT_UTILIZATION_THRESHOLD } = await import(join(REPO_DIR, "dist", "health.js"));
 // "cli", like the chain audits: resolving WHICH login backs an account is
 // doctor's own diagnostic, not a description of the running plugin's
 // behaviour. Asking the installed copy meant a fix to the resolver could not
@@ -495,6 +496,9 @@ else {
   const members = (pool.accounts ?? []).filter((id) => accounts.some((a) => a.id === id));
   if (members.length < 2) bad(`pool "${pool.id ?? "clawd"}" has ${members.length} valid member(s); needs ≥ 2`);
   else ok(`pool "${pool.id ?? "clawd"}": ${members.join(" → ")}`);
+  const generalThreshold = pool.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
+  const weeklyThreshold = pool.weeklyUtilizationThreshold ?? generalThreshold;
+  note(`thresholds: general ${Math.round(generalThreshold * 100)}%, weekly ${Math.round(weeklyThreshold * 100)}%${pool.weeklyUtilizationThreshold === undefined ? " (follows general)" : ""}`);
   // Setup-token members: what they do and do not get, said once, plainly.
   const tokenMembers = members
     .map((id) => accounts.find((a) => a.id === id))

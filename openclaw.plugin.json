@@ -51,7 +51,7 @@
             "type": "number",
             "minimum": 0,
             "maximum": 1,
-            "description": "Hand over when a day-scoped quota window (such as seven_day) reaches this fraction. Defaults to utilizationThreshold. The seven_day_overage_included window keeps using utilizationThreshold when rotateOnOverage is true."
+            "description": "Hand over when a day/week/month-scale quota window (such as seven_day) reaches this fraction. Defaults to utilizationThreshold. Minute/hour and overage windows keep using utilizationThreshold; overage rotation still requires rotateOnOverage."
           },
           "staleAfterMs": {
             "type": "number",

@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, test } from "vitest";
-import { classifyAccountHealth } from "../src/health";
+import { classifyAccountHealth, isLongQuotaWindow } from "../src/health";
 import { renderExplanation } from "../src/explain-core";
 import type { AccountHealthState } from "../src/shim-core";
 
@@ -16,6 +19,20 @@ function state(window: string, utilization: number): AccountHealthState {
 
 describe("weekly utilization threshold (#55)", () => {
   const options = { utilizationThreshold: 0.85, weeklyUtilizationThreshold: 0.97 };
+
+  test("only day/week/month quota windows take the weekly threshold", () => {
+    for (const window of ["two_minutes", "five_hour", "seven_day_overage_included"]) {
+      expect(isLongQuotaWindow(window)).toBe(false);
+    }
+    for (const window of ["seven_day", "two_weeks", "one_month", "usage:seven_day"]) {
+      expect(isLongQuotaWindow(window)).toBe(true);
+    }
+    expect(classifyAccountHealth(state("two_minutes", 0.9), options, NOW).verdict).toBe("near_limit");
+    expect(classifyAccountHealth(state("five_hour", 0.9), options, NOW).verdict).toBe("near_limit");
+    expect(classifyAccountHealth(state("seven_day", 0.9), options, NOW).verdict).toBe("ok");
+    expect(classifyAccountHealth(state("seven_day_overage_included", 0.9), { ...options, rotateOnOverage: true }, NOW).verdict).toBe("near_limit");
+    expect(classifyAccountHealth(state("seven_day", 0.9), { utilizationThreshold: 0.85 }, NOW).verdict).toBe("near_limit");
+  });
 
   test("weekly quota at 90% stays available while the session at 90% rotates", () => {
     expect(classifyAccountHealth(state("seven_day", 0.9), options, NOW).verdict).toBe("ok");
@@ -52,7 +69,30 @@ describe("weekly utilization threshold (#55)", () => {
       pool: { id: "clawd", accounts: ["claw1"], ...options },
       health: [],
     });
-    expect(out).toContain("85%");
-    expect(out).toMatch(/weekly.*97%/);
+    expect(out).toContain("Thresholds: general 85%, weekly 97%");
+    expect(out).toContain("day/week/month quota windows");
+    const unset = renderExplanation({ accounts: [], pool: { id: "clawd", accounts: ["claw1"] }, health: [] });
+    expect(unset).toContain("Thresholds: general 85%, weekly 85% (follows general)");
+  });
+
+  test("doctor reports configured and inherited pool thresholds", () => {
+    const home = mkdtempSync(join(tmpdir(), "multi-clawd-doctor-threshold-"));
+    const openclaw = join(home, ".openclaw");
+    const extension = join(openclaw, "extensions", "multi-clawd");
+    const stateDir = join(openclaw, "state", "multi-clawd");
+    mkdirSync(extension, { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    copyFileSync(resolve("openclaw.plugin.json"), join(extension, "openclaw.plugin.json"));
+    writeFileSync(join(stateDir, "registry-check.json"), JSON.stringify({ latest: "2.1.3", checkedAt: Date.now() }));
+    const run = (pool: object) => {
+      writeFileSync(join(openclaw, "openclaw.json"), JSON.stringify({ plugins: { entries: { "multi-clawd": { enabled: true, config: { accounts: [], pool: { id: "clawd", accounts: [], ...pool } } } } } }));
+      const result = spawnSync(process.execPath, [resolve("scripts/doctor.mjs")], {
+        env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 30_000,
+      });
+      expect(result.error).toBeUndefined();
+      return result.stdout + result.stderr;
+    };
+    expect(run({ utilizationThreshold: 0.85, weeklyUtilizationThreshold: 0.97 })).toContain("thresholds: general 85%, weekly 97%");
+    expect(run({})).toContain("thresholds: general 85%, weekly 85% (follows general)");
   });
 });

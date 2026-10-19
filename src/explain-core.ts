@@ -6,6 +6,7 @@
  *
  * Secret references are never printed — only the provider name.
  */
+import { DEFAULT_UTILIZATION_THRESHOLD } from "./health.js";
 
 export interface ExplainAccount {
   id: string;
@@ -176,18 +177,18 @@ export function renderExplanation(model: ExplainModel): string {
   lines.push("");
 
   if (model.pool) {
-    const pct = Math.round((model.pool.utilizationThreshold ?? 0.85) * 100);
+    const generalThreshold = model.pool.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
+    const weeklyThreshold = model.pool.weeklyUtilizationThreshold ?? generalThreshold;
     lines.push(`POOL  ${model.pool.id}  (${model.pool.accounts.join(" → ")})`);
     lines.push(
-      `  Every Claude launch runs on the first account that is NOT nearly maxed`,
+      `  Every Claude launch runs on the first account below its threshold;`,
     );
     lines.push(
-      `  out — hand-over at ${pct}% of ${model.pool.weeklyUtilizationThreshold !== undefined ? "other rate windows" : "any rate window"}, home account reclaims`,
+      `  the home account reclaims work`,
     );
     lines.push(`  automatically once its window resets.`);
-    if (model.pool.weeklyUtilizationThreshold !== undefined) {
-      lines.push(`  The weekly quota window hands over at ${Math.round(model.pool.weeklyUtilizationThreshold * 100)}%.`);
-    }
+    lines.push(`  Thresholds: general ${Math.round(generalThreshold * 100)}%, weekly ${Math.round(weeklyThreshold * 100)}%${model.pool.weeklyUtilizationThreshold === undefined ? " (follows general)" : ""}.`);
+    lines.push(`  The weekly threshold applies to day/week/month quota windows; overage uses the general threshold.`);
     const ladder = model.pool.degrade?.ladder ?? [];
     if (ladder.length > 0) {
       lines.push(`  If the WHOLE pool is exhausted: step down to ${ladder.join(" → ")} first.`);
