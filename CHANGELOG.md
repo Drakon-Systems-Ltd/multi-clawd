@@ -9,6 +9,9 @@ versioning from v1.0.
 ## [2.4.0] - 2026-10-20
 
 ### Added
+- Accounts can be benched with `accounts[].disabled: true` and restored with
+  `multi-clawd account disable <id>` / `enable <id>`. The CLI preserves unrelated
+  config text and writes a timestamped backup before each change. (#57)
 - Optional `pool.sessionAffinity` keeps a healthy Claude CLI session on the
   account that last served it. Pins expire, are size bounded, and update after
   successful in-turn retries; `sessionAffinityTtlMs` sets their lifetime. (#56)

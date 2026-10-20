@@ -104,6 +104,28 @@ describe("profile ids", () => {
   });
 });
 
+test("disabled direct profile remains managed but is excluded from order", () => {
+  const { members } = collectDirectMembers([
+    { id: "claw1", oauthTokenRef: REF, direct: true, disabled: true },
+    { id: "claw2", oauthTokenRef: REF2, direct: true },
+  ]);
+  expect(members.map((m) => m.disabled)).toEqual([true, false]);
+  const order = planDirectOrder({
+    members: members.map((m) => ({ ...m, verdict: "ok" as const })),
+    currentOrder: ["anthropic:claw1", "anthropic:foreign", "anthropic:claw2"],
+    nowMs: Date.now(),
+  });
+  expect(order?.order).toEqual(["anthropic:claw2", "anthropic:foreign"]);
+});
+
+test("all disabled direct members fail closed with the setting named", () => {
+  expect(() => planDirectOrder({
+    members: [{ accountId: "claw1", profileId: "anthropic:claw1", verdict: "ok", disabled: true }],
+    currentOrder: ["anthropic:claw1"],
+    nowMs: Date.now(),
+  })).toThrow("pool.accounts[].disabled");
+});
+
 describe("collectDirectMembers", () => {
   test("pool order first, then remaining accounts; problems reported, not dropped silently", () => {
     const { members, problems } = collectDirectMembers(

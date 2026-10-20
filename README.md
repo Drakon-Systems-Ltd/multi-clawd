@@ -30,6 +30,7 @@ multi-clawd update    # install (or update) the OpenClaw plugin — right flags,
 multi-clawd setup     # guided wizard: accounts, isolated second login, pool, watchdog
 multi-clawd login claw2   # launch the right Claude sign-in for an account (or re-auth it)
 multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
+multi-clawd account disable claw2 --dry-run  # preview benching an account
 multi-clawd chain     # audit your model routing — what actually serves each turn
 multi-clawd direct    # the direct anthropic/* route: status, or `direct sync` (v1.9, optional)
 multi-clawd doctor    # health check (add --probe for a live end-to-end turn)
@@ -546,6 +547,7 @@ error.
   "accounts": [
     { "id": "claw1", "label": "Main Claude", "native": true },
     { "id": "claw2", "label": "Second Max", "configDir": "~/.claw2",
+      // "disabled": true, // optional; default false: bench without removing the pool member
       // v0.3 preferred: resolve via your gateway's secret providers —
       // no plaintext token file on disk
       "oauthTokenRef": { "source": "exec", "provider": "onepassword",
@@ -579,6 +581,25 @@ error.
   }
 } }
 ```
+
+Set `accounts[].disabled: true` to bench a member while keeping it in
+`pool.accounts` and visible in `explain`, `doctor`, and `usage` as "disabled by
+operator". It is excluded from pool selection, in-turn retries, session
+affinity, and the managed direct Anthropic order. Transcript lookup still
+searches its session directory. To edit `~/.openclaw/openclaw.json` with a
+timestamped backup and without reformatting unrelated config, run
+`multi-clawd account disable <id>` or `multi-clawd account enable <id>`.
+Add `--dry-run` to preview without writing anything. If every pool member is
+disabled, pooled launches fail closed with an error naming
+`pool.accounts[].disabled`; they never fall back to a disabled member.
+On the direct `anthropic/*` route, a disabled member is left out of the order
+multi-clawd writes. If every direct member is disabled, multi-clawd stops
+managing that order and logs a warning naming `pool.accounts[].disabled`, but
+it cannot empty an order OpenClaw has already stored, so clear or edit that
+stored order yourself if the direct route must not use those profiles.
+Changes take effect when the plugin next reads its config, for example after
+a gateway reload. A turn already admitted or running continues on its selected
+account; the command does not interrupt it.
 
 `pool.strategy` defaults to `"ordered"`, which retains the configured account
 order. Set it to `"reset-aware"` to use healthy weekly quota before its

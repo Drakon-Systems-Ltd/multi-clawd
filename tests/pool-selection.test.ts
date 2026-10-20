@@ -23,7 +23,7 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.dir, default: { ...actual, homedir: () => home.dir } };
 });
 
-const { registerPoolBackend, healthStateFile, pendingOperatorAlerts } = await import("../src/index.js");
+const { registerPoolBackend, buildRetryRoster, healthStateFile, pendingOperatorAlerts } = await import("../src/index.js");
 
 const NOW_S = () => Math.floor(Date.now() / 1000);
 
@@ -45,7 +45,7 @@ interface Registered {
   logs: { info: string[]; warn: string[]; error: string[] };
 }
 
-function registerPool(poolOverrides: Record<string, unknown> = {}): Registered {
+function registerPool(poolOverrides: Record<string, unknown> = {}, disabledIds: string[] = []): Registered {
   let backend: { id?: string; prepareExecution?: unknown } | undefined;
   const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] };
   const api = {
@@ -63,8 +63,8 @@ function registerPool(poolOverrides: Record<string, unknown> = {}): Registered {
     api,
     { id: "clawd", accounts: ["claw1", "claw2"], ...poolOverrides },
     [
-      { id: "claw1", configDir: "/tmp/claw1-login" },
-      { id: "claw2", configDir: "/tmp/claw2-login" },
+      { id: "claw1", configDir: "/tmp/claw1-login", disabled: disabledIds.includes("claw1") },
+      { id: "claw2", configDir: "/tmp/claw2-login", disabled: disabledIds.includes("claw2") },
     ],
     new Set(["claw1", "claw2"]),
   );
@@ -101,6 +101,30 @@ afterEach(() => {
 });
 
 describe("pool selection wiring", () => {
+  test("retry roster skips disabled siblings while retaining enabled ones", () => {
+    const roster = buildRetryRoster([
+      { id: "a", configDir: "/tmp/a" },
+      { id: "b", configDir: "/tmp/b", disabled: true },
+      { id: "c", configDir: "/tmp/c" },
+    ], "a");
+    expect(roster.map((entry) => entry.id)).toEqual(["c"]);
+  });
+  test("disabled home is excluded from selection, retry and affinity but retained for transcript lookup", async () => {
+    const { prepare } = registerPool({ sessionAffinity: true }, ["claw1"]);
+    const { env } = await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
+    expect(env.MULTI_CLAWD_ACCOUNT_ID).toBe("claw2");
+    expect(JSON.parse(env.MULTI_CLAWD_SESSION_DIRS)).toEqual(["/tmp/claw1-login", "/tmp/claw2-login"]);
+    expect(env.MULTI_CLAWD_RETRY_ACCOUNTS).toBeUndefined();
+    const affinity = JSON.parse(env.MULTI_CLAWD_SESSION_AFFINITY);
+    expect(affinity.verdicts.map((v: { id: string }) => v.id)).toEqual(["claw2"]);
+    expect(affinity.roster.map((v: { id: string }) => v.id)).toEqual(["claw2"]);
+  });
+
+  test("all disabled members fail closed with the setting named", async () => {
+    const { prepare } = registerPool({}, ["claw1", "claw2"]);
+    await expect(prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" }))
+      .rejects.toThrow("pool.accounts[].disabled");
+  });
   test("with no telemetry at all, the launch stays on the home account", async () => {
     expect(await chosenAccount()).toContain("claw1");
   });

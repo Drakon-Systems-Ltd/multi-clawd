@@ -161,6 +161,8 @@ const CLI_RESUME_WATCHDOG_DEFAULTS = {
 export interface AccountConfig {
   id: string;
   label?: string;
+  /** Exclude from pool, retries, affinity and direct order until re-enabled. */
+  disabled?: boolean;
   /**
    * Use the machine's native Claude login (default config dir + OS keychain).
    * No configDir/token: on macOS the keychain is only consulted when
@@ -1091,6 +1093,7 @@ export function buildRetryRoster(
 ): Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }> {
   const roster: Array<{ id: string; stateFile: string; env: Record<string, string>; tokenFile?: string }> = [];
   for (const member of members) {
+    if (member.disabled === true) continue;
     if (member.id === launchedId) continue;
     // Native wins over any declared token (validateAccountTokenSources), and a
     // file wins over a ref — the same precedence the launch path applies.
@@ -1532,9 +1535,10 @@ export function registerPoolBackend(
   if (!pool) return;
   const poolId = pool.id?.trim() || "clawd";
   const memberIds = (pool.accounts ?? []).filter((id) => registeredIds.has(id));
-  const members = memberIds
+  const configuredMembers = memberIds
     .map((id) => accounts.find((a) => a.id.trim() === id))
     .filter((a): a is AccountConfig => a !== undefined);
+  const members = configuredMembers.filter((a) => a.disabled !== true);
   const ladder = (pool.degrade?.ladder ?? []).filter((m) => {
     if (isModernClaudeModelId(m)) return true;
     logger.warn(`[multi-clawd] pool "${poolId}": ignoring invalid degrade ladder entry "${m}"`);
@@ -1543,7 +1547,10 @@ export function registerPoolBackend(
   const pins = pool.degrade?.pins ?? [];
   // A single-account pool is meaningful with a degrade ladder: the pool then
   // exists purely to step tiers on that one account (single-account hosts).
-  if (members.length < 2 && !(members.length === 1 && ladder.length > 0)) {
+  if (members.length === 0 && memberIds.length > 0) {
+    logger.error(`[multi-clawd] pool "${poolId}": every member has pool.accounts[].disabled: true`);
+  }
+  if (members.length < 2 && !(members.length === 0 && memberIds.length > 0) && !(members.length === 1 && (ladder.length > 0 || memberIds.length > 1))) {
     logger.warn(
       `[multi-clawd] pool "${poolId}" has ${members.length} registered account(s) — need at least 2 (or 1 with a degrade ladder); pool not registered`,
     );
@@ -1574,6 +1581,7 @@ export function registerPoolBackend(
   const backend = buildBackend(poolAccount, execMode, deps?.launch);
   const { launch, transport } = launchTransports.get(backend)!;
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
+    if (members.length === 0) throw new Error(`[multi-clawd] pool "${poolId}": every member has pool.accounts[].disabled: true`);
     const now = Date.now();
     // Model-aware (v0.3.6): a model-scoped rejected window (reactive 429
     // capture) exhausts an account only for the model this launch requests.
@@ -1800,7 +1808,7 @@ export function registerPoolBackend(
     // Resume handover: the stored CLI session for this backend may have been
     // written by a different member. The shim sees the session id (argv) and
     // copies the newest transcript into the launched account's dir. Paths only.
-    env[SESSION_DIRS_ENV] = JSON.stringify([...new Set(members.map(accountConfigDir))]);
+    env[SESSION_DIRS_ENV] = JSON.stringify([...new Set(configuredMembers.map(accountConfigDir))]);
     if (pool.sessionAffinity) {
       env[SESSION_AFFINITY_ENV] = JSON.stringify({
         file: join(homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sessions.json`),
@@ -1974,6 +1982,11 @@ export function startDirectOrderSync(params: {
     stopDirectOrderSync();
     return { active: false, members: members.map((m) => m.accountId) };
   }
+  if (members.every((m) => m.disabled)) {
+    stopDirectOrderSync();
+    logger.warn("[multi-clawd] direct route: pool.accounts[].disabled: every direct member is disabled");
+    return { active: false, members: [] };
+  }
   const requested = params.directRoute?.agents?.length ? params.directRoute.agents : ["main"];
   const agents = requested.filter((a) => {
     if (isValidAgentId(a)) return true;
@@ -1994,7 +2007,7 @@ export function startDirectOrderSync(params: {
     rotateOnOverage: params.pool?.rotateOnOverage,
   };
   const signature = JSON.stringify({
-    members: members.map((m) => m.profileId),
+    members: members.map(({ accountId, profileId, source, disabled }) => ({ accountId, profileId, source, disabled })),
     agents,
     intervalMs,
     healthOptions,

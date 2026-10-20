@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -94,5 +94,43 @@ describe("weekly utilization threshold (#55)", () => {
     };
     expect(run({ utilizationThreshold: 0.85, weeklyUtilizationThreshold: 0.97 })).toContain("thresholds: general 85%, weekly 97%");
     expect(run({})).toContain("thresholds: general 85%, weekly 85% (follows general)");
+  });
+
+  test("doctor warns for a pool with one enabled and one benched member", () => {
+    const home = mkdtempSync(join(tmpdir(), "multi-clawd-doctor-benched-"));
+    const openclaw = join(home, ".openclaw");
+    const extension = join(openclaw, "extensions", "multi-clawd");
+    const stateDir = join(openclaw, "state", "multi-clawd");
+    mkdirSync(extension, { recursive: true });
+    mkdirSync(stateDir, { recursive: true });
+    copyFileSync(resolve("openclaw.plugin.json"), join(extension, "openclaw.plugin.json"));
+    writeFileSync(join(stateDir, "registry-check.json"), JSON.stringify({ latest: "2.3.0", checkedAt: Date.now() }));
+    const run = (accounts: object[], poolAccounts: string[], degrade?: object) => {
+      writeFileSync(join(openclaw, "openclaw.json"), JSON.stringify({
+        plugins: { entries: { "multi-clawd": { enabled: true, config: {
+          accounts, pool: { id: "clawd", accounts: poolAccounts, degrade },
+        } } } },
+      }));
+      const result = spawnSync(process.execPath, [resolve("scripts/doctor.mjs")], {
+        env: { ...process.env, HOME: home }, encoding: "utf8", timeout: 30_000,
+      });
+      expect(result.error).toBeUndefined();
+      return result.stdout + result.stderr;
+    };
+    try {
+      const claw1 = { id: "claw1", native: true };
+      const claw2 = { id: "claw2", configDir: join(home, "claw2"), disabled: true };
+      const benched = run([claw1, claw2], ["claw1", "claw2"]);
+      expect(benched).toMatch(/⚠️\s+pool "clawd" has 1 valid member\(s\)/);
+      expect(benched).not.toMatch(/❌\s+pool "clawd" has 1 valid member\(s\)/);
+
+      const undersized = run([claw1], ["claw1"]);
+      expect(undersized).toMatch(/❌\s+pool "clawd" has 1 valid member\(s\); needs ≥ 2/);
+
+      const ladder = run([claw1], ["claw1"], { ladder: ["claude-sonnet-4-5"] });
+      expect(ladder).toMatch(/ℹ️\s+pool "clawd" has 1 valid member\(s\) with a degrade ladder/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
