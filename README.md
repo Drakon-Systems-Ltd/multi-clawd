@@ -558,6 +558,8 @@ error.
     "utilizationThreshold": 0.85,     // default hand-over; minute/hour and overage windows use this
     "weeklyUtilizationThreshold": 0.97, // optional: day/week/month quota windows at 97%
     "minDwellMs": 600000,             // v0.3: anti-flap dwell before returning home
+    "sessionAffinity": true,          // optional; default false: keep healthy CLI sessions on their serving account
+    "sessionAffinityTtlMs": 2592000000, // optional; default 30 days
     "degrade": {                      // v0.3.5: last step before provider drop
       "ladder": ["claude-opus-4-8"],  // whole pool exhausted → same account, lower tier
       "pins": [                       // contractual lanes never degrade
@@ -586,6 +588,20 @@ near-limit or exhausted accounts never outrank a healthy one. Equal reset
 times keep pool order. The existing `minDwellMs` delay still holds an account
 that remains usable. Both CLI launches and the direct Anthropic route use the
 same preference. Other values are rejected by the plugin config schema.
+
+`pool.sessionAffinity: true` remembers the account that successfully served each
+Claude CLI session (`--session-id` or `--resume`) and prefers it on later turns
+while its health is `ok` or `no_data`. A near-limit or otherwise unhealthy
+account loses its pin; the successful replacement becomes the new pin. New
+sessions and launches without a session id keep normal pool selection. Pins
+live in `~/.openclaw/state/multi-clawd/pool-<id>.sessions.json`, expire after
+30 days by default (`sessionAffinityTtlMs`), and are capped at 1000 sessions.
+This applies to shimmed CLI launches; direct Anthropic and side-question
+launches keep their existing routing. The shim can switch to native,
+config-dir, and token-file accounts. On verified OpenClaw launches, the
+gateway also resolves a pinned secret-reference account at execution time.
+Legacy shim launches fall back to normal selection when a secret-reference
+pin needs a different account.
 
 How it decides, per launch (all data from each account's live
 `rate_limit_event` stream, captured by the shim):
@@ -878,7 +894,7 @@ callsite (the ones static scanners flag) and why each exists.
 | Network | The gateway plugin polls `https://api.anthropic.com/api/oauth/usage` for eligible pooled accounts on an interval (default 120000 ms / 2 minutes); `pool.usagePoll.enabled: false` disables that poll. `multi-clawd usage` requests the same endpoint on demand. `doctor` runs `npm view` when its registry cache is stale; install and update commands contact the package registry. Claude Code subprocesses make their own provider requests. No plugin telemetry or analytics endpoint. |
 | Credentials | Reads declared setup-token files or gateway-resolved `oauthTokenRef` values for Claude child launches; reads each eligible account's `.credentials.json` access token for the usage poll; reads Claude login credentials from files or the macOS Keychain via the `security` CLI for login checks and runtime auth; reads account identity for file-backed logins from `.claude.json` (`~/.claude.json` for a native login, or the account config dir). Setup tokens are passed to Claude through the child environment. |
 | Files read | `~/.openclaw/openclaw.json`, declared account config dirs and token files, Claude `.credentials.json` and `.claude.json` files as described above, and local state files. |
-| Files written | Under `~/.openclaw/state/multi-clawd/` by default: `<id>.json`, `<id>.usage.json`, `pool-<id>.sticky.json`, `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes `~/.openclaw/openclaw.json` and a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher. |
+| Files written | Under `~/.openclaw/state/multi-clawd/` by default: `<id>.json`, `<id>.usage.json`, `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes `~/.openclaw/openclaw.json` and a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher. |
 | Processes | Launches Claude Code and the node + shim transport; CLI, setup and doctor run npm, OpenClaw, Claude and OS scheduler commands; the optional watchdog checks OpenClaw logs and may restart the gateway; Hermes integration runs its Python bridge. See [SECURITY.md](SECURITY.md) for the process-call table. |
 | Consent | The wizard asks before every write, merges non-destructively, and never overwrites an existing account entry. `--dry-run` previews everything. |
 
@@ -977,8 +993,10 @@ Early but real — built for and dogfooded in production.
 - **v1.9** — one pool, both transports: accounts can also serve OpenClaw's
   direct `anthropic/*` route; the gateway keeps the `anthropic` auth order in
   pool-health order; `multi-clawd direct` / `direct sync` ✅
+- **Unreleased** — optional per-session affinity for shimmed Claude CLI
+  launches; health overrides the pin, with bounded expiring state ✅
 - **Next** — standalone localhost proxy (OpenAI-compatible) so Hermes and
-  custom runtimes can share the pool; true per-session affinity; local
+  custom runtimes can share the pool; local
   five-hour-window signal (turn counting); per-account lock for the shim
   persistence race
 

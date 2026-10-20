@@ -14,15 +14,13 @@
  * 2026: a claw2-written session bound to `clawd` while the pool had returned
  * home to claw1; ~10 s and one account hop lost per turn, 60–90 times a day).
  *
- * Account selection cannot follow the session: `prepareExecution` is not told
- * which session a launch resumes. The shim is — it sees the argv — so the shim
- * makes the chosen account able to resume: before spawning, it finds the
- * newest copy of the transcript across every pool member's config dir and, if
- * that copy is not already the launched account's, copies it in. The pool's
- * health-driven choice stands; the session follows the account, not the
- * reverse. Conversations are linear (the backend serializes turns), so the
- * newest file is the whole conversation; the copy it replaces is a stale
- * prefix of it.
+ * `prepareExecution` is not told which session a launch resumes. The shim is
+ * — it sees the argv — so before spawning it finds the newest copy of the
+ * transcript across every pool member's config dir and, if that copy is not
+ * already the launched account's, copies it in. This supports health-driven
+ * rotation and optional session affinity. Conversations are linear (the
+ * backend serializes turns), so the newest file is the whole conversation;
+ * the copy it replaces is a stale prefix of it.
  *
  * Best-effort by contract: any failure here leaves the launch exactly as it
  * was before this module existed (the CLI reports the missing session and the
