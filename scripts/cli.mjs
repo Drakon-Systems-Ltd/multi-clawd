@@ -36,6 +36,7 @@ ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
 
   ${BOLD}setup${RESET}     guided setup wizard (accounts, pool, watchdog)
   ${BOLD}login${RESET}     log a configured account in (or re-auth it) — right dir, right env
+  ${BOLD}account${RESET}   disable or enable a pool account (add --dry-run to preview)
   ${BOLD}explain${RESET}   your setup in plain English — accounts, pool, fallback chain
   ${BOLD}chain${RESET}     audit your model routing — what actually serves each turn
   ${BOLD}direct${RESET}    the direct anthropic/* route — status, or \`direct sync\` to store profiles
@@ -760,7 +761,7 @@ async function usageCommand(args) {
   const rows = [];
   const resetById = new Map();
   for (const a of accounts) {
-    const row = { id: a.id, label: a.label };
+    const row = { id: a.id, label: a.label, ...(a.disabled === true ? { disabled: true, status: "disabled by operator" } : {}) };
     if (a.oauthTokenFile || a.oauthTokenRef) {
       row.skipped = "setup-token login — not polled: the usage endpoint needs the user:profile scope, setup-tokens carry only user:inference (stream telemetry only)";
     } else if (!a.native && !a.configDir) {
@@ -794,15 +795,15 @@ async function usageCommand(args) {
   }
   let next;
   if (pool) {
-    const verdicts = pool.accounts.map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data",
+    const verdicts = pool.accounts.filter((id) => !accounts.find((a) => a.id === id)?.disabled).map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data",
       sevenDayResetsAt: resetById.get(id) }));
     if (pool.strategy === "reset-aware") {
       const stickySelection = await import(resolve(__dirname, "..", "dist", "sticky.js"));
       let sticky;
       try { sticky = JSON.parse(rf(join(stateDir, `pool-${pool.id}.sticky.json`), "utf8")); } catch { /* none */ }
-      next = stickySelection.decideStickySelection({ verdicts, sticky, nowMs: now, minDwellMs: pool.minDwellMs, strategy: pool.strategy }).account;
+      next = verdicts.length ? stickySelection.decideStickySelection({ verdicts, sticky, nowMs: now, minDwellMs: pool.minDwellMs, strategy: pool.strategy }).account : undefined;
     } else {
-      next = health.choosePoolAccount(verdicts);
+      next = verdicts.length ? health.choosePoolAccount(verdicts) : undefined;
     }
   }
   if (args.includes("--json")) {
@@ -822,7 +823,7 @@ async function usageCommand(args) {
   };
   console.log(`\n${BOLD}🦞 multi-clawd — live usage${RESET}  ${DIM}(rotate at ${pct(rotateAt)}${weeklyRotateAt !== undefined ? `, weekly ${pct(weeklyRotateAt)}` : ""}, warn at ${pct(warnThreshold)})${RESET}\n`);
   for (const r of rows) {
-    console.log(`  ${BOLD}${r.id}${RESET}${r.label ? ` ${DIM}— ${r.label}${RESET}` : ""}   pool verdict: ${r.verdict}${r.reason ? ` ${DIM}(${r.reason})${RESET}` : ""}`);
+    console.log(`  ${BOLD}${r.id}${RESET}${r.label ? ` ${DIM}— ${r.label}${RESET}` : ""}   pool verdict: ${r.disabled ? "disabled by operator" : r.verdict}${r.reason ? ` ${DIM}(${r.reason})${RESET}` : ""}`);
     if (r.snapshot) {
       for (const [w, u] of Object.entries(r.snapshot.windows)) {
         console.log(`     ${mark(u.utilization, w)} ${up.usageWindowLabel(w).padEnd(12)} ${pct(u.utilization).padStart(4)}${until(u.resetsAt)}`);
@@ -838,7 +839,10 @@ async function usageCommand(args) {
     console.log("");
   }
   if (pool) {
-    console.log(next ? `  next pooled launch (${pool.id}/…) runs on ${BOLD}${next}${RESET}` : `  ${BOLD}every pooled account is exhausted${RESET} — turns degrade or fall through the chain`);
+    const allDisabled = pool.accounts.length > 0 && pool.accounts.every((id) => accounts.find((a) => a.id === id)?.disabled === true);
+    console.log(next ? `  next pooled launch (${pool.id}/…) runs on ${BOLD}${next}${RESET}` : allDisabled
+      ? `  ${BOLD}pool.accounts[].disabled: every pool member is disabled${RESET}`
+      : `  ${BOLD}no selectable pool member${RESET}`);
   }
   console.log(`\n${DIM}(the gateway polls this every ${Math.round(up.effectiveUsagePollInterval(pool?.usagePoll) / 1000)}s and alerts via the heartbeat; see "Live usage" in the README)${RESET}`);
 }
@@ -954,6 +958,25 @@ switch (cmd) {
   case "login":
     await login();
     break;
+  case "account": {
+    const [action, id, ...flags] = rest;
+    if (!["enable", "disable"].includes(action) || !id || flags.some((f) => f !== "--dry-run")) {
+      console.error("usage: multi-clawd account <enable|disable> <id> [--dry-run]");
+      process.exitCode = 1;
+      break;
+    }
+    try {
+      const { changeAccount } = await import("./account-config.mjs");
+      const result = changeAccount(id, action === "disable", flags.includes("--dry-run"));
+      console.log(`${result.dryRun ? "dry run: " : ""}${id}: ${action === "disable" ? "disabled" : "enabled"}${result.changed ? "" : " (already set)"}`);
+      if (result.backup) console.log(`backup: ${result.backup}`);
+      if (!result.dryRun && result.changed) console.log("Takes effect when the plugin next reads config (for example after gateway reload); running turns continue.");
+    } catch (err) {
+      console.error(`account: ${err.message}`);
+      process.exitCode = 1;
+    }
+    break;
+  }
   case "explain":
     await explain();
     break;

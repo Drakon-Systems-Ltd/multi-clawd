@@ -161,6 +161,11 @@
               "type": "string",
               "description": "Human-friendly label shown in status/catalog."
             },
+            "disabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Exclude this account from pool selection, in-turn retries, session affinity and direct Anthropic order while keeping it configured and visible in status. Takes effect when the plugin next reads config."
+            },
             "native": {
               "type": "boolean",
               "description": "Use the machine's native Claude login (default config dir; OS keychain on macOS). Sets neither CLAUDE_CONFIG_DIR nor a token. Use this to include the main account in the rotation pool."

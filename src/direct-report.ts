@@ -27,6 +27,7 @@ import type { StickyEntry } from "./sticky.js";
 
 /** Plain-English credential source for one member — never the value or ref id. */
 export function describeDirectSource(member: DirectMember): string {
+  if (member.disabled) return "disabled by operator";
   const s = member.source;
   switch (s.kind) {
     case "ref":
@@ -45,7 +46,7 @@ export function describeDirectSource(member: DirectMember): string {
 export interface DirectStatus {
   agentId: string;
   explain: ExplainDirect;
-  verdicts: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number }>;
+  verdicts: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; disabled?: boolean }>;
   /** The order the gateway loop would write now; undefined = already in force. */
   pendingOrder?: string[];
   unusable: UnusableProfile[];
@@ -79,6 +80,7 @@ export async function gatherDirectStatus(params: {
     return {
       accountId: m.accountId,
       profileId: m.profileId,
+      disabled: m.disabled,
       verdict: classifyAccountHealth(state, params.healthOptions, params.nowMs).verdict,
       sevenDayResetsAt: params.strategy === "reset-aware"
         ? sevenDayReset(state, params.healthOptions, params.nowMs)
@@ -99,7 +101,7 @@ export async function gatherDirectStatus(params: {
   }
 
   let pendingOrder: string[] | undefined;
-  if (snapshot) {
+  if (snapshot && members.some((m) => !m.disabled)) {
     pendingOrder = planAgentOrder({
       members: verdicts,
       snapshot,
@@ -109,6 +111,8 @@ export async function gatherDirectStatus(params: {
       minDwellMs: params.minDwellMs,
       strategy: params.strategy,
     }).order;
+  } else if (members.length > 0 && members.every((m) => m.disabled)) {
+    errors.push("pool.accounts[].disabled: every direct member is disabled");
   }
 
   const byProfile = new Map(unusable.map((u) => [u.profileId, u]));

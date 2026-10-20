@@ -354,6 +354,7 @@ const accounts = pluginConfig.accounts ?? [];
 const identities = [];
 if (accounts.length === 0) warn("no accounts configured");
 for (const account of accounts) {
+  if (account.disabled === true) note(`${account.id}: disabled by operator`);
   // WHO this account is, before WHETHER its credential works. An id is a
   // label the operator chose; the login is the thing quota is spent against,
   // and the two drift apart silently (a config dir re-logged-in as the wrong
@@ -494,7 +495,8 @@ console.log("pool");
 const pool = pluginConfig.pool;
 if (!pool) warn("no pool configured — direct backends only, no proactive rotation");
 else {
-  const members = (pool.accounts ?? []).filter((id) => accounts.some((a) => a.id === id));
+  const members = (pool.accounts ?? []).filter((id) => accounts.some((a) => a.id === id && a.disabled !== true));
+  if (members.length === 0 && pool.accounts?.some((id) => accounts.some((a) => a.id === id))) bad("pool.accounts[].disabled: every pool member is disabled");
   if (members.length < 2) bad(`pool "${pool.id ?? "clawd"}" has ${members.length} valid member(s); needs ≥ 2`);
   else ok(`pool "${pool.id ?? "clawd"}": ${members.join(" → ")}`);
   const generalThreshold = pool.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;

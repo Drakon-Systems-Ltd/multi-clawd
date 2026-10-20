@@ -6,6 +6,11 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- Accounts can be benched with `accounts[].disabled: true` and restored with
+  `multi-clawd account disable <id>` / `enable <id>`. The CLI preserves unrelated
+  config text and writes a timestamped backup before each change. (#57)
+
 ## [2.3.0] - 2026-10-20
 
 ### Added

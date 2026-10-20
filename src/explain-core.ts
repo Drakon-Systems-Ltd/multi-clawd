@@ -11,6 +11,7 @@ import { decideStickySelection, type StickyEntry } from "./sticky.js";
 
 export interface ExplainAccount {
   id: string;
+  disabled?: boolean;
   label?: string;
   native?: boolean;
   configDir?: string;
@@ -174,7 +175,7 @@ export function renderExplanation(model: ExplainModel): string {
   const lines: string[] = [];
   lines.push("ACCOUNTS");
   for (const acc of model.accounts) {
-    lines.push(`  ${acc.id}${acc.label ? `  "${acc.label}"` : ""}`);
+    lines.push(`  ${acc.id}${acc.label ? `  "${acc.label}"` : ""}${acc.disabled ? " — disabled by operator" : ""}`);
     lines.push(`    → ${describeAccount(acc)}`);
   }
   lines.push("");
@@ -229,14 +230,14 @@ export function renderExplanation(model: ExplainModel): string {
     lines.push("RIGHT NOW");
     for (const h of model.health) {
       const word = VERDICT_WORDS[h.verdict] ?? h.verdict;
-      lines.push(`  ${h.id}: ${word}${h.detail ? ` — ${h.detail}` : ""}`);
+      lines.push(`  ${h.id}: ${model.accounts.find((a) => a.id === h.id)?.disabled ? "disabled by operator" : word}${h.detail ? ` — ${h.detail}` : ""}`);
       lines.push(
         `      usage: ${h.usage?.length ? renderUsageLine(h.usage, nowMs) : "no live telemetry"}`,
       );
     }
     if (model.pool) {
       const strategy = poolStrategy(model.pool.strategy);
-      const verdicts: PoolVerdict[] = model.pool.accounts.map((id) => {
+      const verdicts: PoolVerdict[] = model.pool.accounts.filter((id) => !model.accounts.find((a) => a.id === id)?.disabled).map((id) => {
         const h = model.health.find((row) => row.id === id);
         return {
           id,
@@ -258,7 +259,7 @@ export function renderExplanation(model: ExplainModel): string {
         else reason = "no healthy member; using the existing fallback";
         lines.push(`  strategy: ${strategy} — picked ${decision.account}: ${reason}`);
       } else {
-        lines.push(`  strategy: ${strategy}`);
+        lines.push(`  strategy: ${strategy} — pool.accounts[].disabled: every pool member is disabled`);
       }
       lines.push(
         model.stickyAccount
