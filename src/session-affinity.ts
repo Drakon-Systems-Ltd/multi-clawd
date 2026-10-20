@@ -1,5 +1,6 @@
 /** Best-effort, bounded pins for Claude CLI sessions. No transcripts live here. */
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { resumeSessionId } from "./session-handover.js";
 
@@ -36,7 +37,11 @@ export function eligibleSessionAccount(
     ? pin.account : undefined;
 }
 
-function readPins(file: string, now: number, ttlMs: number): Pins {
+/** How far past `now` a stored pin may be when a write rewrites the store. A
+ * concurrent turn that captured its clock later than ours can finish first. */
+const WRITE_CLOCK_SLACK_MS = 60_000;
+
+function readPins(file: string, now: number, ttlMs: number, futureSlackMs = 0): Pins {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
@@ -47,7 +52,7 @@ function readPins(file: string, now: number, ttlMs: number): Pins {
       const pin = value as Partial<SessionPin>;
       if (typeof pin.account !== "string" || !pin.account ||
           typeof pin.servedAt !== "number" || !Number.isFinite(pin.servedAt) ||
-          pin.servedAt > now || now - pin.servedAt >= ttlMs) continue;
+          pin.servedAt > now + futureSlackMs || now - pin.servedAt >= ttlMs) continue;
       pins[id] = { account: pin.account, servedAt: pin.servedAt };
     }
     return pins;
@@ -62,17 +67,42 @@ export function readSessionPin(file: string, sessionId: string, now: number, ttl
 
 /** Atomic replacement. A bad or missing old file starts empty; write failures never affect a turn. */
 export function recordSessionPin(file: string, sessionId: string, account: string, now: number, ttlMs: number): void {
-  const pins = readPins(file, now, ttlMs);
-  pins[sessionId] = { account, servedAt: now };
-  const bounded = Object.entries(pins)
-    .sort((a, b) => b[1].servedAt - a[1].servedAt)
-    .slice(0, MAX_SESSION_PINS);
-  const tmp = `${file}.tmp-${process.pid}`;
+  const lock = `${file}.lock`;
+  let locked = false;
+  let tmp: string | undefined;
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    const deadline = Date.now() + 1000;
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    while (!locked) {
+      try {
+        closeSync(openSync(lock, "wx", 0o600));
+        locked = true;
+      } catch {
+        try {
+          if (Date.now() - statSync(lock).mtimeMs > 5000) rmSync(lock, { force: true });
+        } catch { /* another writer may have released it */ }
+        if (Date.now() >= deadline) return;
+        Atomics.wait(wait, 0, 0, 10);
+      }
+    }
+    const pins = readPins(file, now, ttlMs, WRITE_CLOCK_SLACK_MS);
+    pins[sessionId] = { account, servedAt: now };
+    const entries = Object.entries(pins);
+    const bounded = entries.length > MAX_SESSION_PINS
+      ? entries.sort((a, b) => b[1].servedAt - a[1].servedAt).slice(0, MAX_SESSION_PINS)
+      : entries;
+    tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
     writeFileSync(tmp, JSON.stringify(Object.fromEntries(bounded)), { mode: 0o600 });
     renameSync(tmp, file);
   } catch {
-    try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    // Pins are best effort; a failed write must never affect a turn.
+  } finally {
+    if (tmp) {
+      try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    }
+    if (locked) {
+      try { rmSync(lock, { force: true }); } catch { /* best effort */ }
+    }
   }
 }

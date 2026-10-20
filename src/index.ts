@@ -1869,8 +1869,13 @@ export function registerPoolBackend(
             if (member && member.id !== execution.env.MULTI_CLAWD_ACCOUNT_ID &&
                 poolVerdicts.some((v) => v.id === member.id &&
                   (v.verdict === "ok" || v.verdict === "no_data"))) {
+              let accountEnv: Record<string, string> | undefined;
               try {
-                const accountEnv = await buildAccountEnv(member, deps?.resolver);
+                accountEnv = await buildAccountEnv(member, deps?.resolver);
+              } catch {
+                // The prepared account remains the safe fallback.
+              }
+              if (accountEnv) {
                 const selectedEnv = { ...execution.env };
                 delete selectedEnv.CLAUDE_CODE_OAUTH_TOKEN;
                 delete selectedEnv.CLAUDE_CONFIG_DIR;
@@ -1882,8 +1887,6 @@ export function registerPoolBackend(
                 else delete selectedEnv[RETRY_ROSTER_ENV];
                 yield* transport({ ...execution, env: { ...selectedEnv, ...accountEnv } });
                 return;
-              } catch {
-                // The prepared account remains the safe fallback.
               }
             }
             yield* transport(execution);

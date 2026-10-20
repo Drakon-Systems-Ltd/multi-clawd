@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -45,12 +45,28 @@ describe("session affinity state", () => {
     recordSessionPin(file, "a", "claw1", 20, 100_000);
     expect(readSessionPin(file, "a", 20, 100_000)?.account).toBe("claw1");
     const now = 10_000;
-    for (let i = 0; i <= MAX_SESSION_PINS; i++) {
-      recordSessionPin(file, `s${i}`, "claw1", now + i, 100_000);
-    }
+    const seeded = Object.fromEntries(Array.from({ length: MAX_SESSION_PINS }, (_, i) =>
+      [`s${i}`, { account: "claw1", servedAt: now + i }]));
+    writeFileSync(file, JSON.stringify(seeded));
+    recordSessionPin(file, "new", "claw1", now + MAX_SESSION_PINS, 100_000);
     const pins = JSON.parse(readFileSync(file, "utf8"));
     expect(Object.keys(pins)).toHaveLength(MAX_SESSION_PINS);
     expect(pins.s0).toBeUndefined();
-    expect(pins.s1000.account).toBe("claw1");
+    expect(pins.new.account).toBe("claw1");
+  });
+
+  test("a held lock skips a write and sequential writers preserve both pins", () => {
+    mkdirSync(join(dir, "state"), { recursive: true });
+    writeFileSync(`${file}.lock`, "held");
+    expect(() => recordSessionPin(file, "blocked", "claw1", 10, 100)).not.toThrow();
+    expect(existsSync(file)).toBe(false);
+    rmSync(`${file}.lock`);
+    recordSessionPin(file, "first", "claw1", 10, 100);
+    recordSessionPin(file, "second", "claw2", 20, 100);
+    const pins = JSON.parse(readFileSync(file, "utf8"));
+    expect(pins.first.account).toBe("claw1");
+    expect(pins.second.account).toBe("claw2");
+    expect(readdirSync(join(dir, "state")).filter((name) =>
+      name.endsWith(".lock") || name.includes(".tmp-"))).toEqual([]);
   });
 });
