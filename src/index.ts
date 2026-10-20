@@ -64,6 +64,9 @@ import {
 } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
 import {
+  DEFAULT_SESSION_AFFINITY_TTL_MS, launchSessionId, readSessionPin, SESSION_AFFINITY_ENV,
+} from "./session-affinity.js";
+import {
   clearCredentialFailure,
   mergeHealthStates,
   parseStoredState,
@@ -852,6 +855,7 @@ export function resolveBackendLaunch(params: {
 const SHIM_ONLY_ENV = [
   RETRY_ROSTER_ENV,
   SESSION_DIRS_ENV,
+  SESSION_AFFINITY_ENV,
   "MULTI_CLAWD_MODEL_OVERRIDE",
   CLAUDE_BIN_ENV,
   CLAUDE_ARGV0_ENV,
@@ -1392,6 +1396,10 @@ interface PoolConfig {
   rotateOnOverage?: boolean;
   /** Minimum ms to stay on a rotated-to account before returning home. Default 600000. */
   minDwellMs?: number;
+  /** Pin CLI sessions to the account that served their last successful turn. Off by default. */
+  sessionAffinity?: boolean;
+  /** How long a successful session pin remains valid. Default 30 days. */
+  sessionAffinityTtlMs?: number;
   /**
    * v1.10: poll each pooled account's live usage from the provider on a timer
    * and warn when a window nears its limit. On by default; `{ "enabled": false }` disables.
@@ -1793,6 +1801,16 @@ export function registerPoolBackend(
     // written by a different member. The shim sees the session id (argv) and
     // copies the newest transcript into the launched account's dir. Paths only.
     env[SESSION_DIRS_ENV] = JSON.stringify([...new Set(members.map(accountConfigDir))]);
+    if (pool.sessionAffinity) {
+      env[SESSION_AFFINITY_ENV] = JSON.stringify({
+        file: join(homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sessions.json`),
+        ttlMs: typeof pool.sessionAffinityTtlMs === "number" &&
+          Number.isFinite(pool.sessionAffinityTtlMs) && pool.sessionAffinityTtlMs > 0
+          ? pool.sessionAffinityTtlMs : DEFAULT_SESSION_AFFINITY_TTL_MS,
+        verdicts: poolVerdicts.map((v) => ({ id: v.id, verdict: v.verdict })),
+        roster: buildRetryRoster(members, ""),
+      });
+    }
     // Tier degradation: only when the whole pool is exhausted and the launch
     // is not a pinned (contractual) lane. The shim enforces the swap.
     if (ladder.length > 0) {
@@ -1833,7 +1851,45 @@ export function registerPoolBackend(
         );
       }
     }
-    return preparedForLaunch(launch, ctx, env, transport);
+    // Secret-reference credentials cannot ride in the shim's roster. On the
+    // verified execute path, argv is visible before the shim is spawned and
+    // the gateway can resolve that account's reference for this launch only.
+    // The shim still owns pin recording after the actual child succeeds.
+    const affinityTransport: CliBackendExecuteFn | undefined =
+      pool.sessionAffinity && transport && launch.kind === "verified"
+        ? async function* (execution) {
+            const id = launchSessionId(execution.args);
+            const pin = id ? readSessionPin(
+              join(homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sessions.json`),
+              id, Date.now(),
+              typeof pool.sessionAffinityTtlMs === "number" && pool.sessionAffinityTtlMs > 0
+                ? pool.sessionAffinityTtlMs : DEFAULT_SESSION_AFFINITY_TTL_MS,
+            ) : undefined;
+            const member = members.find((m) => m.id === pin?.account && m.oauthTokenRef);
+            if (member && member.id !== execution.env.MULTI_CLAWD_ACCOUNT_ID &&
+                poolVerdicts.some((v) => v.id === member.id &&
+                  (v.verdict === "ok" || v.verdict === "no_data"))) {
+              try {
+                const accountEnv = await buildAccountEnv(member, deps?.resolver);
+                const selectedEnv = { ...execution.env };
+                delete selectedEnv.CLAUDE_CODE_OAUTH_TOKEN;
+                delete selectedEnv.CLAUDE_CONFIG_DIR;
+                // The retry roster was built minus the prepared account; rebuild
+                // it minus the account this launch now runs on, so an in-turn
+                // retry never targets the pinned account itself.
+                const pinnedRoster = buildRetryRoster(members, member.id);
+                if (pinnedRoster.length > 0) selectedEnv[RETRY_ROSTER_ENV] = JSON.stringify(pinnedRoster);
+                else delete selectedEnv[RETRY_ROSTER_ENV];
+                yield* transport({ ...execution, env: { ...selectedEnv, ...accountEnv } });
+                return;
+              } catch {
+                // The prepared account remains the safe fallback.
+              }
+            }
+            yield* transport(execution);
+          }
+        : transport;
+    return preparedForLaunch(launch, ctx, env, affinityTransport);
   };
   api.registerCliBackend(backend);
   api.registerProvider(buildCatalogProvider(poolAccount, members));

@@ -70,6 +70,15 @@
             "type": "number",
             "description": "After rotating away from home, stay on the rotated-to account at least this long before returning home (anti-flap hysteresis; health always overrides). Default 600000 (10min)."
           },
+          "sessionAffinity": {
+            "type": "boolean",
+            "description": "Pin a Claude CLI session to the account that last served it, while that account remains healthy. CLI launches only. Default false."
+          },
+          "sessionAffinityTtlMs": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Successful session pin lifetime in milliseconds. Default 2592000000 (30 days); only used when sessionAffinity is true."
+          },
           "usagePoll": {
             "type": "object",
             "additionalProperties": false,

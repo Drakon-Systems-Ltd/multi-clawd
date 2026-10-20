@@ -316,6 +316,20 @@ describe("resume handover wiring", () => {
     const { env } = await prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
     expect(JSON.parse(env.MULTI_CLAWD_SESSION_DIRS)).toEqual(["/tmp/claw1-login", "/tmp/claw2-login"]);
   });
+  test("session affinity is opt-in and passes health plus a secret-free member roster to the shim", async () => {
+    const off = await registerPool().prepare({ modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws" });
+    expect(off.env.MULTI_CLAWD_SESSION_AFFINITY).toBeUndefined();
+    const on = await registerPool({ sessionAffinity: true }).prepare({
+      modelId: "clawd/claude-opus-5", workspaceDir: "/tmp/ws",
+    });
+    const affinity = JSON.parse(on.env.MULTI_CLAWD_SESSION_AFFINITY);
+    expect(affinity.ttlMs).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(affinity.verdicts).toEqual([
+      { id: "claw1", verdict: "no_data" }, { id: "claw2", verdict: "no_data" },
+    ]);
+    expect(affinity.roster.map((r: { id: string }) => r.id)).toEqual(["claw1", "claw2"]);
+    expect(affinity.roster[0].env).toEqual({ CLAUDE_CONFIG_DIR: "/tmp/claw1-login" });
+  });
 });
 
 describe("wholly exhausted pool re-probes the oldest rejection (#26)", () => {

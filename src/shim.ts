@@ -53,6 +53,9 @@ import {
   RETRY_ROSTER_ENV,
 } from "./retry-plan.js";
 import {
+  eligibleSessionAccount, launchSessionId, readSessionPin, recordSessionPin, SESSION_AFFINITY_ENV,
+} from "./session-affinity.js";
+import {
   CLAUDE_ARGV0_ENV,
   CLAUDE_BIN_ENV,
   parseClaudeBinOverride,
@@ -202,17 +205,60 @@ if (modelOverride) {
     );
   }
 }
+// prepareExecution cannot see the CLI session id. The shim can: choose the
+// healthy previous server before handover or spawning, and keep the identity
+// mutable so an in-turn retry records its actual serving account.
+const sessionId = launchSessionId(childArgs);
+let affinity: { file: string; ttlMs: number; verdicts: Array<{ id: string; verdict: string }>; roster: ReturnType<typeof parseRetryRoster> } | undefined;
+let launchEnv: NodeJS.ProcessEnv = process.env;
+try {
+  const raw = process.env[SESSION_AFFINITY_ENV];
+  if (raw && sessionId) {
+    const config = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof config.file === "string" && config.file && typeof config.ttlMs === "number" &&
+        Number.isFinite(config.ttlMs) && config.ttlMs > 0 && Array.isArray(config.verdicts)) {
+      affinity = {
+        file: config.file,
+        ttlMs: config.ttlMs,
+        verdicts: config.verdicts as Array<{ id: string; verdict: string }>,
+        roster: parseRetryRoster(JSON.stringify(config.roster)),
+      };
+      const pin = readSessionPin(affinity.file, sessionId, Date.now(), affinity.ttlMs);
+      const eligible = eligibleSessionAccount(
+        pin, accountId, affinity.verdicts, affinity.roster.map((r) => r.id),
+      );
+      if (eligible && eligible !== accountId) {
+        const member = affinity.roster.find((r) => r.id === eligible);
+        if (member) {
+          const ready = materializeRetryAccount(member, (path) => readFileSync(path, "utf8"));
+          if ("account" in ready) {
+            launchEnv = buildRetryEnv(process.env, ready.account);
+            accountId = ready.account.id;
+            stateFile = ready.account.stateFile;
+            state = { accountId, windows: {} };
+          }
+        }
+      }
+    }
+  }
+} catch {
+  // A malformed configuration or pin must leave this launch on the pool pick.
+  affinity = undefined;
+}
+delete launchEnv[SESSION_AFFINITY_ENV];
 // Resume handover: a pooled launch may resume a session another member wrote.
 // Make the transcript present in THIS account's config dir before the CLI
 // looks for it. See session-handover.ts.
 {
-  const note = handoverForLaunch(childArgs, process.env);
+  const note = handoverForLaunch(childArgs, launchEnv);
   if (note) process.stderr.write(`[multi-clawd shim] ${note}\n`);
 }
 // ── in-turn retry arming (#19) ──────────────────────────────────────────────
 // Decided before a byte exists, because whether the preamble must be held back
 // is a property of the launch, not of what the stream turns out to contain.
-const retryRoster = parseRetryRoster(process.env[RETRY_ROSTER_ENV]);
+const retryRoster = affinity && launchEnv !== process.env
+  ? affinity.roster.filter((r) => r.id !== accountId)
+  : parseRetryRoster(process.env[RETRY_ROSTER_ENV]);
 // The roster is the shim's business only. The claude child — and every tool
 // process it starts — gets no view of which siblings exist or where their
 // credentials live (retry-plan.ts #2).
@@ -223,8 +269,8 @@ delete process.env[RETRY_ROSTER_ENV];
 // launches only: without the member-dir list this is not a launch whose
 // session the pool is responsible for moving.
 const resumeSnapshot =
-  retryRoster.length > 0 && parseSessionDirs(process.env[SESSION_DIRS_ENV]).length > 0
-    ? snapshotResumeTranscript(childArgs, process.env)
+  retryRoster.length > 0 && parseSessionDirs(launchEnv[SESSION_DIRS_ENV]).length > 0
+    ? snapshotResumeTranscript(childArgs, launchEnv)
     : undefined;
 const arming = retryArming(childArgs, retryRoster, { resumeReady: resumeSnapshot !== undefined });
 let retryArmed = arming.armed;
@@ -236,7 +282,7 @@ if (!retryArmed && retryRoster.length > 0 && arming.reason) {
 
 let child = spawn(command, childArgs, {
   stdio: ["pipe", "pipe", "inherit"],
-  env: process.env,
+  env: launchEnv,
   ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
 });
 // stdin must be REPLAYABLE while a retry is possible: the prompt was written
@@ -507,7 +553,7 @@ function attemptRetry(): boolean {
   sawSuccessResult = false;
   child = spawn(command, childArgs, {
     stdio: ["pipe", "pipe", "inherit"],
-    env: buildRetryEnv(process.env, target),
+    env: buildRetryEnv(launchEnv, target),
     ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
   });
   attachChildHandlers();
@@ -654,6 +700,9 @@ function onChildClose(code: number | null, signal: NodeJS.Signals | null): void 
   if ((code ?? 0) === 0) {
     clearRecordedAuthFailureOnSuccess();
     clearRecordedModelRejectionOnSuccess();
+    if (affinity && sessionId && sawSuccessResult && !sawAuthFailure && !sawModelLimit) {
+      recordSessionPin(affinity.file, sessionId, accountId, Date.now(), affinity.ttlMs);
+    }
   }
   process.exit(code ?? 0);
 }
