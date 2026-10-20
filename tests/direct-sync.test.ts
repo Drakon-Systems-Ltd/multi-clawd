@@ -226,6 +226,17 @@ describe("syncDirectProfiles", () => {
 });
 
 describe("planAgentOrder", () => {
+  test("disabled stored profile cannot return as unmanaged", () => {
+    const plan = planAgentOrder({
+      members: [
+        { accountId: "a", profileId: "anthropic:a", verdict: "ok", disabled: true },
+        { accountId: "b", profileId: "anthropic:b", verdict: "ok" },
+      ],
+      snapshot: { stored: new Set(["anthropic:a", "anthropic:b", "anthropic:foreign"]), storedOrder: ["anthropic:a", "anthropic:foreign", "anthropic:b"] },
+      nowMs: NOW,
+    });
+    expect(plan.order).toEqual(["anthropic:b", "anthropic:foreign"]);
+  });
   const verdicts = [
     { accountId: "claw1", profileId: "anthropic:claw1", verdict: "near_limit" as const },
     { accountId: "claw2", profileId: "anthropic:claw2", verdict: "ok" as const },

@@ -234,6 +234,7 @@ export async function syncDirectProfiles(params: {
   const results: SyncResult[] = [];
 
   for (const member of params.members) {
+    if (member.disabled) continue;
     const base = { accountId: member.accountId, profileId: member.profileId };
     const { source } = member;
     if (source.kind === "existing") {
@@ -336,7 +337,7 @@ function sameOrder(a: readonly string[] | null | undefined, b: readonly string[]
  * never takes a profile out of rotation that OpenClaw would have tried.
  */
 export function planAgentOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; disabled?: boolean }>;
   snapshot: DirectRouteSnapshot;
   configOrder?: readonly string[];
   sticky?: StickyEntry;
@@ -345,13 +346,13 @@ export function planAgentOrder(params: {
   strategy?: PoolStrategy;
 }): { order?: string[]; missing: string[]; firstAccount?: string } {
   const { snapshot } = params;
-  const present = params.members.filter((m) => snapshot.stored.has(m.profileId));
-  const missing = params.members.filter((m) => !snapshot.stored.has(m.profileId)).map((m) => m.profileId);
-  if (present.length === 0) return { missing };
+  const present = params.members.filter((m) => !m.disabled && snapshot.stored.has(m.profileId));
+  const missing = params.members.filter((m) => !m.disabled && !snapshot.stored.has(m.profileId)).map((m) => m.profileId);
+  if (present.length === 0 && params.members.some((m) => !m.disabled)) return { missing };
   const explicit = snapshot.storedOrder ?? (params.configOrder?.length ? [...params.configOrder] : null);
   const base = (explicit ?? [...snapshot.stored]).filter((id) => snapshot.stored.has(id));
   const plan = planDirectOrder({
-    members: present,
+    members: params.members.map((m) => ({ ...m, disabled: m.disabled || !snapshot.stored.has(m.profileId) })),
     currentOrder: base,
     sticky: params.sticky,
     nowMs: params.nowMs,
@@ -415,6 +416,7 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
           return {
             accountId: m.accountId,
             profileId: m.profileId,
+            disabled: m.disabled,
             verdict: classifyAccountHealth(state, deps.healthOptions, nowMs).verdict,
             sevenDayResetsAt: deps.strategy === "reset-aware"
               ? sevenDayReset(state, deps.healthOptions, nowMs)

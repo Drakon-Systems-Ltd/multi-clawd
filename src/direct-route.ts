@@ -39,6 +39,7 @@ export type DirectConfig =
 
 export interface DirectAccountShape {
   id: string;
+  disabled?: boolean;
   native?: boolean;
   configDir?: string;
   oauthTokenFile?: string;
@@ -164,6 +165,7 @@ export interface DirectMember {
   accountId: string;
   profileId: string;
   source: DirectCredentialSource;
+  disabled?: boolean;
 }
 
 /**
@@ -209,7 +211,7 @@ export function collectDirectMembers(
       continue;
     }
     seenProfiles.add(profileId);
-    members.push({ accountId: account.id, profileId, source });
+    members.push({ accountId: account.id, profileId, source, disabled: account.disabled === true });
   }
   return { members, problems };
 }
@@ -257,15 +259,16 @@ export interface DirectOrderPlan {
  * relative order — the plugin rearranges its own accounts and nothing else.
  */
 export function planDirectOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; disabled?: boolean }>;
   currentOrder?: readonly string[];
   sticky?: StickyEntry;
   nowMs: number;
   minDwellMs?: number;
   strategy?: PoolStrategy;
 }): DirectOrderPlan | undefined {
-  const { members } = params;
-  if (members.length === 0) return undefined;
+  const members = params.members.filter((m) => !m.disabled);
+  if (params.members.length === 0) return undefined;
+  if (members.length === 0) throw new Error("pool.accounts[].disabled: every direct member is disabled");
   const decision = decideStickySelection({
     verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict, sevenDayResetsAt: m.sevenDayResetsAt })),
     sticky: params.sticky,
@@ -282,7 +285,7 @@ export function planDirectOrder(params: {
         ? (a.m.sevenDayResetsAt ?? Infinity) - (b.m.sevenDayResetsAt ?? Infinity)
         : 0) || a.index - b.index)
     .map(({ m }) => m.profileId);
-  const managed = new Set(members.map((m) => m.profileId));
+  const managed = new Set(params.members.map((m) => m.profileId));
   const unmanaged = (params.currentOrder ?? []).filter(
     (id, i, all) => typeof id === "string" && !managed.has(id) && all.indexOf(id) === i,
   );
@@ -302,5 +305,5 @@ export function directRoutePools(
   directRoute?: { manageOrder?: boolean },
 ): boolean {
   if (directRoute?.manageOrder === false) return false;
-  return collectDirectMembers(accounts).members.length >= 2;
+  return collectDirectMembers(accounts).members.filter((m) => !m.disabled).length >= 2;
 }
