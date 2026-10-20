@@ -41,7 +41,12 @@
             "items": {
               "type": "string"
             },
-            "description": "Account ids (from accounts[]) in preference order; the first is the home account and reclaims the pool when its usage window resets."
+            "description": "Account ids (from accounts[]) in preference order; the first is the home account in the default ordered strategy."
+          },
+          "strategy": {
+            "type": "string",
+            "enum": ["ordered", "reset-aware"],
+            "description": "Healthy account selection: ordered (default) keeps pool order; reset-aware prefers the healthy account whose live seven-day quota window resets soonest."
           },
           "utilizationThreshold": {
             "type": "number",

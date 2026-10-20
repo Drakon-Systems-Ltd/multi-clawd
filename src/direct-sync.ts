@@ -21,7 +21,7 @@
  * the CLI is reduced to one line with anything token-shaped masked before it
  * reaches a log.
  */
-import { classifyAccountHealth, type HealthOptions, type HealthVerdict } from "./health.js";
+import { classifyAccountHealth, sevenDayReset, type HealthOptions, type HealthVerdict, type PoolStrategy } from "./health.js";
 import type { AccountHealthState } from "./shim-core.js";
 import type { StickyEntry } from "./sticky.js";
 import { DIRECT_PROVIDER, planDirectOrder, type DirectMember } from "./direct-route.js";
@@ -336,12 +336,13 @@ function sameOrder(a: readonly string[] | null | undefined, b: readonly string[]
  * never takes a profile out of rotation that OpenClaw would have tried.
  */
 export function planAgentOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number }>;
   snapshot: DirectRouteSnapshot;
   configOrder?: readonly string[];
   sticky?: StickyEntry;
   nowMs: number;
   minDwellMs?: number;
+  strategy?: PoolStrategy;
 }): { order?: string[]; missing: string[]; firstAccount?: string } {
   const { snapshot } = params;
   const present = params.members.filter((m) => snapshot.stored.has(m.profileId));
@@ -355,6 +356,7 @@ export function planAgentOrder(params: {
     sticky: params.sticky,
     nowMs: params.nowMs,
     minDwellMs: params.minDwellMs,
+    strategy: params.strategy,
   });
   if (!plan) return { missing };
   // Already in force: stored and equal, or no stored order but the config
@@ -370,6 +372,7 @@ export interface DirectOrderControllerDeps {
   readHealth: (accountId: string) => AccountHealthState | undefined;
   healthOptions: HealthOptions;
   minDwellMs?: number;
+  strategy?: PoolStrategy;
   configOrder: () => readonly string[] | undefined;
   readSticky: () => StickyEntry | undefined;
   writeSticky: (entry: StickyEntry | undefined) => void;
@@ -407,13 +410,19 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
       if (running) return { managedOrder: [], agents: [] };
       running = true;
       try {
-        const verdicts = deps.members.map((m) => ({
-          accountId: m.accountId,
-          profileId: m.profileId,
-          verdict: classifyAccountHealth(deps.readHealth(m.accountId), deps.healthOptions, nowMs).verdict,
-        }));
+        const verdicts = deps.members.map((m) => {
+          const state = deps.readHealth(m.accountId);
+          return {
+            accountId: m.accountId,
+            profileId: m.profileId,
+            verdict: classifyAccountHealth(state, deps.healthOptions, nowMs).verdict,
+            sevenDayResetsAt: deps.strategy === "reset-aware"
+              ? sevenDayReset(state, deps.healthOptions, nowMs)
+              : undefined,
+          };
+        });
         const sticky = deps.readSticky();
-        const managed = planDirectOrder({ members: verdicts, sticky, nowMs, minDwellMs: deps.minDwellMs });
+        const managed = planDirectOrder({ members: verdicts, sticky, nowMs, minDwellMs: deps.minDwellMs, strategy: deps.strategy });
         if (!managed) return { managedOrder: [], agents: [] };
         if (JSON.stringify(managed.sticky) !== JSON.stringify(sticky)) deps.writeSticky(managed.sticky);
         const key = managed.order.join(" ");
@@ -449,6 +458,7 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
               sticky,
               nowMs,
               minDwellMs: deps.minDwellMs,
+              strategy: deps.strategy,
             });
             for (const id of plan.missing) {
               const k = `${agentId}:${id}`;

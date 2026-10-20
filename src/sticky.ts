@@ -5,12 +5,13 @@
  * account switches (which cost the Claude CLI its native session) happen at
  * most once per rotation event, not per turn.
  *
- * The one hard rule: HEALTH BEATS STICKINESS. Dwell only ever delays the
- * benign direction (returning home when home has recovered). It never keeps
+ * The one hard rule: HEALTH BEATS STICKINESS. In ordered mode dwell delays
+ * returning home; in reset-aware mode it delays switching to a newly preferred
+ * healthy account. It never keeps
  * a launch on an account that is near-limit or exhausted while a healthier
  * account exists.
  */
-import { choosePoolAccount, fallbackPoolAccount, type PoolVerdict } from "./health.js";
+import { choosePoolAccount, fallbackPoolAccount, type PoolStrategy, type PoolVerdict } from "./health.js";
 
 export interface StickyEntry {
   account: string;
@@ -30,11 +31,12 @@ export function decideStickySelection(params: {
   sticky?: StickyEntry;
   nowMs: number;
   minDwellMs?: number;
+  strategy?: PoolStrategy;
 }): StickyDecision {
   const { verdicts, sticky, nowMs } = params;
   const minDwellMs = params.minDwellMs ?? DEFAULT_MIN_DWELL_MS;
   const home = verdicts[0];
-  const healthChoice = choosePoolAccount(verdicts);
+  const healthChoice = choosePoolAccount(verdicts, params.strategy);
 
   // Nothing usable: run on an account that can at least authenticate so the
   // failure is the REAL one (a quota error the chain and the degrade ladder
@@ -44,6 +46,16 @@ export function decideStickySelection(params: {
   // that includes a re-probe of an overdue rejection (#26): it is a question,
   // not a rotation, and if the answer is no there is nothing to dwell on.
   if (!healthChoice) return { account: fallbackPoolAccount(verdicts, nowMs) };
+
+  if (params.strategy === "reset-aware") {
+    const current = sticky && verdicts.find((v) => v.id === sticky.account);
+    const stillUsable = current?.verdict === "ok" || current?.verdict === "no_data";
+    if (sticky && stillUsable && nowMs - sticky.since < minDwellMs) {
+      return { account: sticky.account, sticky };
+    }
+    if (sticky?.account === healthChoice) return { account: healthChoice, sticky };
+    return { account: healthChoice, sticky: { account: healthChoice, since: nowMs } };
+  }
 
   const stickyVerdict = sticky
     ? verdicts.find((v) => v.id === sticky.account)?.verdict

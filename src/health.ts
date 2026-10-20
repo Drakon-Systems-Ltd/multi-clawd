@@ -645,14 +645,31 @@ export function summarizeWindowUsage(
 export interface PoolVerdict {
   id: string;
   verdict: HealthVerdict;
+  /** Future reset of the live seven_day window, epoch ms. */
+  sevenDayResetsAt?: number;
   /** When the evidence behind an `exhausted` verdict was observed (epoch ms). */
   observedAt?: number;
 }
 
+export type PoolStrategy = "ordered" | "reset-aware";
+
+/** The manifest rejects invalid values; this guard also protects direct callers. */
+export function poolStrategy(value: unknown): PoolStrategy {
+  return value === "reset-aware" ? "reset-aware" : "ordered";
+}
+
+export function sevenDayReset(state: AccountHealthState | undefined, options: HealthOptions, nowMs: number): number | undefined {
+  const usage = summarizeWindowUsage(state, options, nowMs);
+  return (usage.find((w) => w.window === "usage:seven_day" && w.resetsAt !== undefined)
+    ?? usage.find((w) => w.window === "seven_day" && w.resetsAt !== undefined))?.resetsAt;
+}
+
 /**
- * Pick the account that should serve the next turn, in pool order:
- * healthy/no-data first, then near-limit, never exhausted and never
- * credential-broken. Undefined when nothing is usable — the caller must not
+ * Pick the account that should serve the next turn. Ordered mode keeps the
+ * original pool-order choice byte-for-byte; reset-aware mode orders `ok`
+ * members by their live weekly reset before no-data and near-limit members.
+ * Neither mode chooses exhausted or credential-broken members. Undefined
+ * when nothing is usable — the caller must not
  * override anything then.
  *
  * `credential_failed` is unusable in the strongest sense: an exhausted account
@@ -662,7 +679,18 @@ export interface PoolVerdict {
  * evidence is still a rejection, so it is a re-test (fallbackPoolAccount),
  * not a choice.
  */
-export function choosePoolAccount(pool: PoolVerdict[]): string | undefined {
+export function choosePoolAccount(pool: PoolVerdict[], strategy: PoolStrategy = "ordered"): string | undefined {
+  if (strategy === "reset-aware") {
+    let best: PoolVerdict | undefined;
+    for (const member of pool) {
+      if (member.verdict !== "ok") continue;
+      if (!best || (member.sevenDayResetsAt !== undefined &&
+        (best.sevenDayResetsAt === undefined || member.sevenDayResetsAt < best.sevenDayResetsAt))) best = member;
+    }
+    // Only an `ok` member with a live weekly reset can outrank pool order.
+    // Without one, reset-aware answers exactly as ordered does.
+    if (best?.sevenDayResetsAt !== undefined) return best.id;
+  }
   const usable = pool.find((a) => a.verdict === "ok" || a.verdict === "no_data");
   if (usable) return usable.id;
   return pool.find((a) => a.verdict === "near_limit")?.id;
@@ -743,6 +771,6 @@ export function fallbackPoolAccount(pool: PoolVerdict[], nowMs?: number): string
  * anyway, so the launch fails for real and OpenClaw's reactive chain drops to
  * the next provider.
  */
-export function pickPoolAccountForLaunch(pool: PoolVerdict[], nowMs?: number): string {
-  return choosePoolAccount(pool) ?? fallbackPoolAccount(pool, nowMs);
+export function pickPoolAccountForLaunch(pool: PoolVerdict[], nowMs?: number, strategy: PoolStrategy = "ordered"): string {
+  return choosePoolAccount(pool, strategy) ?? fallbackPoolAccount(pool, nowMs);
 }

@@ -6,6 +6,11 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- Optional `pool.strategy: "reset-aware"` selects the healthy account whose
+  live seven-day quota window resets soonest across CLI and direct routes;
+  `ordered` remains the default. Explain shows the strategy and pick reason. (#54)
+
 ## [2.2.0] - 2026-10-19
 
 ### Added

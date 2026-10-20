@@ -294,12 +294,13 @@ const { createSystemCredentialIo, findCredentialCopies, describeSplitStore } = a
   ["createSystemCredentialIo", "findCredentialCopies", "describeSplitStore"],
   "cli",
 );
-const { summarizeWindowUsage, classifyAccountHealth, overdueProbeAccount, lastAuthSuccessAt } =
+const { summarizeWindowUsage, classifyAccountHealth, overdueProbeAccount, lastAuthSuccessAt, sevenDayReset } =
   await importDist("health.js", [
     "summarizeWindowUsage",
     "classifyAccountHealth",
     "overdueProbeAccount",
     "lastAuthSuccessAt",
+    "sevenDayReset",
   ]);
 const { DEFAULT_UTILIZATION_THRESHOLD } = await import(join(REPO_DIR, "dist", "health.js"));
 // "cli", like the chain audits: resolving WHICH login backs an account is
@@ -536,16 +537,17 @@ else {
       weeklyUtilizationThreshold: pool.weeklyUtilizationThreshold,
       rotateOnOverage: pool.rotateOnOverage,
     };
-    const verdicts = members.map((id) => ({
-      id,
-      verdict: classifyAccountHealth(readJson(join(STATE_DIR, `${id}.json`)), healthOptions, now)
-        .verdict,
-    }));
+    const verdicts = members.map((id) => {
+      const state = readJson(join(STATE_DIR, `${id}.json`));
+      return { id, verdict: classifyAccountHealth(state, healthOptions, now).verdict,
+        sevenDayResetsAt: pool.strategy === "reset-aware" ? sevenDayReset(state, healthOptions, now) : undefined };
+    });
     const decision = decideStickySelection({
       verdicts,
       sticky,
       nowMs: now,
       minDwellMs: pool.minDwellMs,
+      strategy: pool.strategy,
     });
     const identity = identities.find((i) => i.accountId === decision.account);
     const who =
@@ -888,6 +890,7 @@ if (accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) {
         configOrder: Array.isArray(config?.auth?.order?.anthropic) ? config.auth.order.anthropic : undefined,
         sticky: readJson(join(STATE_DIR, "direct-order.sticky.json")),
         minDwellMs: pool?.minDwellMs,
+        strategy: pool?.strategy,
         nowMs: Date.now(),
       });
       if (!status) continue;

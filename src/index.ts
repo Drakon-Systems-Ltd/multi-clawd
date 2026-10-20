@@ -59,6 +59,8 @@ import {
   lastAuthSuccessAt,
   overdueProbeAccount,
   pickPoolAccountForLaunch,
+  sevenDayReset,
+  type PoolStrategy,
 } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
 import {
@@ -1377,6 +1379,8 @@ interface PoolConfig {
   label?: string;
   /** Account ids in preference order; the first is the home account. */
   accounts?: string[];
+  /** Healthy-member preference; ordered preserves the original pool order. */
+  strategy?: PoolStrategy;
   utilizationThreshold?: number;
   weeklyUtilizationThreshold?: number;
   staleAfterMs?: number;
@@ -1598,12 +1602,16 @@ export function registerPoolBackend(
       id: v.id,
       verdict: v.health.verdict,
       observedAt: v.health.observedAt,
+      sevenDayResetsAt: pool.strategy === "reset-aware"
+        ? sevenDayReset(states.find((s) => s.id === v.id)?.state, options, now)
+        : undefined,
     }));
     const decision = decideStickySelection({
       verdicts: poolVerdicts,
       sticky: previousSticky,
       nowMs: now,
       minDwellMs,
+      strategy: pool.strategy,
     });
     const chosen = members.find((a) => a.id === decision.account) ?? members[0];
     const previousAccount = previousSticky?.account ?? members[0].id;
@@ -1932,6 +1940,7 @@ export function startDirectOrderSync(params: {
     intervalMs,
     healthOptions,
     minDwellMs: params.pool?.minDwellMs,
+    strategy: params.pool?.strategy,
     command: params.directRoute?.openclawCommand,
   });
   if (directController?.signature === signature && directTimer) {
@@ -1946,6 +1955,7 @@ export function startDirectOrderSync(params: {
     readHealth: (id) => readHealthState(id),
     healthOptions,
     minDwellMs: params.pool?.minDwellMs,
+    strategy: params.pool?.strategy,
     configOrder: params.configOrder,
     readSticky: () => readStickyEntry(stickyFile),
     writeSticky: (entry) => writeStickyEntry(stickyFile, entry, logger),

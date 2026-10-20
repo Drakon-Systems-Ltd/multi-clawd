@@ -6,7 +6,7 @@
  * come from OpenClaw's CLI through the injected runner; intent comes from the
  * plugin config. Secret references are described by provider name only.
  */
-import { classifyAccountHealth, type HealthOptions, type HealthVerdict } from "./health.js";
+import { classifyAccountHealth, sevenDayReset, type HealthOptions, type HealthVerdict, type PoolStrategy } from "./health.js";
 import type { AccountHealthState } from "./shim-core.js";
 import {
   DIRECT_PROVIDER,
@@ -45,7 +45,7 @@ export function describeDirectSource(member: DirectMember): string {
 export interface DirectStatus {
   agentId: string;
   explain: ExplainDirect;
-  verdicts: Array<{ accountId: string; profileId: string; verdict: HealthVerdict }>;
+  verdicts: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number }>;
   /** The order the gateway loop would write now; undefined = already in force. */
   pendingOrder?: string[];
   unusable: UnusableProfile[];
@@ -66,6 +66,7 @@ export async function gatherDirectStatus(params: {
   configOrder?: readonly string[];
   sticky?: StickyEntry;
   minDwellMs?: number;
+  strategy?: PoolStrategy;
   nowMs: number;
   /** Skip `models status --json` (a few seconds) when cooldowns are not needed. */
   skipCooldowns?: boolean;
@@ -73,11 +74,17 @@ export async function gatherDirectStatus(params: {
   const { members, problems } = collectDirectMembers(params.accounts, params.poolAccounts ?? []);
   if (members.length === 0 && problems.length === 0) return undefined;
   const errors: string[] = [];
-  const verdicts = members.map((m) => ({
-    accountId: m.accountId,
-    profileId: m.profileId,
-    verdict: classifyAccountHealth(params.readHealth(m.accountId), params.healthOptions, params.nowMs).verdict,
-  }));
+  const verdicts = members.map((m) => {
+    const state = params.readHealth(m.accountId);
+    return {
+      accountId: m.accountId,
+      profileId: m.profileId,
+      verdict: classifyAccountHealth(state, params.healthOptions, params.nowMs).verdict,
+      sevenDayResetsAt: params.strategy === "reset-aware"
+        ? sevenDayReset(state, params.healthOptions, params.nowMs)
+        : undefined,
+    };
+  });
 
   const read = members.length > 0 ? await readDirectRouteSnapshot(params.runner, params.agentId) : {};
   if ("error" in read && read.error) errors.push(read.error);
@@ -100,6 +107,7 @@ export async function gatherDirectStatus(params: {
       sticky: params.sticky,
       nowMs: params.nowMs,
       minDwellMs: params.minDwellMs,
+      strategy: params.strategy,
     }).order;
   }
 

@@ -215,6 +215,7 @@ async function loadDirect(config) {
       configOrder,
       sticky,
       minDwellMs: pool?.minDwellMs,
+      strategy: pool?.strategy,
       nowMs: Date.now(),
       ...opts,
     });
@@ -692,9 +693,11 @@ async function explain() {
     return { id: a.id, verdict: h.verdict, detail, usage };
   });
   let stickyAccount;
+  let stickyEntry;
   if (pool) {
     try {
       const sticky = JSON.parse(rf(join(stateDir, `pool-${pool.id}.sticky.json`), "utf8"));
+      stickyEntry = sticky;
       if (sticky?.account && sticky.account !== pool.accounts[0]) stickyAccount = sticky.account;
     } catch {
       /* no sticky state */
@@ -710,7 +713,7 @@ async function explain() {
   }
   console.log(`\n${BOLD}🦞 multi-clawd — your setup, in plain English${RESET}\n`);
   console.log(
-    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, nowMs: now, direct }),
+    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, stickyEntry, nowMs: now, direct }),
   );
   console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
 }
@@ -755,6 +758,7 @@ async function usageCommand(args) {
   const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
   const now = Date.now();
   const rows = [];
+  const resetById = new Map();
   for (const a of accounts) {
     const row = { id: a.id, label: a.label };
     if (a.oauthTokenFile || a.oauthTokenRef) {
@@ -785,12 +789,21 @@ async function usageCommand(args) {
     const h = health.classifyAccountHealth(state, healthOptions, now);
     row.verdict = h.verdict;
     row.reason = h.reason;
+    if (pool?.strategy === "reset-aware") resetById.set(a.id, health.sevenDayReset(state, healthOptions, now));
     rows.push(row);
   }
   let next;
   if (pool) {
-    const verdicts = pool.accounts.map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data" }));
-    next = health.choosePoolAccount(verdicts);
+    const verdicts = pool.accounts.map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data",
+      sevenDayResetsAt: resetById.get(id) }));
+    if (pool.strategy === "reset-aware") {
+      const stickySelection = await import(resolve(__dirname, "..", "dist", "sticky.js"));
+      let sticky;
+      try { sticky = JSON.parse(rf(join(stateDir, `pool-${pool.id}.sticky.json`), "utf8")); } catch { /* none */ }
+      next = stickySelection.decideStickySelection({ verdicts, sticky, nowMs: now, minDwellMs: pool.minDwellMs, strategy: pool.strategy }).account;
+    } else {
+      next = health.choosePoolAccount(verdicts);
+    }
   }
   if (args.includes("--json")) {
     console.log(JSON.stringify({ at: new Date(now).toISOString(), rotateAt, warnThreshold, pool: pool?.id, nextLaunch: next, accounts: rows }, null, 2));

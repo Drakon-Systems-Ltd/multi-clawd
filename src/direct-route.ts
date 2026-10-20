@@ -19,7 +19,7 @@
  * as it did before this module existed.
  */
 import { isSecretRefShape, type SecretRefShape } from "./token-resolution.js";
-import type { HealthVerdict } from "./health.js";
+import type { HealthVerdict, PoolStrategy } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
 
 export const DIRECT_PROVIDER = "anthropic";
@@ -248,8 +248,7 @@ export interface DirectOrderPlan {
  * The `anthropic` profile order that matches pool health right now.
  *
  * The first profile is chosen by exactly the rule the CLI pool uses
- * (decideStickySelection: home first, rotate away on near-limit or
- * exhaustion, dwell before returning home, health beats stickiness), so both
+ * (decideStickySelection: configured strategy, dwell, health beats stickiness), so both
  * transports lean on the same account at the same moment. The rest follow by
  * health rank, ties kept in pool order.
  *
@@ -258,25 +257,30 @@ export interface DirectOrderPlan {
  * relative order — the plugin rearranges its own accounts and nothing else.
  */
 export function planDirectOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number }>;
   currentOrder?: readonly string[];
   sticky?: StickyEntry;
   nowMs: number;
   minDwellMs?: number;
+  strategy?: PoolStrategy;
 }): DirectOrderPlan | undefined {
   const { members } = params;
   if (members.length === 0) return undefined;
   const decision = decideStickySelection({
-    verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict })),
+    verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict, sevenDayResetsAt: m.sevenDayResetsAt })),
     sticky: params.sticky,
     nowMs: params.nowMs,
     minDwellMs: params.minDwellMs,
+    strategy: params.strategy,
   });
   const first = members.find((m) => m.accountId === decision.account) ?? members[0];
   const rest = members
     .filter((m) => m !== first)
     .map((m, index) => ({ m, index }))
-    .sort((a, b) => VERDICT_RANK[a.m.verdict] - VERDICT_RANK[b.m.verdict] || a.index - b.index)
+    .sort((a, b) => VERDICT_RANK[a.m.verdict] - VERDICT_RANK[b.m.verdict] ||
+      (params.strategy === "reset-aware" && a.m.verdict === "ok"
+        ? (a.m.sevenDayResetsAt ?? Infinity) - (b.m.sevenDayResetsAt ?? Infinity)
+        : 0) || a.index - b.index)
     .map(({ m }) => m.profileId);
   const managed = new Set(members.map((m) => m.profileId));
   const unmanaged = (params.currentOrder ?? []).filter(

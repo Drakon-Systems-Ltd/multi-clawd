@@ -553,7 +553,8 @@ error.
   ],
   "pool": {
     "id": "clawd",
-    "accounts": ["claw1", "claw2"],   // preference order; first = home
+    "accounts": ["claw1", "claw2"],   // preference order; first = home for ordered strategy
+    "strategy": "ordered",            // optional: "reset-aware" drains healthy weekly quota that resets soonest
     "utilizationThreshold": 0.85,     // default hand-over; minute/hour and overage windows use this
     "weeklyUtilizationThreshold": 0.97, // optional: day/week/month quota windows at 97%
     "minDwellMs": 600000,             // v0.3: anti-flap dwell before returning home
@@ -576,6 +577,15 @@ error.
   }
 } }
 ```
+
+`pool.strategy` defaults to `"ordered"`, which retains the configured account
+order. Set it to `"reset-aware"` to use healthy weekly quota before its
+`seven_day` window resets: among `ok` accounts with live seven-day reset data,
+the soonest reset wins. Accounts without that data follow in pool order;
+near-limit or exhausted accounts never outrank a healthy one. Equal reset
+times keep pool order. The existing `minDwellMs` delay still holds an account
+that remains usable. Both CLI launches and the direct Anthropic route use the
+same preference. Other values are rejected by the plugin config schema.
 
 How it decides, per launch (all data from each account's live
 `rate_limit_event` stream, captured by the shim):
