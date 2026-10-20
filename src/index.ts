@@ -2007,7 +2007,7 @@ export function startDirectOrderSync(params: {
     rotateOnOverage: params.pool?.rotateOnOverage,
   };
   const signature = JSON.stringify({
-    members: members.map((m) => m.profileId),
+    members: members.map(({ accountId, profileId, source, disabled }) => ({ accountId, profileId, source, disabled })),
     agents,
     intervalMs,
     healthOptions,

@@ -144,6 +144,28 @@ describe("the loop, end to end", () => {
     expect(calls().length).toBe(n);
   });
 
+  test("re-registering after benching a direct member removes its profile from the order", async () => {
+    const logger = { info: () => {}, warn: () => {} };
+    const params = {
+      accounts: config.accounts as never,
+      pool: config.pool,
+      directRoute: config.directRoute,
+      configOrder: () => undefined,
+      logger,
+    };
+    startDirectOrderSync(params);
+    await runDirectOrderTickNow();
+    const orderFile = join(process.env.FAKE_OPENCLAW_DIR!, "order.json");
+    expect(JSON.parse(readFileSync(orderFile, "utf8"))).toContain("anthropic:claw1");
+
+    startDirectOrderSync({
+      ...params,
+      accounts: [{ ...config.accounts[0], disabled: true }, config.accounts[1]] as never,
+    });
+    await runDirectOrderTickNow();
+    expect(JSON.parse(readFileSync(orderFile, "utf8"))).not.toContain("anthropic:claw1");
+  });
+
   test("manageOrder: false and non-full registration modes start nothing", () => {
     const logger = { info: () => {}, warn: () => {} };
     const accounts = config.accounts as never;

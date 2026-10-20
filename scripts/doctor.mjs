@@ -495,9 +495,16 @@ console.log("pool");
 const pool = pluginConfig.pool;
 if (!pool) warn("no pool configured — direct backends only, no proactive rotation");
 else {
-  const members = (pool.accounts ?? []).filter((id) => accounts.some((a) => a.id === id && a.disabled !== true));
-  if (members.length === 0 && pool.accounts?.some((id) => accounts.some((a) => a.id === id))) bad("pool.accounts[].disabled: every pool member is disabled");
-  if (members.length < 2) bad(`pool "${pool.id ?? "clawd"}" has ${members.length} valid member(s); needs ≥ 2`);
+  const configuredMembers = (pool.accounts ?? []).filter((id) => accounts.some((a) => a.id === id));
+  const members = configuredMembers.filter((id) => accounts.some((a) => a.id === id && a.disabled !== true));
+  const { isModernClaudeModelId } = await importDist("models.js", ["isModernClaudeModelId"], "cli");
+  const hasDegradeLadder = (pool.degrade?.ladder ?? []).some(isModernClaudeModelId);
+  if (members.length === 0 && configuredMembers.length > 0) bad("pool.accounts[].disabled: every pool member is disabled");
+  if (members.length === 1 && configuredMembers.length > 1) {
+    warn(`pool "${pool.id ?? "clawd"}" has 1 valid member(s); other configured members are disabled — pool remains available`);
+  } else if (members.length === 1 && hasDegradeLadder) {
+    note(`pool "${pool.id ?? "clawd"}" has 1 valid member(s) with a degrade ladder; pool remains available`);
+  } else if (members.length < 2) bad(`pool "${pool.id ?? "clawd"}" has ${members.length} valid member(s); needs ≥ 2`);
   else ok(`pool "${pool.id ?? "clawd"}": ${members.join(" → ")}`);
   const generalThreshold = pool.utilizationThreshold ?? DEFAULT_UTILIZATION_THRESHOLD;
   const weeklyThreshold = pool.weeklyUtilizationThreshold ?? generalThreshold;
