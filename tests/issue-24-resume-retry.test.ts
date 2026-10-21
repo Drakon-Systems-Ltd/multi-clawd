@@ -10,7 +10,7 @@
  * or it resumes a history that contains the refusal and the message twice.
  */
 import { beforeAll, describe, expect, test } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -43,7 +43,6 @@ const HISTORY =
   ].join("\n") + "\n";
 
 beforeAll(() => {
-  execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "pipe" });
   expect(existsSync(SHIM)).toBe(true);
 });
 

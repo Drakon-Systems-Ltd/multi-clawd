@@ -8,7 +8,7 @@
  * the prepareExecution wiring that feeds it, and the shim end-to-end against a
  * fake CLI that resolves sessions the way the real one does.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -175,7 +175,6 @@ const FAKE = join(__dirname, "fixtures", "fake-claude.mjs");
 
 describe("shim resume handover (end-to-end)", () => {
   beforeAll(() => {
-    execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "pipe" });
     expect(existsSync(SHIM)).toBe(true);
   });
 

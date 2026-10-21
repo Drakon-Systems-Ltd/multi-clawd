@@ -4,7 +4,7 @@
  * it directly, and agent turns still run through the shim via the execute
  * transport. Every behaviour the shim provides must survive that transport.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -45,7 +45,6 @@ const FAKE = join(__dirname, "fixtures", "fake-claude.mjs");
 const STREAM_ARGS = ["-p", "--output-format", "stream-json", "--model", "claude-fable-5-1"];
 
 beforeAll(() => {
-  execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "pipe" });
   expect(existsSync(SHIM)).toBe(true);
 });
 
