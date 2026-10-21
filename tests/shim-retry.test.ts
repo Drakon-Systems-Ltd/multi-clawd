@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,6 @@ const FAKE = join(__dirname, "fixtures", "fake-claude.mjs");
 const STREAM_ARGS = ["-p", "--output-format", "stream-json", "--model", "claude-fable-5-1"];
 
 beforeAll(() => {
-  execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "pipe" });
   expect(existsSync(SHIM)).toBe(true);
 });
 

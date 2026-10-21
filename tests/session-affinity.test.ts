@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +20,6 @@ const roster = [
 ];
 
 beforeAll(() => {
-  execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "pipe" });
   expect(existsSync(SHIM)).toBe(true);
 });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));

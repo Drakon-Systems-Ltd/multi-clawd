@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +39,6 @@ function runShim(opts: {
 }
 
 beforeAll(() => {
-  execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "pipe" });
   expect(existsSync(SHIM)).toBe(true);
 });
 
