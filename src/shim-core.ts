@@ -418,6 +418,160 @@ export function limitFamilyFor(displayName: string, modelId: string): string | u
 
 const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;
 
+// ── transient provider errors (#68) ─────────────────────────────────────────
+//
+// Shapes below are taken from the Claude CLI's own stream-json writer (public
+// npm package @anthropic-ai/claude-code, strings in the 2.1.306 build — not
+// invented here). When a request fails after the CLI's own in-process retries,
+// the CLI emits an `assistant` record whose `message.model` is `<synthetic>`
+// and which carries, at the top level: `error` (the CLI's error kind:
+// "overloaded" | "server_error" | "rate_limit" | "authentication_failed" |
+// …), `is_api_error_message: true`, `api_error_status` (the HTTP status), and
+// an optional typed `api_error` whose values include "usage_limit_reached"
+// for a spent subscription window. The `result` record that ends the turn
+// then carries `is_error: true` and the same `api_error_status`. While the CLI
+// is still retrying it emits `system` records with `subtype: "api_retry"`,
+// `attempt`, `max_retries`, `retry_delay_ms`, `error_status` and `error`.
+//
+// Wordings the CLI puts in the message text (same source):
+//   529 after repeated overloads: "API Error: Repeated 529 Overloaded errors.
+//        The API is at capacity — this is usually temporary. …"  (kind server_error)
+//   5xx: "API Error: <status text>. This is a server-side issue, usually
+//        temporary — try again in a moment."                       (kind server_error)
+//   429 that is NOT a spent window: "API Error: Server is temporarily limiting
+//        requests (not your usage limit) · …" or "API Error: Request rejected
+//        (429) · …"                                                  (kind rate_limit)
+//   429 spent window: "You've reached your <model> limit. …"        (kind rate_limit,
+//        api_error "usage_limit_reached") — handled by parseModelLimitError.
+//
+// The platform's public error table (https://platform.claude.com/docs/en/api/errors)
+// lists 429 rate_limit_error, 500 api_error, 504 timeout_error and 529
+// overloaded_error, and describes 5xx/529 as transient to retry with backoff.
+
+export type TransientErrorKind = "overloaded" | "server_error" | "rate_limit_transient";
+
+export interface TransientApiError {
+  kind: TransientErrorKind;
+  /** HTTP status when the record carried one. */
+  status?: number;
+  /** Short diagnostic, message text truncated — never persisted. */
+  text: string;
+}
+
+const TRANSIENT_TEXT_PATTERNS: ReadonlyArray<{ re: RegExp; kind: TransientErrorKind }> = [
+  { re: /repeated 529 overloaded errors/i, kind: "overloaded" },
+  { re: /overloaded_error/i, kind: "overloaded" },
+  { re: /the api is at capacity/i, kind: "overloaded" },
+  { re: /server-side issue, usually temporary/i, kind: "server_error" },
+  { re: /temporarily limiting requests \(not your usage limit\)/i, kind: "rate_limit_transient" },
+  { re: /request rejected \(429\)/i, kind: "rate_limit_transient" },
+];
+
+const TRANSIENT_TEXT_MAX_CHARS = 160;
+
+/**
+ * Recognise a provider-side TRANSIENT failure in the stream — an overload
+ * (529), a server error (5xx) or a throttle 429 that is not a spent window —
+ * as distinct from a reactive model limit (parseModelLimitError) and from an
+ * auth failure (parseAuthFailure), both of which win when they match.
+ *
+ * Only genuine error records count: `type: "error"`, `is_error: true`, an
+ * `error…` subtype, or an `assistant` record flagged `is_api_error_message`.
+ * A successful result quoting any of this text must not trigger. Nothing here
+ * is recorded against the account: a transient says nothing about its quota.
+ */
+export function parseTransientApiError(line: string): TransientApiError | undefined {
+  // Cheap pre-filter, performance only: must cover every path below.
+  if (
+    !/("error"|is_error|api_error_status|overloaded|server-side|temporarily limiting|request rejected|at capacity)/i.test(
+      line,
+    )
+  ) {
+    return undefined;
+  }
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  const r = record as {
+    type?: unknown;
+    is_error?: unknown;
+    subtype?: unknown;
+    result?: unknown;
+    error?: unknown;
+    is_api_error_message?: unknown;
+    api_error_status?: unknown;
+    api_error?: unknown;
+    message?: { content?: unknown };
+  };
+  const isErrorRecord =
+    r.type === "error" ||
+    r.is_error === true ||
+    (typeof r.subtype === "string" && r.subtype.startsWith("error")) ||
+    (r.type === "assistant" && r.is_api_error_message === true);
+  if (!isErrorRecord) return undefined;
+
+  const texts: string[] = [];
+  if (typeof r.result === "string") texts.push(r.result);
+  if (typeof r.error === "object" && r.error !== null) {
+    const msg = (r.error as { message?: unknown }).message;
+    if (typeof msg === "string") texts.push(msg);
+  }
+  if (r.type === "assistant" && Array.isArray(r.message?.content)) {
+    for (const block of r.message.content as Array<{ type?: unknown; text?: unknown }>) {
+      if (block && block.type === "text" && typeof block.text === "string") texts.push(block.text);
+    }
+  }
+  const joined = texts.join("\n");
+
+  // A spent window or a dead login is never a transient, whatever else the
+  // record says.
+  if (LIMIT_TEXT_RE.test(joined)) return undefined;
+  if (r.api_error === "usage_limit_reached") return undefined;
+  if (AUTH_FAILURE_PATTERNS.some((p) => p.test(joined))) return undefined;
+
+  const status = typeof r.api_error_status === "number" ? r.api_error_status : undefined;
+  const text = joined.trim().slice(0, TRANSIENT_TEXT_MAX_CHARS);
+  const kindFromCli = typeof r.error === "string" ? r.error : undefined;
+
+  if (status === 529 || kindFromCli === "overloaded") return { kind: "overloaded", status, text };
+  if ((status !== undefined && status >= 500) || kindFromCli === "server_error") {
+    return { kind: "server_error", status, text };
+  }
+  for (const { re, kind } of TRANSIENT_TEXT_PATTERNS) {
+    if (re.test(joined)) return { kind, status, text };
+  }
+  // A 429 whose text is not a spent-window refusal is a throttle. Only when
+  // the record says 429 — a bare "rate_limit" kind with no status and no
+  // recognised wording is left alone: the CLI uses that kind for several
+  // things we cannot tell apart from here.
+  if (status === 429) return { kind: "rate_limit_transient", status, text };
+  return undefined;
+}
+
+/**
+ * The CLI's own retry notice: `{"type":"system","subtype":"api_retry",
+ * "retry_delay_ms":…}`. Tells the shim the child is sleeping before another
+ * attempt, so holding the preamble that much longer costs the user nothing.
+ */
+export function parseApiRetryNotice(line: string): { retryDelayMs: number } | undefined {
+  if (!line.includes('"api_retry"')) return undefined;
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  const r = record as { type?: unknown; subtype?: unknown; retry_delay_ms?: unknown };
+  if (r.type !== "system" || r.subtype !== "api_retry") return undefined;
+  const delay = typeof r.retry_delay_ms === "number" && r.retry_delay_ms >= 0 ? r.retry_delay_ms : 0;
+  return { retryDelayMs: delay };
+}
+
 /**
  * Recognise a reactive model-limit failure in the stream (the 429 the CLI
  * reports as an error result: "You've reached your Fable 5 limit. /model to

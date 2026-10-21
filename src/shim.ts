@@ -42,7 +42,13 @@ import {
   type AccountHealthState,
 } from "./shim-core.js";
 import { rewriteModelArg } from "./degrade.js";
-import { parseModelLimitError, recordModelLimit } from "./shim-core.js";
+import {
+  parseApiRetryNotice,
+  parseModelLimitError,
+  parseTransientApiError,
+  recordModelLimit,
+  type TransientApiError,
+} from "./shim-core.js";
 import { canonicalModelId } from "./models.js";
 import {
   buildRetryEnv,
@@ -421,6 +427,19 @@ const HOLD_CAP_BYTES = 256 * 1024;
  * magnitude above this, so the hold can never be what trips it.
  */
 const HOLD_MAX_MS = Number(process.env.MULTI_CLAWD_HOLD_MAX_MS ?? 10_000);
+/**
+ * Ceiling on the hold when the CLI itself reports that it is retrying (#68):
+ * each `system`/`api_retry` record names the sleep before the next attempt,
+ * and sitting on the init record for that long costs the user nothing they
+ * would otherwise have. Bounded well under the gateway's 180s no-output
+ * floor (index.ts) so an extended hold can never be what trips it.
+ */
+const HOLD_RETRY_MAX_MS = Math.min(
+  Number(process.env.MULTI_CLAWD_HOLD_RETRY_MAX_MS ?? 120_000),
+  150_000,
+);
+/** Grace added to a reported retry delay, for the attempt itself. */
+const HOLD_RETRY_GRACE_MS = 5_000;
 let held: string[] = [];
 let heldBytes = 0;
 let holdTail = "";
@@ -478,7 +497,16 @@ function readSiblingState(file: string) {
  * child, whose limit error is the one thing this whole path exists to avoid
  * showing the user.
  */
-function attemptRetry(): boolean {
+/** Why the shim is retrying: a spent window, or a provider-side transient (#68). */
+type RetryCause = { kind: "model_limit" } | { kind: "transient"; detail: TransientApiError };
+
+function describeCause(cause: RetryCause): string {
+  if (cause.kind === "model_limit") return "model limit";
+  const d = cause.detail;
+  return `transient provider error (${d.kind}${d.status !== undefined ? ` ${d.status}` : ""})`;
+}
+
+function attemptRetry(cause: RetryCause): boolean {
   if (!retryArmed || retryUsed) return false;
   const model = effectiveModelId();
   const target = chooseLaunchableRetryAccount({
@@ -486,6 +514,9 @@ function attemptRetry(): boolean {
     readState: readSiblingState,
     modelId: model,
     nowMs: Date.now(),
+    // A transient leaves THIS account unspent, so a sibling the pool believes
+    // is spent is not worth a launch; only an idle sibling takes the hop.
+    allowOverdueProbe: cause.kind !== "transient",
     // A token-file sibling's token is read here, at the moment of the retry,
     // and goes only into the retried child's env (retry-plan.ts #2).
     materialize: (account) => materializeRetryAccount(account, (path) => readFileSync(path, "utf8")),
@@ -496,7 +527,7 @@ function attemptRetry(): boolean {
   });
   if (!target) {
     process.stderr.write(
-      `[multi-clawd shim] model limit on ${accountId} with no healthy sibling to retry onto — ` +
+      `[multi-clawd shim] ${describeCause(cause)} on ${accountId} with no healthy sibling to retry onto — ` +
         `passing the failure through to the host's chain\n`,
     );
     releaseHeldOutput();
@@ -510,7 +541,7 @@ function attemptRetry(): boolean {
       handoverSnapshotTo(resumeSnapshot, effectiveConfigDir(target.env));
     } catch (err) {
       process.stderr.write(
-        `[multi-clawd shim] model limit on ${accountId}, but session ` +
+        `[multi-clawd shim] ${describeCause(cause)} on ${accountId}, but session ` +
           `${resumeSnapshot.sessionId.slice(0, 8)} could not be handed to ${target.id} ` +
           `(${err instanceof Error ? err.message : String(err)}) — ` +
           `passing the failure through to the host's chain\n`,
@@ -522,7 +553,7 @@ function attemptRetry(): boolean {
   retryUsed = true;
   retryArmed = false;
   process.stderr.write(
-    `[multi-clawd shim] model limit on ${accountId}${model ? ` for ${model}` : ""} — ` +
+    `[multi-clawd shim] ${describeCause(cause)} on ${accountId}${model ? ` for ${model}` : ""} — ` +
       `retrying this turn on ${target.id}${
         resumeSnapshot ? `, session ${resumeSnapshot.sessionId.slice(0, 8)} handed over` : ""
       } (nothing forwarded downstream yet)\n`,
@@ -572,7 +603,17 @@ function onArmedChunk(chunk: Buffer): void {
     holdTail = holdTail.slice(idx + 1);
     const line = raw.trim();
     observeLine(line);
-    if (parseModelLimitError(line) && attemptRetry()) return;
+    if (parseModelLimitError(line) && attemptRetry({ kind: "model_limit" })) return;
+    // #68: an overload / server error / throttle 429 that survived the CLI's
+    // own retries gets the same single hop — and, unlike a limit, records
+    // nothing against this account (observeLine wrote nothing for it).
+    const transient = parseTransientApiError(line);
+    if (transient && attemptRetry({ kind: "transient", detail: transient })) return;
+    // The CLI says it is sleeping before another attempt: keep the hold open
+    // for that long, bounded, rather than releasing the init record mid-retry
+    // and losing the hop that would follow.
+    const retryNotice = parseApiRetryNotice(line);
+    if (retryNotice) extendHold(retryNotice.retryDelayMs + HOLD_RETRY_GRACE_MS);
     held.push(raw);
     heldBytes += raw.length;
     if (!isPreambleRecord(line) || heldBytes > HOLD_CAP_BYTES) {
@@ -590,16 +631,34 @@ function onArmedChunk(chunk: Buffer): void {
   }
 }
 
-if (retryArmed) {
-  const holdTimer = setTimeout(() => {
+let holdTimer: NodeJS.Timeout | undefined;
+const holdStartedAt = Date.now();
+let holdDeadline = holdStartedAt + HOLD_MAX_MS;
+
+function armHoldTimer(): void {
+  if (holdTimer) clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => {
     if (!retryArmed) return;
     process.stderr.write(
-      `[multi-clawd shim] in-turn retry window closed after ${HOLD_MAX_MS}ms — releasing the stream\n`,
+      `[multi-clawd shim] in-turn retry window closed after ${Date.now() - holdStartedAt}ms — releasing the stream\n`,
     );
     releaseHeldOutput();
-  }, HOLD_MAX_MS);
+  }, Math.max(0, holdDeadline - Date.now()));
   holdTimer.unref?.();
 }
+
+/** Push the hold deadline out by `ms`, never past HOLD_RETRY_MAX_MS from launch (#68). */
+function extendHold(ms: number): void {
+  if (!retryArmed) return;
+  const wanted = Date.now() + ms;
+  const ceiling = holdStartedAt + HOLD_RETRY_MAX_MS;
+  const next = Math.min(wanted, ceiling);
+  if (next <= holdDeadline) return;
+  holdDeadline = next;
+  armHoldTimer();
+}
+
+if (retryArmed) armHoldTimer();
 
 function onPassthroughChunk(chunk: Buffer): void {
   process.stdout.write(chunk); // passthrough first, always

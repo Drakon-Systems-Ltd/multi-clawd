@@ -93,6 +93,80 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
   process.exit(Number(process.env.FAKE_CLAUDE_LIMIT_EXIT ?? "1"));
 }
 
+// #68 transient path: a provider-side failure that survived the CLI's own
+// retries, in the shape the real CLI's stream-json writer produces (field
+// names and wordings taken from the @anthropic-ai/claude-code 2.1.306 build's
+// serialiser: top-level `error` kind, `is_api_error_message`,
+// `api_error_status`, a `<synthetic>` assistant record, then an `is_error`
+// result carrying `api_error_status`). These lines are ASSEMBLED from that
+// source, not captured from a live failing request — see the test file.
+// Comma-separated account ids, so a test can make the sibling fail too.
+const transientForAccounts = (process.env.FAKE_CLAUDE_TRANSIENT_FOR_ACCOUNT ?? "")
+  .split(",")
+  .filter(Boolean);
+if (transientForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
+  const kind = process.env.FAKE_CLAUDE_TRANSIENT_KIND ?? "overloaded";
+  const shapes = {
+    overloaded: {
+      error: "server_error",
+      status: 529,
+      text:
+        "API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment.",
+    },
+    server_error: {
+      error: "server_error",
+      status: 500,
+      text:
+        "API Error: Internal server error. This is a server-side issue, usually temporary — try again in a moment.",
+    },
+    rate_limit_transient: {
+      error: "rate_limit",
+      status: 429,
+      text:
+        "API Error: Server is temporarily limiting requests (not your usage limit) · this may be a temporary capacity issue.",
+    },
+  };
+  const shape = shapes[kind] ?? shapes.overloaded;
+  // Optional: the CLI's own retry notice, then the sleep it announces.
+  const retryDelayMs = Number(process.env.FAKE_CLAUDE_TRANSIENT_RETRY_DELAY_MS ?? "0");
+  if (retryDelayMs > 0) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 1,
+        max_retries: 10,
+        retry_delay_ms: retryDelayMs,
+        error_status: shape.status,
+        error: shape.status === 529 ? "overloaded" : shape.error,
+        session_id: "s1",
+      }) + "\n",
+    );
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: shape.text }] },
+      error: shape.error,
+      is_api_error_message: true,
+      api_error_status: shape.status,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      api_error_status: shape.status,
+      result: shape.text,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.exit(1);
+}
+
 // Tests may override the emitted rate-limit payload to simulate turns that
 // carry a different window type (e.g. seven_day with utilization).
 const rateLimitInfo = process.env.FAKE_CLAUDE_RATE_LIMIT_INFO

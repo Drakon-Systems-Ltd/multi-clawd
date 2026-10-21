@@ -6,6 +6,16 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- The shim tells a transient provider error (529 overload, 5xx, throttle 429
+  that is not a spent window) apart from a reactive model limit and gives it the
+  same single in-turn hop to an idle sibling, without recording a rejected
+  window for the account that met it and without hopping onto a sibling the
+  pool believes is spent. The hold window extends through the CLI's own
+  announced retry sleeps, bounded by `MULTI_CLAWD_HOLD_RETRY_MAX_MS`. Record
+  shapes are grounded in the Claude CLI's stream-json writer (2.1.306 strings),
+  assembled in fixtures, not live-captured. (#68)
+
 ## [2.4.0] - 2026-10-20
 
 ### Added
