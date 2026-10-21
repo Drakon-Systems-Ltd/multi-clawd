@@ -6,17 +6,19 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-20
+
 ### Added
 - Accounts can be benched with `accounts[].disabled: true` and restored with
   `multi-clawd account disable <id>` / `enable <id>`. The CLI preserves unrelated
   config text and writes a timestamped backup before each change. (#57)
+- Optional `pool.sessionAffinity` keeps a healthy Claude CLI session on the
+  account that last served it. Pins expire, are size bounded, and update after
+  successful in-turn retries; `sessionAffinityTtlMs` sets their lifetime. (#56)
 
 ## [2.3.0] - 2026-10-20
 
 ### Added
-- Optional `pool.sessionAffinity` keeps a healthy Claude CLI session on the
-  account that last served it. Pins expire, are size bounded, and update after
-  successful in-turn retries; `sessionAffinityTtlMs` sets their lifetime. (#56)
 - Optional `pool.strategy: "reset-aware"` selects the healthy account whose
   live seven-day quota window resets soonest across CLI and direct routes;
   `ordered` remains the default. Explain shows the strategy and pick reason. (#54)
