@@ -23,8 +23,9 @@ versioning from v1.0.
   on any record of a turn keeps the rest of that turn off the transient path,
   so the bare 429 result that follows a typed notice is never hopped as a
   throttle. The limit, auth and transient parsers share one error-record
-  definition and one set of text fields, so no record can be two of them at
-  once. A declined hop now releases the causing record in arrival order
+  definition and one set of text fields; a record recognised as a limit or
+  auth failure is never also classified as transient. A declined hop now
+  releases the causing record in arrival order
   instead of stranding it. (#68 review)
 
 ## [2.4.0] - 2026-10-20
