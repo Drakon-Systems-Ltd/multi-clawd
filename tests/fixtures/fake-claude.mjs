@@ -81,6 +81,34 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
       }) + "\n",
     );
   }
+  // #68 review: the 2.1.306 writer's TYPED shape — a `<synthetic>` assistant
+  // notice carrying `api_error: "usage_limit_reached"` and status 429, then a
+  // result carrying only the status and the text (no typed marker). Tests pair
+  // it with FAKE_CLAUDE_LIMIT_TEXT set to wording the shim does not know.
+  if (process.env.FAKE_CLAUDE_LIMIT_SHAPE === "typed") {
+    process.stdout.write(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: LIMIT_TEXT }] },
+        error: "rate_limit",
+        is_api_error_message: true,
+        api_error_status: 429,
+        api_error: "usage_limit_reached",
+        session_id: "s1",
+      }) + "\n",
+    );
+    process.stdout.write(
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        api_error_status: 429,
+        result: LIMIT_TEXT,
+        session_id: "s1",
+      }) + "\n",
+    );
+    process.exit(Number(process.env.FAKE_CLAUDE_LIMIT_EXIT ?? "1"));
+  }
   process.stdout.write(
     JSON.stringify({
       type: "result",
@@ -91,6 +119,100 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
     }) + "\n",
   );
   process.exit(Number(process.env.FAKE_CLAUDE_LIMIT_EXIT ?? "1"));
+}
+
+// #68 review: the CLI retried once and then SUCCEEDED — an `api_retry` notice,
+// the announced sleep, then the ordinary successful turn below. The shim must
+// forward the notice and the turn untouched and record nothing for it.
+const retryNoticeMs = Number(process.env.FAKE_CLAUDE_RETRY_NOTICE_MS ?? "0");
+if (retryNoticeMs > 0) {
+  process.stdout.write(
+    JSON.stringify({
+      type: "system",
+      subtype: "api_retry",
+      attempt: 1,
+      max_retries: 10,
+      retry_delay_ms: retryNoticeMs,
+      error_status: 529,
+      error: "overloaded",
+      session_id: "s1",
+    }) + "\n",
+  );
+  await new Promise((resolve) => setTimeout(resolve, retryNoticeMs));
+}
+
+// #68 transient path: a provider-side failure that survived the CLI's own
+// retries, in the shape the real CLI's stream-json writer produces (field
+// names and wordings taken from the @anthropic-ai/claude-code 2.1.306 build's
+// serialiser: top-level `error` kind, `is_api_error_message`,
+// `api_error_status`, a `<synthetic>` assistant record, then an `is_error`
+// result carrying `api_error_status`). These lines are ASSEMBLED from that
+// source, not captured from a live failing request — see the test file.
+// Comma-separated account ids, so a test can make the sibling fail too.
+const transientForAccounts = (process.env.FAKE_CLAUDE_TRANSIENT_FOR_ACCOUNT ?? "")
+  .split(",")
+  .filter(Boolean);
+if (transientForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
+  const kind = process.env.FAKE_CLAUDE_TRANSIENT_KIND ?? "overloaded";
+  const shapes = {
+    overloaded: {
+      error: "server_error",
+      status: 529,
+      text:
+        "API Error: Repeated 529 Overloaded errors. The API is at capacity — this is usually temporary. Try again in a moment.",
+    },
+    server_error: {
+      error: "server_error",
+      status: 500,
+      text:
+        "API Error: Internal server error. This is a server-side issue, usually temporary — try again in a moment.",
+    },
+    rate_limit_transient: {
+      error: "rate_limit",
+      status: 429,
+      text:
+        "API Error: Server is temporarily limiting requests (not your usage limit) · this may be a temporary capacity issue.",
+    },
+  };
+  const shape = shapes[kind] ?? shapes.overloaded;
+  // Optional: the CLI's own retry notice, then the sleep it announces.
+  const retryDelayMs = Number(process.env.FAKE_CLAUDE_TRANSIENT_RETRY_DELAY_MS ?? "0");
+  if (retryDelayMs > 0) {
+    process.stdout.write(
+      JSON.stringify({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 1,
+        max_retries: 10,
+        retry_delay_ms: retryDelayMs,
+        error_status: shape.status,
+        error: shape.status === 529 ? "overloaded" : shape.error,
+        session_id: "s1",
+      }) + "\n",
+    );
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: shape.text }] },
+      error: shape.error,
+      is_api_error_message: true,
+      api_error_status: shape.status,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      api_error_status: shape.status,
+      result: shape.text,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.exit(1);
 }
 
 // Tests may override the emitted rate-limit payload to simulate turns that

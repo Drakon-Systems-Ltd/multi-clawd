@@ -256,6 +256,13 @@ claude-cli/claude-fable-5        # main login
   session is handed to the sibling as it stood before the refused attempt.
   One retry. Works for config-dir, native, and setup-token-file accounts; the
   shim is handed paths only and reads a token file at the moment it retries.
+  A **transient** provider error (529 overload, 5xx, or a throttle 429 that is
+  not a spent window) gets the same single hop to an idle sibling — but
+  records nothing against the account that met it, because it is not spent,
+  and is passed through unchanged when no idle sibling exists (never onto an
+  account the pool believes is spent). The Claude CLI retries these itself
+  first; the shim keeps the hop armed through those announced retry sleeps,
+  bounded (`MULTI_CLAWD_HOLD_RETRY_MAX_MS`, default 120s, hard cap 150s).
 - 📟 **Operator alerts (v0.3)** — dead logins (probed every 15 min without
   spending quota), pool rotations, whole-pool exhaustion, and watchdog
   restarts surface through your agent's next heartbeat (e.g. straight into

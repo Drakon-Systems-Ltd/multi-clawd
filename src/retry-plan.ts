@@ -179,6 +179,14 @@ export function chooseRetryAccount(params: {
   modelId?: string;
   nowMs: number;
   options?: HealthOptions;
+  /**
+   * Take a rejected-but-overdue sibling when no healthy one exists (#26).
+   * Default true. A TRANSIENT provider error (#68) passes false: the
+   * failing account is not spent, so launching onto a sibling the pool
+   * believes IS spent trades a temporary error for a likely refusal; with no
+   * idle sibling the turn is passed through instead.
+   */
+  allowOverdueProbe?: boolean;
 }): RetryAccount | undefined {
   const verdicts: PoolVerdict[] = [];
   for (const account of params.roster) {
@@ -195,6 +203,7 @@ export function chooseRetryAccount(params: {
     if (health.verdict === "ok" || health.verdict === "no_data") return account;
     verdicts.push({ id: account.id, verdict: health.verdict, observedAt: health.observedAt });
   }
+  if (params.allowOverdueProbe === false) return undefined;
   const probe = overdueProbeAccount(verdicts, params.nowMs);
   return probe ? params.roster.find((a) => a.id === probe) : undefined;
 }
@@ -255,6 +264,7 @@ export function chooseLaunchableRetryAccount(params: {
   modelId?: string;
   nowMs: number;
   options?: HealthOptions;
+  allowOverdueProbe?: boolean;
   materialize: (account: RetryAccount) => MaterializedRetry;
   onSkip?: (accountId: string, reason: string) => void;
 }): RetryAccount | undefined {

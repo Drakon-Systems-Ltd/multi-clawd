@@ -6,6 +6,25 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- The shim tells a transient provider error (529 overload, 5xx, throttle 429
+  that is not a spent window) apart from a reactive model limit and gives it the
+  same single in-turn hop to an idle sibling, without recording a rejected
+  window for the account that met it and without hopping onto a sibling the
+  pool believes is spent. The hold window extends through the CLI's own
+  announced retry sleeps, bounded by `MULTI_CLAWD_HOLD_RETRY_MAX_MS`. Record
+  shapes are grounded in the Claude CLI's stream-json writer (2.1.306 strings),
+  assembled in fixtures, not live-captured. (#68)
+- The CLI's typed `api_error: "usage_limit_reached"` marker and typed
+  `error: "authentication_failed"` kind are recognised as a spent window and a
+  dead login respectively, whatever the wording; a limit or auth failure seen
+  on any record of a turn keeps the rest of that turn off the transient path,
+  so the bare 429 result that follows a typed notice is never hopped as a
+  throttle. The limit, auth and transient parsers share one error-record
+  definition and one set of text fields, so no record can be two of them at
+  once. A declined hop now releases the causing record in arrival order
+  instead of stranding it. (#68 review)
+
 ## [2.4.0] - 2026-10-20
 
 ### Added
