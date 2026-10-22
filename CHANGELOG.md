@@ -6,7 +6,9 @@ versioning from v1.0.
 
 ## [Unreleased]
 
-### Added
+## [2.4.1] - 2026-10-22
+
+### Fixed
 - The shim tells a transient provider error (529 overload, 5xx, throttle 429
   that is not a spent window) apart from a reactive model limit and gives it the
   same single in-turn hop to an idle sibling, without recording a rejected
