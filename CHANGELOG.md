@@ -11,6 +11,10 @@ versioning from v1.0.
   health-state writes and in-turn retry decisions. Retry choices re-read
   sibling health after earlier decisions; lock timeouts fail open so turns
   continue. (#69)
+
+## [2.4.1] - 2026-10-22
+
+### Fixed
 - The shim tells a transient provider error (529 overload, 5xx, throttle 429
   that is not a spent window) apart from a reactive model limit and gives it the
   same single in-turn hop to an idle sibling, without recording a rejected
@@ -25,8 +29,9 @@ versioning from v1.0.
   on any record of a turn keeps the rest of that turn off the transient path,
   so the bare 429 result that follows a typed notice is never hopped as a
   throttle. The limit, auth and transient parsers share one error-record
-  definition and one set of text fields, so no record can be two of them at
-  once. A declined hop now releases the causing record in arrival order
+  definition and one set of text fields; a record recognised as a limit or
+  auth failure is never also classified as transient. A declined hop now
+  releases the causing record in arrival order
   instead of stranding it. (#68 review)
 
 ## [2.4.0] - 2026-10-20
