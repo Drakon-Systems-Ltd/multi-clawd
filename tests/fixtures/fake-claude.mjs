@@ -81,6 +81,34 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
       }) + "\n",
     );
   }
+  // #68 review: the 2.1.306 writer's TYPED shape — a `<synthetic>` assistant
+  // notice carrying `api_error: "usage_limit_reached"` and status 429, then a
+  // result carrying only the status and the text (no typed marker). Tests pair
+  // it with FAKE_CLAUDE_LIMIT_TEXT set to wording the shim does not know.
+  if (process.env.FAKE_CLAUDE_LIMIT_SHAPE === "typed") {
+    process.stdout.write(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: LIMIT_TEXT }] },
+        error: "rate_limit",
+        is_api_error_message: true,
+        api_error_status: 429,
+        api_error: "usage_limit_reached",
+        session_id: "s1",
+      }) + "\n",
+    );
+    process.stdout.write(
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        api_error_status: 429,
+        result: LIMIT_TEXT,
+        session_id: "s1",
+      }) + "\n",
+    );
+    process.exit(Number(process.env.FAKE_CLAUDE_LIMIT_EXIT ?? "1"));
+  }
   process.stdout.write(
     JSON.stringify({
       type: "result",
@@ -91,6 +119,26 @@ if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
     }) + "\n",
   );
   process.exit(Number(process.env.FAKE_CLAUDE_LIMIT_EXIT ?? "1"));
+}
+
+// #68 review: the CLI retried once and then SUCCEEDED — an `api_retry` notice,
+// the announced sleep, then the ordinary successful turn below. The shim must
+// forward the notice and the turn untouched and record nothing for it.
+const retryNoticeMs = Number(process.env.FAKE_CLAUDE_RETRY_NOTICE_MS ?? "0");
+if (retryNoticeMs > 0) {
+  process.stdout.write(
+    JSON.stringify({
+      type: "system",
+      subtype: "api_retry",
+      attempt: 1,
+      max_retries: 10,
+      retry_delay_ms: retryNoticeMs,
+      error_status: 529,
+      error: "overloaded",
+      session_id: "s1",
+    }) + "\n",
+  );
+  await new Promise((resolve) => setTimeout(resolve, retryNoticeMs));
 }
 
 // #68 transient path: a provider-side failure that survived the CLI's own

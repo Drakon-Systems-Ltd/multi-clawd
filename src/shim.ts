@@ -361,6 +361,8 @@ let sawAuthFailure = false;
  */
 let sawModelLimit = false;
 let sawSuccessResult = false;
+/** Display name of the last limit refusal recorded for this child (see observeLine). */
+let recordedLimitDisplayName: string | undefined;
 
 /** Telemetry for one stream line. Runs whether or not the line is forwarded. */
 function observeLine(line: string): void {
@@ -377,7 +379,12 @@ function observeLine(line: string): void {
     // BEFORE any retry decision on purpose: the retry re-reads state, and the
     // account that just refused must already be excluded when it does.
     const limitHit = parseModelLimitError(line);
-    if (limitHit) {
+    // The CLI reports one refusal twice — its `<synthetic>` assistant notice,
+    // then the error result — and both now parse as the limit (#68). Record
+    // each distinct wording (the result may name the family where the typed
+    // notice did not) but not the same one twice.
+    if (limitHit && limitHit.displayName !== recordedLimitDisplayName) {
+      recordedLimitDisplayName = limitHit.displayName;
       sawModelLimit = true;
       const model = effectiveModelId();
       if (model) {
@@ -525,12 +532,14 @@ function attemptRetry(cause: RetryCause): boolean {
         `[multi-clawd shim] not retrying onto ${id}: its declared credential did not resolve (${reason})\n`,
       ),
   });
+  // Declining leaves the release to the caller, which still holds the line
+  // that caused this and must emit it in order (#68 review: releasing here
+  // wrote the bytes AFTER that line first and then stranded the line itself).
   if (!target) {
     process.stderr.write(
       `[multi-clawd shim] ${describeCause(cause)} on ${accountId} with no healthy sibling to retry onto — ` +
         `passing the failure through to the host's chain\n`,
     );
-    releaseHeldOutput();
     return false;
   }
   // A resumed turn takes its conversation with it, as it stood before the
@@ -546,7 +555,6 @@ function attemptRetry(cause: RetryCause): boolean {
           `(${err instanceof Error ? err.message : String(err)}) — ` +
           `passing the failure through to the host's chain\n`,
       );
-      releaseHeldOutput();
       return false;
     }
   }
@@ -581,6 +589,7 @@ function attemptRetry(cause: RetryCause): boolean {
   // The refusal belonged to the account that was left; what the sibling does
   // from here is judged on its own.
   sawModelLimit = false;
+  recordedLimitDisplayName = undefined;
   sawSuccessResult = false;
   child = spawn(command, childArgs, {
     stdio: ["pipe", "pipe", "inherit"],
@@ -603,12 +612,29 @@ function onArmedChunk(chunk: Buffer): void {
     holdTail = holdTail.slice(idx + 1);
     const line = raw.trim();
     observeLine(line);
-    if (parseModelLimitError(line) && attemptRetry({ kind: "model_limit" })) return;
-    // #68: an overload / server error / throttle 429 that survived the CLI's
-    // own retries gets the same single hop — and, unlike a limit, records
-    // nothing against this account (observeLine wrote nothing for it).
-    const transient = parseTransientApiError(line);
-    if (transient && attemptRetry({ kind: "transient", detail: transient })) return;
+    let cause: RetryCause | undefined;
+    if (parseModelLimitError(line)) {
+      cause = { kind: "model_limit" };
+    } else if (!sawModelLimit && !sawAuthFailure) {
+      // #68: an overload / server error / throttle 429 that survived the CLI's
+      // own retries gets the same single hop — and, unlike a limit, records
+      // nothing against this account (observeLine wrote nothing for it).
+      // Turn memory (#68 review): once any record of this child's stream was a
+      // spent window or a dead login, every later error record is that same
+      // refusal told again — the CLI follows its typed notice with a bare
+      // 429/5xx result — and is never classified as a transient.
+      const transient = parseTransientApiError(line);
+      if (transient) cause = { kind: "transient", detail: transient };
+    }
+    if (cause) {
+      if (attemptRetry(cause)) return;
+      // No hop: this record IS the failure the user gets. Everything held
+      // before it, then it, in arrival order — and a passthrough from here.
+      held.push(raw);
+      heldBytes += raw.length;
+      releaseHeldOutput();
+      return;
+    }
     // The CLI says it is sleeping before another attempt: keep the hold open
     // for that long, bounded, rather than releasing the init record mid-retry
     // and losing the hop that would follow.

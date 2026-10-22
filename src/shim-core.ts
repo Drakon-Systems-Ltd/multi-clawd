@@ -418,6 +418,76 @@ export function limitFamilyFor(displayName: string, modelId: string): string | u
 
 const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;
 
+/** The CLI's typed `api_error` for a spent subscription window (2.1.306 writer). */
+const USAGE_LIMIT_API_ERROR = "usage_limit_reached";
+/** The CLI's typed `error` kind for a dead login. */
+const AUTH_FAILED_ERROR_KIND = "authentication_failed";
+
+/** The fields of a stream record that the three error parsers read. */
+interface ErrorRecordShape {
+  type?: unknown;
+  is_error?: unknown;
+  subtype?: unknown;
+  result?: unknown;
+  error?: unknown;
+  is_api_error_message?: unknown;
+  api_error_status?: unknown;
+  api_error?: unknown;
+  message?: { content?: unknown };
+}
+
+function parseRecord(line: string): ErrorRecordShape | undefined {
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  return record as ErrorRecordShape;
+}
+
+/**
+ * Is this record a genuine error — as opposed to a successful result or model
+ * output that merely QUOTES an error? `type: "error"`, `is_error: true`, an
+ * `error…` subtype, or an `assistant` record the CLI flagged
+ * `is_api_error_message` (its own `<synthetic>` notice, 2.1.306 writer).
+ * One definition, shared by every error parser, so no record can be an error
+ * to one of them and not to another.
+ */
+function isErrorRecord(r: ErrorRecordShape): boolean {
+  return (
+    r.type === "error" ||
+    r.is_error === true ||
+    (typeof r.subtype === "string" && r.subtype.startsWith("error")) ||
+    (r.type === "assistant" && r.is_api_error_message === true)
+  );
+}
+
+/**
+ * Every location an error record can carry its message text: `result`, a
+ * string-valued `error`, `error.message`, and — for the CLI's synthetic
+ * assistant notice — the text blocks of `message.content`. Shared by every
+ * error parser so that a wording one parser recognises in a field another
+ * parser does not read can never make the same record two things at once
+ * (#68 review: string `error` was read by the auth parser only).
+ */
+function errorRecordTexts(r: ErrorRecordShape): string[] {
+  const texts: string[] = [];
+  if (typeof r.result === "string") texts.push(r.result);
+  if (typeof r.error === "string") texts.push(r.error);
+  if (typeof r.error === "object" && r.error !== null) {
+    const msg = (r.error as { message?: unknown }).message;
+    if (typeof msg === "string") texts.push(msg);
+  }
+  if (r.type === "assistant" && r.is_api_error_message === true && Array.isArray(r.message?.content)) {
+    for (const block of r.message.content as Array<{ type?: unknown; text?: unknown }>) {
+      if (block && block.type === "text" && typeof block.text === "string") texts.push(block.text);
+    }
+  }
+  return texts;
+}
+
 // ── transient provider errors (#68) ─────────────────────────────────────────
 //
 // Shapes below are taken from the Claude CLI's own stream-json writer (public
@@ -489,50 +559,18 @@ export function parseTransientApiError(line: string): TransientApiError | undefi
   ) {
     return undefined;
   }
-  let record: unknown;
-  try {
-    record = JSON.parse(line);
-  } catch {
-    return undefined;
-  }
-  if (typeof record !== "object" || record === null) return undefined;
-  const r = record as {
-    type?: unknown;
-    is_error?: unknown;
-    subtype?: unknown;
-    result?: unknown;
-    error?: unknown;
-    is_api_error_message?: unknown;
-    api_error_status?: unknown;
-    api_error?: unknown;
-    message?: { content?: unknown };
-  };
-  const isErrorRecord =
-    r.type === "error" ||
-    r.is_error === true ||
-    (typeof r.subtype === "string" && r.subtype.startsWith("error")) ||
-    (r.type === "assistant" && r.is_api_error_message === true);
-  if (!isErrorRecord) return undefined;
-
-  const texts: string[] = [];
-  if (typeof r.result === "string") texts.push(r.result);
-  if (typeof r.error === "object" && r.error !== null) {
-    const msg = (r.error as { message?: unknown }).message;
-    if (typeof msg === "string") texts.push(msg);
-  }
-  if (r.type === "assistant" && Array.isArray(r.message?.content)) {
-    for (const block of r.message.content as Array<{ type?: unknown; text?: unknown }>) {
-      if (block && block.type === "text" && typeof block.text === "string") texts.push(block.text);
-    }
-  }
-  const joined = texts.join("\n");
+  const r = parseRecord(line);
+  if (!r || !isErrorRecord(r)) return undefined;
 
   // A spent window or a dead login is never a transient, whatever else the
-  // record says.
-  if (LIMIT_TEXT_RE.test(joined)) return undefined;
-  if (r.api_error === "usage_limit_reached") return undefined;
-  if (AUTH_FAILURE_PATTERNS.some((p) => p.test(joined))) return undefined;
+  // record says. Mutual exclusion is BY CONSTRUCTION: the same two parsers
+  // that classify (and record) those outcomes decide here, over the same
+  // record and the same fields, so nothing they recognise can also hop.
+  if (parseModelLimitError(line) || parseAuthFailure(line)) return undefined;
 
+  // The joined text is diagnostic only from here; the exclusions above have
+  // already been decided over every field.
+  const joined = errorRecordTexts(r).join("\n");
   const status = typeof r.api_error_status === "number" ? r.api_error_status : undefined;
   const text = joined.trim().slice(0, TRANSIENT_TEXT_MAX_CHARS);
   const kindFromCli = typeof r.error === "string" ? r.error : undefined;
@@ -580,37 +618,20 @@ export function parseApiRetryNotice(line: string): { retryDelayMs: number } | un
  * can cross-check; the authoritative model id comes from the shim's own argv.
  */
 export function parseModelLimitError(line: string): { displayName: string } | undefined {
-  if (!/reached your /i.test(line)) return undefined;
-  let record: unknown;
-  try {
-    record = JSON.parse(line);
-  } catch {
-    return undefined;
-  }
-  if (typeof record !== "object" || record === null) return undefined;
-  const r = record as {
-    type?: unknown;
-    is_error?: unknown;
-    subtype?: unknown;
-    result?: unknown;
-    error?: unknown;
-  };
-  const isErrorRecord =
-    r.type === "error" ||
-    r.is_error === true ||
-    (typeof r.subtype === "string" && r.subtype.startsWith("error"));
-  if (!isErrorRecord) return undefined;
-  const texts: string[] = [];
-  if (typeof r.result === "string") texts.push(r.result);
-  if (typeof r.error === "string") texts.push(r.error);
-  if (typeof r.error === "object" && r.error !== null) {
-    const msg = (r.error as { message?: unknown }).message;
-    if (typeof msg === "string") texts.push(msg);
-  }
-  for (const text of texts) {
+  // Cheap pre-filter, performance only: must cover both recognised shapes.
+  if (!/(reached your |usage_limit_reached)/i.test(line)) return undefined;
+  const r = parseRecord(line);
+  if (!r || !isErrorRecord(r)) return undefined;
+  for (const text of errorRecordTexts(r)) {
     const match = LIMIT_TEXT_RE.exec(text);
     if (match) return { displayName: match[1].trim() };
   }
+  // #68: the CLI's TYPED marker for a spent window (`api_error:
+  // "usage_limit_reached"`, 2.1.306 writer) is a limit whatever the wording —
+  // the wording has changed between CLI versions and may again. With no
+  // display name to cross-check, the hit is version-scoped to the launched
+  // model (limitFamilyFor never widens an unknown name to a family).
+  if (r.api_error === USAGE_LIMIT_API_ERROR) return { displayName: USAGE_LIMIT_API_ERROR };
   return undefined;
 }
 
@@ -752,37 +773,15 @@ export function parseAuthFailure(line: string): { reason: string } | undefined {
   ) {
     return undefined;
   }
-  let record: unknown;
-  try {
-    record = JSON.parse(line);
-  } catch {
-    return undefined;
-  }
-  if (typeof record !== "object" || record === null) return undefined;
-  const r = record as {
-    type?: unknown;
-    is_error?: unknown;
-    subtype?: unknown;
-    result?: unknown;
-    error?: unknown;
-  };
-  const isErrorRecord =
-    r.type === "error" ||
-    r.is_error === true ||
-    (typeof r.subtype === "string" && r.subtype.startsWith("error"));
-  if (!isErrorRecord) return undefined;
-  const texts: string[] = [];
-  if (typeof r.result === "string") texts.push(r.result);
-  if (typeof r.error === "string") texts.push(r.error);
-  if (typeof r.error === "object" && r.error !== null) {
-    const msg = (r.error as { message?: unknown }).message;
-    if (typeof msg === "string") texts.push(msg);
-  }
-  for (const text of texts) {
+  const r = parseRecord(line);
+  if (!r || !isErrorRecord(r)) return undefined;
+  for (const text of errorRecordTexts(r)) {
     if (AUTH_FAILURE_PATTERNS.some((p) => p.test(text))) {
       return { reason: text.trim().slice(0, AUTH_REASON_MAX_CHARS) };
     }
   }
+  // #68: the CLI's TYPED error kind for a dead login, whatever the wording.
+  if (r.error === AUTH_FAILED_ERROR_KIND) return { reason: AUTH_FAILED_ERROR_KIND };
   return undefined;
 }
 

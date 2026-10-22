@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseApiRetryNotice,
+  parseAuthFailure,
   parseModelLimitError,
   parseTransientApiError,
 } from "../src/shim-core";
@@ -114,6 +115,70 @@ describe("parseTransientApiError (#68)", () => {
     expect(parseModelLimitError(errorResult({ api_error_status: 429 }, LIMIT_TEXT))).toEqual({ displayName: "Fable 5" });
   });
 
+  test("the typed spent-window marker IS a limit whatever the wording, on either record (#68 review)", () => {
+    // Reviewers' fixture: changed wording, typed `api_error`, synthetic notice.
+    const typedNotice = synthetic({ api_error_status: 429, error: "rate_limit", api_error: "usage_limit_reached" }, "API Error: x");
+    expect(parseModelLimitError(typedNotice)).toEqual({ displayName: "usage_limit_reached" });
+    expect(parseTransientApiError(typedNotice)).toBeUndefined();
+    // Known wording on the synthetic notice names the window as before.
+    expect(parseModelLimitError(synthetic({ api_error_status: 429, api_error: "usage_limit_reached" }, LIMIT_TEXT))).toEqual({
+      displayName: "Fable 5",
+    });
+    // The typed marker on a result record counts too.
+    expect(parseModelLimitError(errorResult({ api_error_status: 429, api_error: "usage_limit_reached" }, "API Error: x"))).toEqual({
+      displayName: "usage_limit_reached",
+    });
+    // A successful result or plain model output carrying the marker text is not a refusal.
+    expect(parseModelLimitError(JSON.stringify({ type: "result", result: "usage_limit_reached" }))).toBeUndefined();
+    expect(
+      parseModelLimitError(
+        JSON.stringify({ type: "assistant", api_error: "usage_limit_reached", message: { content: [{ type: "text", text: "x" }] } }),
+      ),
+    ).toBeUndefined();
+    // Documented residue: a bare 429 result with unknown wording and no marker
+    // is, on its own, a throttle. The SHIM keeps it on the limit path when the
+    // record before it in the same turn was the typed notice (integration below).
+    expect(parseTransientApiError(errorResult({ api_error_status: 429 }, "API Error: x"))).toMatchObject({
+      kind: "rate_limit_transient",
+    });
+  });
+
+  test("auth and transient are mutually exclusive over EVERY field the auth parser reads (#68 review)", () => {
+    const AUTH_TEXT = "Failed to authenticate";
+    // Each place an error record can carry its text, as a record factory.
+    const shapes: Record<string, (status: number) => string> = {
+      "result string": (status) => errorResult({ api_error_status: status }, AUTH_TEXT),
+      "string error": (status) =>
+        JSON.stringify({ type: "result", is_error: true, api_error_status: status, error: AUTH_TEXT, result: "API Error" }),
+      "error.message": (status) =>
+        JSON.stringify({ type: "result", is_error: true, api_error_status: status, error: { message: AUTH_TEXT }, result: "API Error" }),
+      "synthetic content": (status) => synthetic({ api_error_status: status, error: "rate_limit" }, AUTH_TEXT),
+      "typed authentication_failed kind": (status) =>
+        synthetic({ api_error_status: status, error: "authentication_failed" }, "API Error: x"),
+    };
+    for (const [where, make] of Object.entries(shapes)) {
+      for (const status of [429, 500, 529]) {
+        const line = make(status);
+        expect(parseAuthFailure(line), `${where} @${status}`).toBeDefined();
+        expect(parseTransientApiError(line), `${where} @${status}`).toBeUndefined();
+      }
+    }
+    // The typed kind is recognised without any wording, and reported as such.
+    expect(parseAuthFailure(synthetic({ api_error_status: 500, error: "authentication_failed" }, "API Error: x"))).toEqual({
+      reason: "authentication_failed",
+    });
+    // The same fields carrying a spent-window wording are a limit, not a transient.
+    for (const status of [429, 500, 529]) {
+      const line = JSON.stringify({ type: "result", is_error: true, api_error_status: status, error: LIMIT_TEXT, result: "API Error" });
+      expect(parseModelLimitError(line)).toEqual({ displayName: "Fable 5" });
+      expect(parseTransientApiError(line)).toBeUndefined();
+    }
+    // Sanity: the same shapes WITHOUT the auth wording are transients.
+    expect(
+      parseTransientApiError(JSON.stringify({ type: "result", is_error: true, api_error_status: 500, error: "server_error", result: "API Error" })),
+    ).toMatchObject({ kind: "server_error" });
+  });
+
   test("auth failures and non-error records are never transient", () => {
     expect(
       parseTransientApiError(
@@ -218,7 +283,31 @@ function scenario(opts: {
     encoding: "utf8",
     env,
   });
-  return { res, claw1State, claw2State };
+  return { res, claw1State, claw2State, env };
+}
+
+/**
+ * The fixture CLI run DIRECTLY, with the same env the shim handed it, so a
+ * pass-through can be asserted byte-for-byte rather than by substring.
+ */
+function directFixtureStdout(env: NodeJS.ProcessEnv): string {
+  // The shim strips the roster before the child sees it (retry-plan.ts #2).
+  const childEnv = { ...env, MULTI_CLAWD_ACCOUNT_ID: "claw1" };
+  delete childEnv[RETRY_ROSTER_ENV];
+  const direct = spawnSync(process.execPath, [FAKE, ...STREAM_ARGS], {
+    input: "the prompt\n",
+    encoding: "utf8",
+    env: childEnv,
+  });
+  return direct.stdout;
+}
+
+/** A state file either was never written, or holds no rejection for the model and no failed credential. */
+function expectNothingRecordedAgainst(stateFile: string): void {
+  if (!existsSync(stateFile)) return;
+  const state = JSON.parse(readFileSync(stateFile, "utf8"));
+  expect(state.windows?.["model:claude-fable-5-1"]).toBeUndefined();
+  expect(state.credential?.status).not.toBe("failed");
 }
 
 function rosterFor(claw2State: string) {
@@ -236,7 +325,8 @@ function records(stdout: string) {
 describe("in-turn hop on a transient provider error (#68)", () => {
   for (const kind of ["overloaded", "server_error", "rate_limit_transient"] as const) {
     test(`${kind}: the turn is served by the sibling, nothing is recorded against the first account`, () => {
-      const { res, claw1State, claw2State } = scenario({ kind, roster: rosterFor(join(mkdtempSync(join(tmpdir(), "mc-68s-")), "claw2.json")) });
+      const roster = rosterFor(join(mkdtempSync(join(tmpdir(), "mc-68s-")), "claw2.json"));
+      const { res, claw1State, claw2State } = scenario({ kind, roster });
       expect(res.stdout).not.toContain("API Error");
       const result = records(res.stdout).find((r) => r.type === "result");
       expect(result?.served_by).toBe("claw2");
@@ -246,26 +336,29 @@ describe("in-turn hop on a transient provider error (#68)", () => {
       expect(res.status).toBe(0);
       expect(res.stderr).toContain("transient provider error");
       expect(res.stderr).toContain("retrying this turn on claw2");
-      // The account that met the transient is NOT benched: no rejected
-      // window for the model, and no state write at all for the failure.
-      if (existsSync(claw1State)) {
-        const state = JSON.parse(readFileSync(claw1State, "utf8"));
-        expect(state.windows?.["model:claude-fable-5-1"]).toBeUndefined();
-        expect(state.credential?.status).not.toBe("failed");
-      }
-      expect(claw2State).toBeTruthy();
+      // The account that met the transient is NOT benched: the failed child
+      // emitted no telemetry and the shim wrote NOTHING for the failure — the
+      // first account's state file does not exist at all.
+      expect(existsSync(claw1State)).toBe(false);
+      // The sibling that served the turn is the one whose state was written
+      // (its rate_limit_event), at the roster's path, with no rejection.
+      const sibling = JSON.parse(readFileSync(roster[0].stateFile, "utf8"));
+      expect(sibling.accountId).toBe("claw2");
+      expect(sibling.windows?.["model:claude-fable-5-1"]).toBeUndefined();
+      expect(sibling.credential?.status).not.toBe("failed");
+      expect(existsSync(claw2State)).toBe(false); // the unused default path stays untouched
     });
   }
 
   test("delete the fix: with no roster the transient is forwarded and the turn dies (the bug as filed)", () => {
-    const { res, claw1State } = scenario({ kind: "overloaded" });
-    expect(res.stdout).toContain("Repeated 529 Overloaded errors");
+    const { res, claw1State, env } = scenario({ kind: "overloaded" });
     expect(res.status).toBe(1);
+    // Exact, complete pass-through: what the user gets is byte-for-byte what
+    // the CLI emitted — init, the synthetic notice, the error result, in order.
+    expect(res.stdout).toBe(directFixtureStdout(env));
+    expect(records(res.stdout).map((r) => r.type)).toEqual(["system", "assistant", "result"]);
     // Even so, nothing was recorded against the account — it is not spent.
-    if (existsSync(claw1State)) {
-      const state = JSON.parse(readFileSync(claw1State, "utf8"));
-      expect(state.windows?.["model:claude-fable-5-1"]).toBeUndefined();
-    }
+    expect(existsSync(claw1State)).toBe(false);
   });
 
   test("a throttle with no idle sibling is passed through, not hopped onto a spent one", () => {
@@ -287,11 +380,114 @@ describe("in-turn hop on a transient provider error (#68)", () => {
         },
       }),
     );
-    const { res } = scenario({ kind: "rate_limit_transient", roster: rosterFor(claw2State) });
-    expect(res.stdout).toContain("not your usage limit");
+    const before = readFileSync(claw2State, "utf8");
+    const { res, claw1State, env } = scenario({ kind: "rate_limit_transient", roster: rosterFor(claw2State) });
     expect(res.status).toBe(1);
     expect(res.stderr).toContain("no healthy sibling");
     expect(res.stderr).not.toContain("retrying this turn");
+    // Exact, complete pass-through (#68 review): the synthetic notice that
+    // caused the declined hop is neither dropped nor reordered — the stream
+    // is byte-for-byte the CLI's own.
+    expect(res.stdout).toBe(directFixtureStdout(env));
+    expect(records(res.stdout).map((r) => r.type)).toEqual(["system", "assistant", "result"]);
+    // No state written for the throttle; the sibling's file is untouched bytes.
+    expect(existsSync(claw1State)).toBe(false);
+    expect(readFileSync(claw2State, "utf8")).toBe(before);
+  });
+
+  test("the CLI retries once and then succeeds: notice and turn pass through, nothing is recorded, no hop", () => {
+    // Base hold 200ms, notice announces a 600ms sleep: without the extension
+    // the init record would simply be released early (harmless); either way
+    // the retry must NOT fire and the account must NOT be marked.
+    const roster = rosterFor(join(mkdtempSync(join(tmpdir(), "mc-68s-")), "claw2.json"));
+    const { res, claw1State, env } = scenario({
+      transientFor: "nobody",
+      holdMaxMs: 200,
+      roster,
+      extraEnv: { FAKE_CLAUDE_RETRY_NOTICE_MS: "600" },
+    });
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toContain("retrying this turn");
+    expect(res.stderr).not.toContain("transient provider error");
+    expect(res.stdout).toBe(directFixtureStdout(env));
+    const out = records(res.stdout);
+    expect(out.filter((r) => r.subtype === "api_retry")).toHaveLength(1);
+    const result = out.find((r) => r.type === "result");
+    expect(result?.served_by).toBe("claw1");
+    expect(result?.result).toBe("the prompt");
+    // The successful turn's own telemetry is the only write, and it is clean.
+    expect(existsSync(claw1State)).toBe(true);
+    expectNothingRecordedAgainst(claw1State);
+    expect(existsSync(roster[0].stateFile)).toBe(false);
+  });
+});
+
+// ── typed spent window across two records (#68 review blocker 1) ───────────
+
+describe("typed spent-window notice followed by a bare 429 result (#68 review)", () => {
+  // Wording the shim does not know, so only the typed marker can identify it.
+  const typedLimit = {
+    FAKE_CLAUDE_LIMIT_FOR_ACCOUNT: "claw1",
+    FAKE_CLAUDE_LIMIT_SHAPE: "typed",
+    FAKE_CLAUDE_LIMIT_TEXT: "API Error: x",
+  };
+
+  function expectRejectedWindow(stateFile: string): void {
+    expect(existsSync(stateFile)).toBe(true);
+    const state = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(state.windows?.["model:claude-fable-5-1"]?.status).toBe("rejected");
+    expect(state.windows?.["model:claude-fable-5-1"]?.family).toBeUndefined();
+    expect(state.credential?.status).not.toBe("failed");
+  }
+
+  test("with an idle sibling: the hop is a LIMIT hop and the spent window is recorded against the source", () => {
+    const roster = rosterFor(join(mkdtempSync(join(tmpdir(), "mc-68s-")), "claw2.json"));
+    const { res, claw1State } = scenario({ transientFor: "nobody", roster, extraEnv: typedLimit });
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("model limit hit recorded: claude-fable-5-1");
+    expect(res.stderr).toContain("model limit on claw1");
+    expect(res.stderr).toContain("retrying this turn on claw2");
+    expect(res.stderr).not.toContain("transient provider error");
+    expect(res.stdout).not.toContain("API Error");
+    expect(records(res.stdout).find((r) => r.type === "result")?.served_by).toBe("claw2");
+    expectRejectedWindow(claw1State);
+    // Recorded once, not once per record.
+    expect((res.stderr.match(/model limit hit recorded/g) ?? []).length).toBe(1);
+  });
+
+  test("with no roster: the refusal passes through exactly and the spent window is still recorded", () => {
+    const { res, claw1State, env } = scenario({ transientFor: "nobody", extraEnv: typedLimit });
+    expect(res.status).toBe(1);
+    expect(res.stderr).not.toContain("transient provider error");
+    expect(res.stdout).toBe(directFixtureStdout(env));
+    expect(records(res.stdout).map((r) => r.type)).toEqual(["system", "assistant", "result"]);
+    expectRejectedWindow(claw1State);
+  });
+
+  test("with only a spent sibling: a LIMIT may still take the overdue probe (a transient could not)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-68s-"));
+    const claw2State = join(dir, "claw2.json");
+    writeFileSync(
+      claw2State,
+      JSON.stringify({
+        accountId: "claw2",
+        windows: {
+          "model:claude-fable-5-1": {
+            status: "rejected",
+            seenAt: Date.now() - 48 * 3600 * 1000,
+            resetsAt: Math.floor(Date.now() / 1000) + 4 * 24 * 3600,
+          },
+        },
+      }),
+    );
+    const { res, claw1State } = scenario({ transientFor: "nobody", roster: rosterFor(claw2State), extraEnv: typedLimit });
+    // Misclassified as a transient this hop would be refused ("no healthy
+    // sibling") and nothing recorded; as the limit it is, it probes claw2.
+    expect(res.stderr).toContain("model limit on claw1");
+    expect(res.stderr).toContain("retrying this turn on claw2");
+    expect(res.stderr).not.toContain("no healthy sibling");
+    expect(records(res.stdout).find((r) => r.type === "result")?.served_by).toBe("claw2");
+    expectRejectedWindow(claw1State);
   });
 
   test("the CLI's own api_retry notice keeps the hop armed past the base hold window", () => {
@@ -344,10 +540,8 @@ describe("in-turn hop on a transient provider error (#68)", () => {
     expect(res.stdout).toContain("Repeated 529 Overloaded errors");
     expect(records(res.stdout).filter((r) => r.type === "system")).toHaveLength(1);
     expect(res.status).toBe(1);
-    for (const file of [claw1State, claw2State]) {
-      if (!existsSync(file)) continue;
-      const state = JSON.parse(readFileSync(file, "utf8"));
-      expect(state.windows?.["model:claude-fable-5-1"]).toBeUndefined();
-    }
+    // Neither account wrote anything for its transient: both files absent.
+    expect(existsSync(claw1State)).toBe(false);
+    expect(existsSync(claw2State)).toBe(false);
   });
 });
