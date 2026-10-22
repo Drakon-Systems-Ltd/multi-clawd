@@ -1,7 +1,7 @@
 {
   "id": "multi-clawd",
   "name": "multi-clawd",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
   "cliBackends": [
     "claw1",
@@ -45,7 +45,10 @@
           },
           "strategy": {
             "type": "string",
-            "enum": ["ordered", "reset-aware"],
+            "enum": [
+              "ordered",
+              "reset-aware"
+            ],
             "description": "Healthy account selection: ordered (default) keeps pool order; reset-aware prefers the healthy account whose live seven-day quota window resets soonest."
           },
           "utilizationThreshold": {
