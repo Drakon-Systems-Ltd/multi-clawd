@@ -7,6 +7,10 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Added
+- Concurrent shims use short, stale-recovering advisory locks for per-account
+  health-state writes and in-turn retry decisions. Retry choices re-read
+  sibling health after earlier decisions; lock timeouts fail open so turns
+  continue. (#69)
 - The shim tells a transient provider error (529 overload, 5xx, throttle 429
   that is not a spent window) apart from a reactive model limit and gives it the
   same single in-turn hop to an idle sibling, without recording a rejected

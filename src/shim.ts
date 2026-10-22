@@ -26,6 +26,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { acquireShimLock } from "./shim-lock.js";
 import {
   classifyStateReadFailure,
   clearCredentialFailure,
@@ -173,15 +174,15 @@ function readPersistedState(): AccountHealthState | undefined {
 
 function persistState(): void {
   if (!stateFile) return;
+  const release = acquireShimLock(stateFile);
   try {
     // Read-merge-write on every persist: windows observed by earlier
     // invocations must survive a turn that only emits a different window
     // type — otherwise a five_hour-only response erases the last seven_day
     // utilization and a near-limit crossing becomes invisible. Per-window
     // `seenAt` decides which side wins; expiring old windows is the reader's
-    // job (health.ts). Sequential-safe only: two truly concurrent shims for
-    // the SAME account can still race read→write, and last-rename-wins
-    // drops whichever event lost the race.
+    // job (health.ts). The advisory lock covers the entire merge and rename;
+    // a timed-out lock falls back to this same best-effort path.
     const disk = readPersistedState();
     // Pass `now` so merge also prunes windows past the retention horizon —
     // the "unknown"/junk buckets the reader already ignores are dropped here
@@ -193,6 +194,8 @@ function persistState(): void {
     renameSync(tmp, stateFile);
   } catch (err) {
     process.stderr.write(`[multi-clawd shim] state write failed: ${String(err)}\n`);
+  } finally {
+    release?.();
   }
 }
 
@@ -611,40 +614,43 @@ function onArmedChunk(chunk: Buffer): void {
     const raw = holdTail.slice(0, idx + 1);
     holdTail = holdTail.slice(idx + 1);
     const line = raw.trim();
-    observeLine(line);
-    let cause: RetryCause | undefined;
-    if (parseModelLimitError(line)) {
-      cause = { kind: "model_limit" };
-    } else if (!sawModelLimit && !sawAuthFailure) {
-      // #68: an overload / server error / throttle 429 that survived the CLI's
-      // own retries gets the same single hop — and, unlike a limit, records
-      // nothing against this account (observeLine wrote nothing for it).
-      // Turn memory (#68 review): once any record of this child's stream was a
-      // spent window or a dead login, every later error record is that same
-      // refusal told again — the CLI follows its typed notice with a bare
-      // 429/5xx result — and is never classified as a transient.
-      const transient = parseTransientApiError(line);
-      if (transient) cause = { kind: "transient", detail: transient };
-    }
-    if (cause) {
-      if (attemptRetry(cause)) return;
-      // No hop: this record IS the failure the user gets. Everything held
-      // before it, then it, in arrival order — and a passthrough from here.
+    // Keep a refusal's state write and the sibling read in one decision
+    // window. Other shims that reach this point re-read disk after it ends.
+    // No state file means nothing is persisted to coordinate on, and a
+    // relative lock path would land in the user's working directory.
+    const releaseDecision = stateFile && (parseModelLimitError(line) || parseTransientApiError(line))
+      ? acquireShimLock(`${stateFile}.retry`)
+      : undefined;
+    try {
+      observeLine(line);
+      let cause: RetryCause | undefined;
+      if (parseModelLimitError(line)) {
+        cause = { kind: "model_limit" };
+      } else if (!sawModelLimit && !sawAuthFailure) {
+        // #68: a provider error that survived the CLI's own retries gets the
+        // same single hop, but records nothing against this account. A spent
+        // window or dead login earlier in the stream keeps it off this path.
+        const transient = parseTransientApiError(line);
+        if (transient) cause = { kind: "transient", detail: transient };
+      }
+      if (cause) {
+        if (attemptRetry(cause)) return;
+        // No hop: release the causing record in arrival order.
+        held.push(raw);
+        heldBytes += raw.length;
+        releaseHeldOutput();
+        return;
+      }
+      const retryNotice = parseApiRetryNotice(line);
+      if (retryNotice) extendHold(retryNotice.retryDelayMs + HOLD_RETRY_GRACE_MS);
       held.push(raw);
       heldBytes += raw.length;
-      releaseHeldOutput();
-      return;
-    }
-    // The CLI says it is sleeping before another attempt: keep the hold open
-    // for that long, bounded, rather than releasing the init record mid-retry
-    // and losing the hop that would follow.
-    const retryNotice = parseApiRetryNotice(line);
-    if (retryNotice) extendHold(retryNotice.retryDelayMs + HOLD_RETRY_GRACE_MS);
-    held.push(raw);
-    heldBytes += raw.length;
-    if (!isPreambleRecord(line) || heldBytes > HOLD_CAP_BYTES) {
-      releaseHeldOutput();
-      return;
+      if (!isPreambleRecord(line) || heldBytes > HOLD_CAP_BYTES) {
+        releaseHeldOutput();
+        return;
+      }
+    } finally {
+      releaseDecision?.();
     }
   }
   if (!retryArmed && holdTail.length > 0) {
