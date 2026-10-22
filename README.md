@@ -906,6 +906,8 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
   see rejections already recorded by another shim. If a lock stays busy beyond
   150 ms or filesystem locking fails, the shim proceeds without it so the
   turn still runs; concurrent writes in that fallback can lose an observation.
+  A replacement between the lock's final ownership check and removal can
+  still remove another live holder's lock because those steps are not atomic.
   The guard does not pace requests sent to a newly chosen sibling.
 
 ## Security

@@ -9,8 +9,9 @@ versioning from v1.0.
 ### Added
 - Concurrent shims use short, stale-recovering advisory locks for per-account
   health-state writes and in-turn retry decisions. Retry choices re-read
-  sibling health after earlier decisions; lock timeouts fail open so turns
-  continue. (#69)
+  sibling health after earlier decisions. These locks are best effort and add
+  no request pacing; lock timeouts fail open so turns continue, and rare
+  contention can still lose an observation. (#69)
 
 ## [2.4.1] - 2026-10-22
 

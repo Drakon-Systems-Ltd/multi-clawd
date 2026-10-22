@@ -616,8 +616,8 @@ function onArmedChunk(chunk: Buffer): void {
     const line = raw.trim();
     // Keep a refusal's state write and the sibling read in one decision
     // window. Other shims that reach this point re-read disk after it ends.
-    // No state file means nothing is persisted to coordinate on, and a
-    // relative lock path would land in the user's working directory.
+    // No state file means nothing is persisted to coordinate on. The lock
+    // helper rejects relative paths before creating anything.
     const releaseDecision = stateFile && (parseModelLimitError(line) || parseTransientApiError(line))
       ? acquireShimLock(`${stateFile}.retry`)
       : undefined;

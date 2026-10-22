@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -97,6 +97,61 @@ describe("#69 cross-process shim guards", () => {
     const expired = acquireShimLock(target);
     expect(expired).toBeTypeOf("function");
     expired?.();
+    expect(existsSync(`${target}.lock`)).toBe(false);
+  });
+
+  test("relative and empty targets create no lock or directory", () => {
+    const b = box();
+    const cwd = process.cwd();
+    try {
+      process.chdir(b.dir);
+      expect(acquireShimLock("nested/state.json")).toBeUndefined();
+      expect(acquireShimLock("nested/state.json.retry")).toBeUndefined();
+      expect(acquireShimLock("")).toBeUndefined();
+      expect(existsSync("nested")).toBe(false);
+      expect(existsSync(".lock")).toBe(false);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  test("stale takeover leaves a replacement live lock in place", () => {
+    const b = box();
+    const target = b.file("home");
+    writeFileSync(`${target}.lock`, `99999999 ${Date.now()}\n`);
+    let releaseFresh: (() => void) | undefined;
+    const acquired = acquireShimLock(target, 0, {
+      beforeStaleUnlink: () => {
+        unlinkSync(`${target}.lock`);
+        releaseFresh = acquireShimLock(target);
+      },
+    });
+    expect(releaseFresh).toBeTypeOf("function");
+    expect(acquired).toBeUndefined();
+    expect(existsSync(`${target}.lock`)).toBe(true);
+    releaseFresh?.();
+    expect(existsSync(`${target}.lock`)).toBe(false);
+  });
+
+  test("release keeps a replacement lock even when its inode is unchanged", () => {
+    const b = box();
+    const target = b.file("home");
+    const release = acquireShimLock(target);
+    expect(release).toBeTypeOf("function");
+    const replacement = `${process.pid} ${Date.now()} replacement-token\n`;
+    writeFileSync(`${target}.lock`, replacement);
+    release?.();
+    expect(readFileSync(`${target}.lock`, "utf8")).toBe(replacement);
+    unlinkSync(`${target}.lock`);
+  });
+
+  test("close failure still returns a release function", () => {
+    const b = box();
+    const target = b.file("home");
+    const release = acquireShimLock(target, 0, { close: () => { throw new Error("close failed"); } });
+    expect(release).toBeTypeOf("function");
+    expect(existsSync(`${target}.lock`)).toBe(true);
+    release?.();
     expect(existsSync(`${target}.lock`)).toBe(false);
   });
 
