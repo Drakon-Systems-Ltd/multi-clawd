@@ -6,18 +6,26 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.4.1] - Unreleased
+
 ### Added
 - Concurrent shims use short, stale-recovering advisory locks for per-account
   health-state writes and in-turn retry decisions. Retry choices re-read
   sibling health after earlier decisions. These locks are best effort and add
   no request pacing; lock timeouts fail open so turns continue, and rare
-  contention can still lose an observation. (#69)
+  contention can still lose an observation. (#69, #77)
 - Stale takeover holds the observed lock file open through validation and
-  removal; the final identity check and removal are not atomic. (#69)
-
-## [2.4.1] - 2026-10-22
+  removal; the final identity check and removal are not atomic. (#69, #77)
 
 ### Fixed
+- In-turn retries now wait for a terminal failure and the original CLI
+  process to close naturally, including cleanup after stdout ends. Retry
+  decisions no longer send SIGTERM to the original process. A later success
+  or auth failure, a notice without a terminal failure, an expired hold or
+  exceeded output cap, or no eligible sibling preserves the original attempt
+  without replay. Sibling health is re-read under the advisory decision lock
+  at close; retries remain limited to one hop. Regression fixtures verify
+  original cleanup and exit before sibling launch. (#78, #79)
 - The shim tells a transient provider error (529 overload, 5xx, throttle 429
   that is not a spent window) apart from a reactive model limit and gives it the
   same single in-turn hop to an idle sibling, without recording a rejected
