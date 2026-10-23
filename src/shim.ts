@@ -15,9 +15,10 @@
  *   an in-turn retry, the stream's preamble records (`system`, `rate_limit_event`)
  *   are held back until the first record that is neither. If a model limit
  *   arrives in that window the turn has not begun downstream, so the shim
- *   swallows the error and re-spawns on a healthy account instead of losing the
- *   user's turn to the next provider in the host's chain. The moment anything
- *   else is seen — content, a result, an unparseable line, or a size cap — the
+ *   waits for terminal failure AND natural process close before re-spawning
+ *   on a healthy account. Retry decisions never terminate the original. This
+ *   avoids losing the turn to the host's next provider. The moment anything
+ *   else is seen — content, a non-retry result, an unparseable line, or a size cap — the
  *   held bytes are released in order and the shim is a pure passthrough again.
  * - Tolerant parsing: rate_limit_event is CLI-internal and undocumented;
  *   unknown fields, statuses, and window types are preserved or ignored,
@@ -454,6 +455,8 @@ let held: string[] = [];
 let heldBytes = 0;
 let holdTail = "";
 let retryUsed = false;
+let pendingRetryCause: RetryCause | undefined;
+let sawTerminalFailure = false;
 
 function isPreambleRecord(line: string): boolean {
   if (line.length === 0) return true;
@@ -502,10 +505,9 @@ function readSiblingState(file: string) {
 }
 
 /**
- * Re-spawn this turn on a healthy sibling. Returns true when the launch has
- * been replaced — the caller must then forward nothing further from the old
- * child, whose limit error is the one thing this whole path exists to avoid
- * showing the user.
+ * Re-spawn this turn on a healthy sibling only from the original child's
+ * close handler. Returns true when the completed attempt has been replaced;
+ * its held failure must then not be forwarded downstream.
  */
 /** Why the shim is retrying: a spent window, or a provider-side transient (#68). */
 type RetryCause = { kind: "model_limit" } | { kind: "transient"; detail: TransientApiError };
@@ -574,15 +576,6 @@ function attemptRetry(cause: RetryCause): boolean {
   held = [];
   heldBytes = 0;
   holdTail = "";
-  const previous = child;
-  previous.stdout.removeAllListeners();
-  previous.removeAllListeners("close");
-  previous.removeAllListeners("error");
-  try {
-    previous.kill("SIGTERM");
-  } catch {
-    // already gone — it returned an error result, which is why we are here
-  }
   // Identity swap: every byte and every state write from here belongs to the
   // sibling, including the credential-recovery clear at exit.
   accountId = target.id;
@@ -614,8 +607,8 @@ function onArmedChunk(chunk: Buffer): void {
     const raw = holdTail.slice(0, idx + 1);
     holdTail = holdTail.slice(idx + 1);
     const line = raw.trim();
-    // Keep a refusal's state write and the sibling read in one decision
-    // window. Other shims that reach this point re-read disk after it ends.
+    // Preserve #77's lock around refusal observations. The sibling read has
+    // its own decision window at natural close; never hold a lock while waiting.
     // No state file means nothing is persisted to coordinate on. The lock
     // helper rejects relative paths before creating anything.
     const releaseDecision = stateFile && (parseModelLimitError(line) || parseTransientApiError(line))
@@ -633,25 +626,30 @@ function onArmedChunk(chunk: Buffer): void {
         const transient = parseTransientApiError(line);
         if (transient) cause = { kind: "transient", detail: transient };
       }
-      if (cause) {
-        if (attemptRetry(cause)) return;
-        // No hop: release the causing record in arrival order.
-        held.push(raw);
-        heldBytes += raw.length;
-        releaseHeldOutput();
-        return;
+      // Notices are not terminal: preserve the original until natural close.
+      if (cause && (!pendingRetryCause || cause.kind === "model_limit")) {
+        pendingRetryCause = cause;
       }
+      let terminalFailure = false;
+      try {
+        const record = JSON.parse(line);
+        terminalFailure = record.type === "result" && record.is_error === true;
+      } catch { /* Non-JSON releases the hold below. */ }
+      if (terminalFailure) sawTerminalFailure = true;
       const retryNotice = parseApiRetryNotice(line);
       if (retryNotice) extendHold(retryNotice.retryDelayMs + HOLD_RETRY_GRACE_MS);
       held.push(raw);
-      heldBytes += raw.length;
-      if (!isPreambleRecord(line) || heldBytes > HOLD_CAP_BYTES) {
+      heldBytes += Buffer.byteLength(raw);
+      if ((!isPreambleRecord(line) && !(terminalFailure && pendingRetryCause && !sawAuthFailure)) || heldBytes > HOLD_CAP_BYTES) {
         releaseHeldOutput();
         return;
       }
     } finally {
       releaseDecision?.();
     }
+  }
+  if (retryArmed && heldBytes + Buffer.byteLength(holdTail) > HOLD_CAP_BYTES) {
+    releaseHeldOutput();
   }
   if (!retryArmed && holdTail.length > 0) {
     // Disarmed while this chunk was being drained: the remainder is ordinary
@@ -704,9 +702,9 @@ function attachChildHandlers(): void {
     else onPassthroughChunk(chunk);
   });
   child.stdout.on("end", () => {
-    // A stream that ended while still armed carried nothing but preamble —
-    // release it rather than swallow it.
-    if (retryArmed) releaseHeldOutput();
+    // Release an incomplete attempt, but keep a complete retryable failure.
+    // EOF is not process completion: cleanup may still be running.
+    if (retryArmed && (!sawTerminalFailure || holdTail.length > 0)) releaseHeldOutput();
     scanner.flush();
   });
   child.on("close", onChildClose);
@@ -782,6 +780,18 @@ function clearRecordedModelRejectionOnSuccess(): void {
 }
 
 function onChildClose(code: number | null, signal: NodeJS.Signals | null): void {
+  // Sole replay boundary: close confirms completion and drained stdio.
+  // Re-read sibling state under #77's decision lock at this later boundary.
+  if (!signal && retryArmed && sawTerminalFailure && !sawSuccessResult &&
+      !sawAuthFailure && pendingRetryCause) {
+    const releaseDecision = stateFile ? acquireShimLock(`${stateFile}.retry`) : undefined;
+    try {
+      if (attemptRetry(pendingRetryCause)) return;
+    } finally {
+      releaseDecision?.();
+    }
+  }
+  if (retryArmed) releaseHeldOutput();
   if (signal) {
     process.kill(process.pid, signal);
     return;
