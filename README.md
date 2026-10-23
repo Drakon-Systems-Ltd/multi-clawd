@@ -899,15 +899,16 @@ event, and no plugin API can force a rebuild. See `DESIGN.md`.
   after the assessment or 24 hours after that turn, whichever comes first. A
   CLI login failure recorded on a real turn removes it at once.
 
-- **Shim window persistence is sequential-safe, not concurrent-writer-safe.**
-  `persistState()` in `src/shim.ts` does a read-merge-write on every save so a
-  turn that only reports one window type (say `five_hour`) doesn't clobber
-  the last-seen `seven_day` data — but the read, merge, and rename aren't
-  atomic together. Two truly concurrent shim processes for the *same*
-  account can still race each other and drop an event on last-rename-wins.
-  In practice this needs two in-flight turns on one account at once, which
-  is rare, but it's a real gap. A per-account lock/retry protocol is tracked
-  as a v0.3.x follow-up.
+- **Shim state and retry coordination is best effort under lock contention.**
+  Concurrent shims for one account use a short advisory lock around each
+  state merge and rename. A second short lock covers recording a refusal and
+  reading sibling health for the in-turn retry. Later decisions can therefore
+  see rejections already recorded by another shim. If a lock stays busy beyond
+  150 ms or filesystem locking fails, the shim proceeds without it so the
+  turn still runs; concurrent writes in that fallback can lose an observation.
+  A replacement between the lock's final ownership check and removal can
+  still remove another live holder's lock because those steps are not atomic.
+  The guard does not pace requests sent to a newly chosen sibling.
 
 ## Security
 

@@ -62,10 +62,10 @@ process.stdout.write(lines[0] + "\n");
 
 // #19 retry path: emit the model-limit error IMMEDIATELY after the init
 // record — the real shape of a hard cap, where nothing reaches the user
-// before the refusal. Scoped to one account id so a test can prove the retry
-// landed somewhere else.
-const limitForAccount = process.env.FAKE_CLAUDE_LIMIT_FOR_ACCOUNT;
-if (limitForAccount && limitForAccount === process.env.MULTI_CLAWD_ACCOUNT_ID) {
+// before the refusal. Scoped to named account ids so tests can prove where a
+// retry landed, including a sibling that also refuses.
+const limitForAccounts = (process.env.FAKE_CLAUDE_LIMIT_FOR_ACCOUNT ?? "").split(",");
+if (limitForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID)) {
   // Optional stall first, to exercise the shim's hold-window timeout: top-level
   // await keeps the rest of this fixture from running, so the launch really is
   // "init record, then nothing".

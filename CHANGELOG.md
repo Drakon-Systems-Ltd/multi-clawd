@@ -6,6 +6,15 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- Concurrent shims use short, stale-recovering advisory locks for per-account
+  health-state writes and in-turn retry decisions. Retry choices re-read
+  sibling health after earlier decisions. These locks are best effort and add
+  no request pacing; lock timeouts fail open so turns continue, and rare
+  contention can still lose an observation. (#69)
+- Stale takeover holds the observed lock file open through validation and
+  removal; the final identity check and removal are not atomic. (#69)
+
 ## [2.4.1] - 2026-10-22
 
 ### Fixed
