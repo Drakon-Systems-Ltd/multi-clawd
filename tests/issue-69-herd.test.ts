@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -131,6 +131,40 @@ describe("#69 cross-process shim guards", () => {
     expect(existsSync(`${target}.lock`)).toBe(true);
     releaseFresh?.();
     expect(existsSync(`${target}.lock`)).toBe(false);
+  });
+
+  test("stale snapshot reads the opened lock after a replacement", () => {
+    const b = box();
+    const target = b.file("home");
+    const lock = `${target}.lock`;
+    writeFileSync(lock, `99999999 ${Date.now() - 60_000}\n`);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    let releaseFresh: (() => void) | undefined;
+    let freshBytes: Buffer | undefined;
+    const acquired = acquireShimLock(target, 0, {
+      beforeStaleSnapshot: () => {
+        unlinkSync(lock);
+        releaseFresh = acquireShimLock(target);
+        freshBytes = readFileSync(lock);
+      },
+    });
+    expect(releaseFresh).toBeTypeOf("function");
+    expect(acquired).toBeUndefined();
+    expect(existsSync(lock)).toBe(true);
+    expect(readFileSync(lock)).toEqual(freshBytes);
+    releaseFresh?.();
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  test("fresh empty lock is not removed during a holder's write", () => {
+    const b = box();
+    const lock = `${b.file("home")}.lock`;
+    writeFileSync(lock, "");
+    expect(acquireShimLock(b.file("home"), 0)).toBeUndefined();
+    expect(existsSync(lock)).toBe(true);
+    expect(readFileSync(lock)).toEqual(Buffer.alloc(0));
+    unlinkSync(lock);
   });
 
   test("release keeps a replacement lock even when its inode is unchanged", () => {

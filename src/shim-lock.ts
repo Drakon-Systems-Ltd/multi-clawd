@@ -9,6 +9,7 @@ const pause = new Int32Array(new SharedArrayBuffer(4));
 
 /** Test seam for the replacement interleaving and close failure. */
 interface ShimLockTestHooks {
+  beforeStaleSnapshot?: () => void;
   beforeStaleUnlink?: () => void;
   close?: (fd: number) => void;
 }
@@ -53,9 +54,12 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") return undefined;
     }
+    let staleFd: number | undefined;
     try {
-      const before = statSync(lock);
-      const observed = readFileSync(lock);
+      staleFd = openSync(lock, "r");
+      const before = fstatSync(staleFd);
+      hooks.beforeStaleSnapshot?.();
+      const observed = readFileSync(staleFd);
       const [pidText, timeText] = observed.toString("utf8").trim().split(" ");
       const pid = Number(pidText);
       const age = Date.now() - Number(timeText);
@@ -69,12 +73,16 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
         // still be recovered. The final read and unlinkSync are not atomic on
         // POSIX without OS locks: another writer can replace the file in that
         // gap. This advisory guard fails open if that rare race occurs.
-        if (statSync(lock).ino === before.ino && readFileSync(lock).equals(observed)) {
+        const current = statSync(lock);
+        if (current.ino === before.ino && current.dev === before.dev && readFileSync(lock).equals(observed)) {
           unlinkSync(lock);
           continue;
         }
       }
     } catch { /* the holder may have released it */ }
+    finally {
+      if (staleFd !== undefined) try { closeSync(staleFd); } catch { /* best effort */ }
+    }
     if (Date.now() >= deadline) break;
     Atomics.wait(pause, 0, 0, Math.min(10, deadline - Date.now()));
   } while (Date.now() <= deadline);
