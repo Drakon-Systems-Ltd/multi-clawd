@@ -12,12 +12,22 @@ versioning from v1.0.
 - Concurrent shims use short, stale-recovering advisory locks for per-account
   health-state writes and in-turn retry decisions. Retry choices re-read
   sibling health after earlier decisions. These locks are best effort and add
-  no request pacing; lock timeouts fail open so turns continue, and rare
-  contention can still lose an observation. (#69, #77)
+  no request pacing; lock timeouts fail open so turns continue, and health
+  observations are no longer dropped on a timeout (see #82/#83 under Fixed).
+  (#69, #77)
 - Stale takeover holds the observed lock file open through validation and
   removal; the final identity check and removal are not atomic. (#69, #77)
 
 ### Fixed
+- Health observations are never dropped when the per-account state lock times
+  out. A writer that cannot take the lock publishes its observation as a
+  small private pending delta file next to the health file instead of
+  skipping the write; the next lock holder merges and removes pending deltas
+  (corrupt ones are set aside, not deleted), and readers include unfolded
+  deltas so a spent window or dead login is still seen by sibling shims.
+  Snapshot replacement stays with lock holders, so journal growth is bounded
+  by contention. The turn still never waits on or fails because of the lock;
+  no process is killed and no session or data is lost. (#82, #83)
 - In-turn retries now wait for a terminal failure and the original CLI
   process to close naturally, including cleanup after stdout ends. Retry
   decisions no longer send SIGTERM to the original process. A later success
