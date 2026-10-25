@@ -97,7 +97,8 @@ export function renderHistory(events: HistoryEvent[], accountIds: string[], sinc
   for (const id of ids) {
     const own = recent.filter((e) => e.accountId === id);
     const count = (kind: HistoryEvent["kind"]) => own.filter((e) => e.kind === kind).length;
-    const last = own.filter((e) => e.kind === "served").at(-1)?.at;
+    const last = own.filter((e) => e.kind === "served")
+      .reduce<string | undefined>((latest, e) => !latest || Date.parse(e.at) > Date.parse(latest) ? e.at : latest, undefined);
     const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
     lines.push(`  ${id}: ${n(count("served"), "served launch", "served launches")}, ${n(count("retry"), "retry", "retries")}, ${n(count("rotation"), "rotation", "rotations")}; last served ${last ?? "never in this window"}`);
   }

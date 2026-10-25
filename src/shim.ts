@@ -353,8 +353,6 @@ function observeLine(line: string): void {
     if (limitHit && limitHit.displayName !== recordedLimitDisplayName) {
       recordedLimitDisplayName = limitHit.displayName;
       sawModelLimit = true;
-      recordHistory(stateFile, { at: new Date().toISOString(), kind: "rotation", accountId,
-        modelId: effectiveModelId(), reason: "model_limit" });
       const model = effectiveModelId();
       if (model) {
         // A refusal that names the family, not a version, covers the family.
@@ -374,8 +372,6 @@ function observeLine(line: string): void {
     const authFailure = parseAuthFailure(line);
     if (authFailure && !sawAuthFailure) {
       sawAuthFailure = true;
-      recordHistory(stateFile, { at: new Date().toISOString(), kind: "rotation", accountId,
-        modelId: effectiveModelId(), reason: "auth_failure" });
       state = recordCredentialFailure(state, authFailure.reason, Date.now());
       persistState();
       process.stderr.write(
@@ -531,7 +527,9 @@ function attemptRetry(cause: RetryCause): boolean {
   const reason: HistoryReason = cause.kind === "model_limit" ? "model_limit" : "transient";
   recordHistory(stateFile, { at: new Date().toISOString(), kind: "retry", accountId,
     toAccountId: target.id, modelId: model, reason });
-  if (reason === "transient") recordHistory(stateFile, { at: new Date().toISOString(),
+  // A rotation is a confirmed hop to a different account. Retry selection is
+  // unchanged; only the journal decides whether this retry counts as one.
+  if (target.id !== accountId) recordHistory(stateFile, { at: new Date().toISOString(),
     kind: "rotation", accountId, toAccountId: target.id, modelId: model, reason });
   process.stderr.write(
     `[multi-clawd shim] ${describeCause(cause)} on ${accountId}${model ? ` for ${model}` : ""} — ` +
