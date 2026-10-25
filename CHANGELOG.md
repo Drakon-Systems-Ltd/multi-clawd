@@ -7,6 +7,9 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Added
+- `multi-clawd explain --history [--since 7d]` reports bounded per-account
+  served launches, in-turn retries, rotations, and last served times. The shim
+  writes a private, size-capped `history.jsonl` beside health state. (#70)
 - Concurrent shims use short, stale-recovering advisory locks for per-account
   health-state writes and in-turn retry decisions. Retry choices re-read
   sibling health after earlier decisions. These locks are best effort and add

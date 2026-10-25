@@ -63,6 +63,7 @@ import {
   type PoolStrategy,
 } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
+import { recordHistory } from "./history.js";
 import {
   DEFAULT_SESSION_AFFINITY_TTL_MS, launchSessionId, readSessionPin, SESSION_AFFINITY_ENV,
 } from "./session-affinity.js";
@@ -1639,6 +1640,9 @@ export function registerPoolBackend(
           `launching on ${decision.account} to re-test a login last rejected by the Claude CLI`,
       );
     } else if (decision.account !== previousAccount) {
+      recordHistory(join(homedir(), ".openclaw", "state", "multi-clawd", `${previousAccount}.json`),
+        { at: new Date(now).toISOString(), kind: "rotation", accountId: previousAccount,
+          toAccountId: decision.account, modelId: requestedModel, reason: "pool_selection" });
       const home = verdicts[0];
       const line =
         decision.account === members[0].id
