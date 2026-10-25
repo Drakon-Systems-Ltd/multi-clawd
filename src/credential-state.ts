@@ -10,14 +10,11 @@
  * a missing build. Nothing here may import `openclaw`, directly or
  * transitively — tests/cli-peer-independence.test.ts enforces it.
  */
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { persistHealthState, readHealthStateFile } from "./health-journal.js";
 import {
-  parseStoredState,
-  mergeHealthStates,
   clearCredentialFailure,
-  type AccountHealthState,
 } from "./shim-core.js";
 
 /** Per-account health state written by the shim, read by the steering hook. */
@@ -38,25 +35,11 @@ export function usageStateFile(accountId: string): string {
 /**
  * Clear a recorded credential failure for one account. Returns true only when
  * a failure was actually present and has been cleared, so callers can stay
- * silent on the common no-op.
+ * silent on the common no-op. A pending failure is included in that check.
  */
-export function clearAccountCredentialFailure(accountId: string): boolean {
-  const file = healthStateFile(accountId);
-  let state: AccountHealthState;
-  try {
-    state = parseStoredState(readFileSync(file, "utf8")) ?? { accountId, windows: {} };
-  } catch {
-    return false; // nothing recorded → nothing to clear
-  }
-  if (state.credential?.status !== "failed") return false;
-  const cleared = mergeHealthStates(state, clearCredentialFailure(state, Date.now()), Date.now());
-  try {
-    mkdirSync(dirname(file), { recursive: true });
-    const tmp = `${file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(cleared, null, 2), { mode: 0o600 });
-    renameSync(tmp, file);
-    return true;
-  } catch {
-    return false;
-  }
+export function clearAccountCredentialFailure(accountId: string, file = healthStateFile(accountId)): boolean {
+  const state = readHealthStateFile(file);
+  if (state?.credential?.status !== "failed") return false;
+  persistHealthState(file, clearCredentialFailure(state, Date.now()));
+  return readHealthStateFile(file)?.credential?.status === "ok";
 }
