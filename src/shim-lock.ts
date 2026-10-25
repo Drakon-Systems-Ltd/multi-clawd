@@ -14,7 +14,7 @@ interface ShimLockTestHooks {
   close?: (fd: number) => void;
 }
 
-/** Undefined means fail open: callers still perform their work. */
+/** Undefined means fail open: callers must avoid replacing protected snapshots. */
 export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockTestHooks = {}): (() => void) | undefined {
   if (!file || !isAbsolute(file)) return undefined;
   const lock = `${file}.lock`;

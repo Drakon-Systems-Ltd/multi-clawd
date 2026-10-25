@@ -5,7 +5,8 @@
  * stdout, stderr, argv, and the exit code through untouched, while scanning
  * the stream-json output for `rate_limit_event` records and folding them into
  * a per-account health-state file (MULTI_CLAWD_STATE_FILE). The steering hook
- * reads that file to rotate accounts *before* they hit their usage limits.
+ * reads that snapshot and any pending deltas to rotate accounts *before*
+ * they hit their usage limits.
  *
  * Invariants:
  * - Passthrough fidelity beats capture: stream bytes are forwarded as-is,
@@ -25,19 +26,16 @@
  *   never fatal.
  */
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { persistHealthState, readHealthStateFile } from "./health-journal.js";
 import { acquireShimLock } from "./shim-lock.js";
 import {
-  classifyStateReadFailure,
   clearCredentialFailure,
   clearModelRejection,
   createLineScanner,
   limitFamilyFor,
-  mergeHealthStates,
   parseAuthFailure,
   parseRateLimitEvent,
-  parseStoredState,
   parseSuccessResult,
   recordCredentialFailure,
   updateHealthState,
@@ -152,52 +150,14 @@ function preserveCorruptState(raw: string | undefined): void {
 }
 
 function readPersistedState(): AccountHealthState | undefined {
-  if (!stateFile) return undefined;
-  let raw: string;
-  try {
-    raw = readFileSync(stateFile, "utf8");
-  } catch (err) {
-    // ENOENT is the normal first-run path — silent fresh start, no sidecar.
-    if (classifyStateReadFailure(err) === "absent") return undefined;
-    // Exists but unreadable (permissions/IO): we have no bytes to preserve,
-    // but the disappearance still deserves a trace.
-    preserveCorruptState(undefined);
-    return undefined;
-  }
-  const parsed = parseStoredState(raw);
-  if (parsed === undefined) {
-    // Read fine, but the contents are unusable — preserve the bad bytes.
-    preserveCorruptState(raw);
-    return undefined;
-  }
-  return parsed;
+  return stateFile ? readHealthStateFile(stateFile, { onSnapshotError: preserveCorruptState }) : undefined;
 }
 
 function persistState(): void {
   if (!stateFile) return;
-  const release = acquireShimLock(stateFile);
-  try {
-    // Read-merge-write on every persist: windows observed by earlier
-    // invocations must survive a turn that only emits a different window
-    // type — otherwise a five_hour-only response erases the last seven_day
-    // utilization and a near-limit crossing becomes invisible. Per-window
-    // `seenAt` decides which side wins; expiring old windows is the reader's
-    // job (health.ts). The advisory lock covers the entire merge and rename;
-    // a timed-out lock falls back to this same best-effort path.
-    const disk = readPersistedState();
-    // Pass `now` so merge also prunes windows past the retention horizon —
-    // the "unknown"/junk buckets the reader already ignores are dropped here
-    // instead of accreting in the file forever.
-    if (disk) state = mergeHealthStates(disk, state, Date.now());
-    mkdirSync(dirname(stateFile), { recursive: true });
-    const tmp = `${stateFile}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(tmp, stateFile);
-  } catch (err) {
-    process.stderr.write(`[multi-clawd shim] state write failed: ${String(err)}\n`);
-  } finally {
-    release?.();
-  }
+  // The journal publishes a pending delta if the lock times out; only a lock
+  // holder merges and replaces the snapshot.
+  state = persistHealthState(stateFile, state, { onSnapshotError: preserveCorruptState });
 }
 
 const { command, prependArgs, argv0: claudeArgv0 } = resolveClaudeCommand();
@@ -497,11 +457,7 @@ function releaseHeldOutput(): void {
 }
 
 function readSiblingState(file: string) {
-  try {
-    return parseStoredState(readFileSync(file, "utf8"));
-  } catch {
-    return undefined;
-  }
+  return readHealthStateFile(file);
 }
 
 /**
