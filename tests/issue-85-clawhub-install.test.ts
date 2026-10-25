@@ -96,3 +96,59 @@ describe("multi-clawd update OpenClaw calls", () => {
     expect(installs).toEqual([pluginInstallAttempts(PKG, "2.4.1")[0]]);
   });
 });
+
+function fakeDoctor(opts: { installed: boolean; source?: string }) {
+  const dir = mkdtempSync(join(tmpdir(), "mc-85-doctor-"));
+  tempDirs.push(dir);
+  const home = join(dir, "home");
+  const bin = join(dir, "bin");
+  const extension = join(home, ".openclaw", "extensions", "multi-clawd");
+  const stateDir = join(home, ".openclaw", "state", "multi-clawd");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(home, ".openclaw", "openclaw.json"), JSON.stringify({ plugins: { entries: { "multi-clawd": { enabled: true, config: { accounts: [] } } } } }));
+  writeFileSync(join(stateDir, "registry-check.json"), JSON.stringify({ latest: "0.0.1", checkedAt: Date.now() }));
+  if (opts.installed) {
+    mkdirSync(extension, { recursive: true });
+    copyFileSync(join(ROOT, "openclaw.plugin.json"), join(extension, "openclaw.plugin.json"));
+  }
+  const log = join(dir, "calls.jsonl");
+  writeFileSync(log, "");
+  const record = JSON.stringify({ source: opts.source ?? "npm", version: "2.4.0", installPath: extension });
+  const openclaw = join(bin, "openclaw");
+  writeFileSync(openclaw, `#!${process.execPath}\nconst { appendFileSync } = require('node:fs');\nconst a = process.argv.slice(2);\nappendFileSync(process.env.CALL_LOG, JSON.stringify(a) + '\\n');\nif (a[0] === 'plugins' && a[1] === 'inspect') { console.log(JSON.stringify({ install: ${record} })); process.exit(0); }\nprocess.exit(1);\n`);
+  chmodSync(openclaw, 0o755);
+  const run = () => {
+    const result = spawnSync(process.execPath, [join(ROOT, "scripts", "doctor.mjs")], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, CALL_LOG: log },
+      timeout: 30000,
+    });
+    expect(result.error).toBeUndefined();
+    return result.stdout + result.stderr;
+  };
+  const inspects = () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as string[]).filter((a) => a[0] === "plugins" && a[1] === "inspect").length;
+  return { run, inspects };
+}
+
+describe("doctor install source", () => {
+  test("an npm-tracked install is flagged once and the answer is cached", () => {
+    const { run, inspects } = fakeDoctor({ installed: true, source: "npm" });
+    expect(run()).toMatch(/install source: npm .*multi-clawd update/);
+    expect(inspects()).toBe(1);
+    expect(run()).toMatch(/install source: npm/);
+    expect(inspects()).toBe(1);
+  });
+
+  test("a ClawHub-tracked install reads as healthy", () => {
+    const { run } = fakeDoctor({ installed: true, source: "clawhub" });
+    expect(run()).toMatch(/✅ install source: ClawHub v2\.4\.0/);
+  });
+
+  test("nothing installed: OpenClaw is not asked", () => {
+    const { run, inspects } = fakeDoctor({ installed: false });
+    run();
+    expect(inspects()).toBe(0);
+  });
+});

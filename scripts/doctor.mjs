@@ -33,13 +33,49 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOME = homedir();
+// OpenClaw's tracked install record (#85). Asking OpenClaw costs a process
+// launch (about 2 s on an idle host), so it is only asked once an install has
+// been found on disk, and the answer is cached against that install's
+// manifest mtime: a reinstall (the only thing that changes the source)
+// rewrites the manifest and so invalidates the cache.
 let inspectText;
-try {
-  inspectText = execFileSync("openclaw", ["plugins", "inspect", "multi-clawd", "--json"], {
-    encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"],
-  });
-} catch {
-  // Missing or older OpenClaw: the legacy config record is checked below.
+function loadInspectText(foundDir) {
+  const cacheFile = join(HOME, ".openclaw", "state", "multi-clawd", "install-record.json");
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(join(foundDir, "openclaw.plugin.json")).mtimeMs;
+  } catch {
+    /* raced with an uninstall; ask OpenClaw */
+  }
+  try {
+    const cached = JSON.parse(readFileSync(cacheFile, "utf8"));
+    if (cached?.installDir === foundDir && cached?.manifestMtimeMs === mtimeMs && cached?.install) {
+      inspectText = JSON.stringify({ install: cached.install });
+      return;
+    }
+  } catch {
+    /* no cache yet */
+  }
+  try {
+    inspectText = execFileSync("openclaw", ["plugins", "inspect", "multi-clawd", "--json"], {
+      encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    // Missing or older OpenClaw: the legacy config record is checked below.
+    return;
+  }
+  try {
+    const install = JSON.parse(inspectText)?.install;
+    if (install && typeof install === "object" && typeof install.source === "string") {
+      mkdirSync(dirname(cacheFile), { recursive: true });
+      writeFileSync(
+        cacheFile,
+        JSON.stringify({ installDir: foundDir, manifestMtimeMs: mtimeMs, install }, null, 2) + "\n",
+      );
+    }
+  } catch {
+    /* cache is an optimisation, never a requirement */
+  }
 }
 
 function trackedInstallPath() {
@@ -66,8 +102,15 @@ function trackedInstallPath() {
  * npm-project install carrying a manifest.
  */
 function resolveInstallDir() {
+  const found = findInstallDirOnDisk();
+  if (!existsSync(join(found, "openclaw.plugin.json"))) return found;
+  loadInspectText(found);
   const tracked = trackedInstallPath();
   if (tracked && existsSync(join(tracked, "openclaw.plugin.json"))) return tracked;
+  return found;
+}
+
+function findInstallDirOnDisk() {
   const extDir = join(HOME, ".openclaw", "extensions", "multi-clawd");
   if (existsSync(join(extDir, "openclaw.plugin.json"))) return extDir;
   const projects = join(HOME, ".openclaw", "npm", "projects");
