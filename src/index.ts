@@ -67,7 +67,6 @@ import {
   DEFAULT_SESSION_AFFINITY_TTL_MS, launchSessionId, readSessionPin, SESSION_AFFINITY_ENV,
 } from "./session-affinity.js";
 import {
-  clearCredentialFailure,
   mergeHealthStates,
   parseStoredState,
   recordCredentialFailure,
@@ -90,6 +89,7 @@ import {
   type AlertState,
 } from "./alerts.js";
 import { healthStateFile, usageStateFile, clearAccountCredentialFailure } from "./credential-state.js";
+import { persistHealthState, readHealthStateFile } from "./health-journal.js";
 import {
   createUsagePollController,
   effectiveUsagePollInterval,
@@ -448,25 +448,8 @@ function recordAccountCredentialFailure(
   nowMs: number,
 ): void {
   const file = healthStateFile(accountId);
-  let state: AccountHealthState;
-  try {
-    state = parseStoredState(readFileSync(file, "utf8")) ?? { accountId, windows: {} };
-  } catch {
-    state = { accountId, windows: {} };
-  }
-  const next = mergeHealthStates(
-    state,
-    recordCredentialFailure(state, reason, nowMs),
-    nowMs,
-  );
-  try {
-    mkdirSync(dirname(file), { recursive: true });
-    const tmp = `${file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
-    renameSync(tmp, file);
-  } catch {
-    // A health write that fails must never break the probe loop.
-  }
+  const state = readHealthStateFile(file) ?? { accountId, windows: {} };
+  persistHealthState(file, recordCredentialFailure(state, reason, nowMs));
 }
 
 /**
@@ -1421,7 +1404,7 @@ interface PoolConfig {
 
 function readHealthState(accountId: string): AccountHealthState | undefined {
   return mergeStoredHealth(
-    readStateFileLenient(healthStateFile(accountId)),
+    readHealthStateFile(healthStateFile(accountId)),
     readStateFileLenient(usageStateFile(accountId)),
   );
 }
@@ -2164,14 +2147,7 @@ export function startUsagePoll(params: {
         }
       },
       readHealth: (id) => {
-        let shim: AccountHealthState | undefined;
-        try {
-          shim = parseStoredState(readFileSync(healthStateFile(id), "utf8"));
-          if (!shim) throw new Error("not valid health-state JSON");
-        } catch (err) {
-          if ((err as { code?: string }).code !== "ENOENT") throw err;
-          shim = undefined;
-        }
+        const shim = readHealthStateFile(healthStateFile(id), { strictSnapshot: true });
         // The poll's own file: absent or unusable both read as "no usage yet".
         // Nothing is at stake — the next tick rewrites it in full.
         let usage: AccountHealthState | undefined;
