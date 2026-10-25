@@ -514,11 +514,11 @@ async function update() {
     // to decide whether a ClawHub failure may fall back to npm, then echoed.
     const result = spawnSync("openclaw", argv, { encoding: "utf8", stdio: ["inherit", "inherit", "pipe"] });
     if (result.stderr) process.stderr.write(result.stderr);
-    if (result.status === 0) {
+    if (result.status === 0 && !result.signal && !result.error) {
       installedOk = true;
       break;
     }
-    if (index === 0 && uc.classifyClawhubFailure(result.status, `${result.stderr ?? ""}\n${result.error?.message ?? ""}`) === "stop") {
+    if (index === 0 && uc.classifyClawhubFailure({ status: result.status, signal: result.signal, error: result.error }, `${result.stderr ?? ""}\n${result.error?.message ?? ""}`) === "stop") {
       console.error("\n  ❌ ClawHub install failed without a confirmed availability error; npm was not tried. Review the failure above before retrying.");
       process.exit(1);
     }

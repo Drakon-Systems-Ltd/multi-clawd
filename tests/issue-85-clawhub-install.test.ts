@@ -20,10 +20,23 @@ describe("ClawHub install decisions", () => {
 
   test("only identified availability failures can use npm", () => {
     for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub is temporarily unavailable", "getaddrinfo ENOTFOUND clawhub.ai", "unknown option clawhub:", "unsupported spec clawhub:pkg"]) {
-      expect(classifyClawhubFailure(1, message), message).toBe("fallback");
+      expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("fallback");
     }
     for (const message of ["blocked by moderation", "ClawHub archive integrity mismatch", "clawhub_download_blocked", "clawhub_security_unavailable", "trust check failed: ETIMEDOUT", "install policy denied", "invalid signature", "Install cancelled.", "aborted", "unexpected failure"]) {
-      expect(classifyClawhubFailure(1, message), message).toBe("stop");
+      expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("stop");
+    }
+  });
+
+  test("interruption and spawn errors stop even after an availability diagnostic", () => {
+    const output = "getaddrinfo ENOTFOUND clawhub.ai";
+    for (const result of [
+      { status: null, signal: "SIGINT" },
+      { status: 130 },
+      { status: 143 },
+      { status: null },
+      { status: 1, error: new Error("spawn failed") },
+    ]) {
+      expect(classifyClawhubFailure(result, output), JSON.stringify(result)).toBe("stop");
     }
   });
 
@@ -59,7 +72,7 @@ describe("ClawHub install decisions", () => {
   });
 });
 
-function fakeCli(opts: { clawhubFails: boolean; trackedSource?: string; installedVersion?: string; latestVersion?: string; failure?: string }) {
+function fakeCli(opts: { clawhubFails: boolean; trackedSource?: string; installedVersion?: string; latestVersion?: string; failure?: string; failureTermination?: "SIGINT" | 130 }) {
   const dir = mkdtempSync(join(tmpdir(), "mc-85-"));
   tempDirs.push(dir);
   const app = join(dir, "app");
@@ -78,7 +91,7 @@ function fakeCli(opts: { clawhubFails: boolean; trackedSource?: string; installe
   writeFileSync(join(plugin, "package.json"), JSON.stringify({ version: opts.installedVersion ?? "2.4.1" }));
   const log = join(dir, "calls.jsonl");
   const openclaw = join(bin, "openclaw");
-  writeFileSync(openclaw, `#!${process.execPath}\nconst { appendFileSync } = require('node:fs');\nconst a = process.argv.slice(2);\nappendFileSync(process.env.CALL_LOG, JSON.stringify(a) + '\\n');\nif (a[0] === 'plugins' && a[1] === 'inspect') { console.log(JSON.stringify({ install: ${opts.trackedSource ? JSON.stringify({ source: opts.trackedSource, version: opts.installedVersion ?? "2.4.1", installPath: plugin }) : "null"} })); process.exit(0); }\nif (a[0] === 'plugins' && a[1] === 'install' && a[2].startsWith('clawhub:') && process.env.CLAWHUB_FAIL === '1') { console.error(${JSON.stringify(opts.failure ?? "Package not found on ClawHub.")}); process.exit(1); }\nprocess.exit(0);\n`);
+  writeFileSync(openclaw, `#!${process.execPath}\nconst { appendFileSync } = require('node:fs');\nconst a = process.argv.slice(2);\nappendFileSync(process.env.CALL_LOG, JSON.stringify(a) + '\\n');\nif (a[0] === 'plugins' && a[1] === 'inspect') { console.log(JSON.stringify({ install: ${opts.trackedSource ? JSON.stringify({ source: opts.trackedSource, version: opts.installedVersion ?? "2.4.1", installPath: plugin }) : "null"} })); process.exit(0); }\nif (a[0] === 'plugins' && a[1] === 'install' && a[2].startsWith('clawhub:') && process.env.CLAWHUB_FAIL === '1') { console.error(${JSON.stringify(opts.failure ?? "Package not found on ClawHub.")}); ${opts.failureTermination === "SIGINT" ? "process.kill(process.pid, 'SIGINT')" : `process.exit(${opts.failureTermination ?? 1})`}; }\nprocess.exit(0);\n`);
   chmodSync(openclaw, 0o755);
   const npm = join(bin, "npm");
   writeFileSync(npm, `#!${process.execPath}\nif (${JSON.stringify(opts.latestVersion ?? "2.4.1")} === 'missing') process.exit(1); console.log(${JSON.stringify(opts.latestVersion ?? "2.4.1")});\n`);
@@ -104,6 +117,20 @@ describe("multi-clawd update OpenClaw calls", () => {
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(installs).toEqual(pluginInstallAttempts(PKG, "2.4.1"));
     expect(result.stdout).toMatch(/falling back to npm.*source caution/);
+  });
+
+  test("plain ENOTFOUND with exit 1 falls back to npm", () => {
+    const { result, installs } = fakeCli({ clawhubFails: true, failure: "getaddrinfo ENOTFOUND clawhub.ai" });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(installs).toEqual(pluginInstallAttempts(PKG, "2.4.1"));
+  });
+
+  test.each(["SIGINT", 130] as const)("ENOTFOUND followed by %s stops before npm and gateway restart", (failureTermination) => {
+    const { result, installs, calls } = fakeCli({ clawhubFails: true, failure: "getaddrinfo ENOTFOUND clawhub.ai", failureTermination });
+    expect(result.status).not.toBe(0);
+    expect(installs).toEqual([pluginInstallAttempts(PKG, "2.4.1")[0]]);
+    expect(calls.some((a) => a[0] === "gateway" && a[1] === "restart")).toBe(false);
+    expect(result.stderr).toMatch(/npm was not tried/);
   });
 
   test("an up-to-date npm install is offered migration to ClawHub", () => {

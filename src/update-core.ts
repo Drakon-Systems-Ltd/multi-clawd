@@ -40,8 +40,12 @@ export function exactTargetVersion(version: string | undefined): string | undefi
 }
 
 /** Only known availability failures permit a change of install source. */
-export function classifyClawhubFailure(status: number | null, output: string): "fallback" | "stop" {
-  if (status === 0) return "stop";
+export function classifyClawhubFailure(result: {
+  status: number | null;
+  signal?: string | null;
+  error?: unknown;
+}, output: string): "fallback" | "stop" {
+  if (result.status === 0 || result.signal || result.status === null || result.error != null || result.status >= 128) return "stop";
   if (/moderation|integrity|trust|policy|signature|security|malicious|quarantin|revoked|blocked|cancel(?:led|ed)?|abort|clawhub_(?:download_blocked|security_unavailable|archive_integrity_mismatch)/i.test(output)) return "stop";
   if (/package not found on clawhub|version not found on clawhub|\b(?:package_not_found|version_not_found)\b/i.test(output)) return "fallback";
   if (/clawhub.{0,80}(?:unreachable|temporarily unavailable|network error|fetch failed|connection (?:failed|refused|timed out))|ClawHub .* failed \(5\d\d\)|(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT)/i.test(output)) return "fallback";
