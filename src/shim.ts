@@ -29,6 +29,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { persistHealthState, readHealthStateFile } from "./health-journal.js";
 import { acquireShimLock } from "./shim-lock.js";
+import { recordHistory, type HistoryReason } from "./history.js";
 import {
   clearCredentialFailure,
   clearModelRejection,
@@ -255,6 +256,8 @@ let child = spawn(command, childArgs, {
   env: launchEnv,
   ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
 });
+child.once("spawn", () => recordHistory(stateFile, { at: new Date().toISOString(),
+  kind: "served", accountId, modelId: effectiveModelId() }));
 // stdin must be REPLAYABLE while a retry is possible: the prompt was written
 // to the first child and the second one needs the same bytes. Capped, because
 // a reseeded history prompt can be large and an un-retryable turn must not pay
@@ -521,6 +524,13 @@ function attemptRetry(cause: RetryCause): boolean {
   }
   retryUsed = true;
   retryArmed = false;
+  const reason: HistoryReason = cause.kind === "model_limit" ? "model_limit" : "transient";
+  recordHistory(stateFile, { at: new Date().toISOString(), kind: "retry", accountId,
+    toAccountId: target.id, modelId: model, reason });
+  // A rotation is a confirmed hop to a different account. Retry selection is
+  // unchanged; only the journal decides whether this retry counts as one.
+  if (target.id !== accountId) recordHistory(stateFile, { at: new Date().toISOString(),
+    kind: "rotation", accountId, toAccountId: target.id, modelId: model, reason });
   process.stderr.write(
     `[multi-clawd shim] ${describeCause(cause)} on ${accountId}${model ? ` for ${model}` : ""} — ` +
       `retrying this turn on ${target.id}${
@@ -548,6 +558,8 @@ function attemptRetry(cause: RetryCause): boolean {
     env: buildRetryEnv(launchEnv, target),
     ...(claudeArgv0 ? { argv0: claudeArgv0 } : {}),
   });
+  child.once("spawn", () => recordHistory(stateFile, { at: new Date().toISOString(),
+    kind: "served", accountId, modelId: effectiveModelId() }));
   attachChildHandlers();
   for (const chunk of stdinReplay) child.stdin.write(chunk);
   if (stdinEnded) child.stdin.end();

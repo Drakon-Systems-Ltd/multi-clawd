@@ -30,6 +30,7 @@ multi-clawd update    # install (or update) the OpenClaw plugin — right flags,
 multi-clawd setup     # guided wizard: accounts, isolated second login, pool, watchdog
 multi-clawd login claw2   # launch the right Claude sign-in for an account (or re-auth it)
 multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
+multi-clawd explain --history --since 7d   # per-account launches, retries, rotations
 multi-clawd account disable claw2 --dry-run  # preview benching an account
 multi-clawd chain     # audit your model routing — what actually serves each turn
 multi-clawd direct    # the direct anthropic/* route: status, or `direct sync` (v1.9, optional)
@@ -55,6 +56,12 @@ install anything? Every command also runs as
    routes through it.
 
 Then `multi-clawd explain` shows you exactly what you built.
+
+`multi-clawd explain --history` adds per-account served launches, in-turn retry
+hops, rotations, and the last served time for the past seven days. Use
+`--since 24h` or another positive `Nd`/`Nh` duration to change the window.
+The local history is size capped; it records account and model IDs and short
+reason codes, never prompts, credentials, transcripts, tokens, or costs.
 
 ## Hermes Agent integration
 
@@ -923,7 +930,7 @@ callsite (the ones static scanners flag) and why each exists.
 | Network | The gateway plugin polls `https://api.anthropic.com/api/oauth/usage` for eligible pooled accounts on an interval (default 120000 ms / 2 minutes); `pool.usagePoll.enabled: false` disables that poll. `multi-clawd usage` requests the same endpoint on demand. `doctor` runs `npm view` when its registry cache is stale; install and update commands contact the package registry. Claude Code subprocesses make their own provider requests. No plugin telemetry or analytics endpoint. |
 | Credentials | Reads declared setup-token files or gateway-resolved `oauthTokenRef` values for Claude child launches; reads each eligible account's `.credentials.json` access token for the usage poll; reads Claude login credentials from files or the macOS Keychain via the `security` CLI for login checks and runtime auth; reads account identity for file-backed logins from `.claude.json` (`~/.claude.json` for a native login, or the account config dir). Setup tokens are passed to Claude through the child environment. |
 | Files read | `~/.openclaw/openclaw.json`, declared account config dirs and token files, Claude `.credentials.json` and `.claude.json` files as described above, and local state files. |
-| Files written | Under `~/.openclaw/state/multi-clawd/` by default: `<id>.json`, `<id>.usage.json`, `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes `~/.openclaw/openclaw.json` and a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher. |
+| Files written | Under `~/.openclaw/state/multi-clawd/` by default: `<id>.json`, `<id>.usage.json`, `history.jsonl` (bounded account activity), `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes `~/.openclaw/openclaw.json` and a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher. |
 | Processes | Launches Claude Code and the node + shim transport; CLI, setup and doctor run npm, OpenClaw, Claude and OS scheduler commands; the optional watchdog checks OpenClaw logs and may restart the gateway; Hermes integration runs its Python bridge. See [SECURITY.md](SECURITY.md) for the process-call table. |
 | Consent | The wizard asks before every write, merges non-destructively, and never overwrites an existing account entry. `--dry-run` previews everything. |
 

@@ -639,7 +639,29 @@ async function healWatchdogUnit() {
 }
 
 /** `explain` — gather config + live health, render the plain-English view. */
-async function explain() {
+async function explain(args = []) {
+  let historySince;
+  if (args.length) {
+    const allowed = args[0] === "--history" && (args.length === 1 ||
+      (args.length === 3 && args[1] === "--since"));
+    if (!allowed) {
+      console.error("explain: usage: multi-clawd explain [--history [--since 7d|24h]]");
+      process.exitCode = 1;
+      return;
+    }
+    historySince = args[2] ?? "7d";
+  }
+  let history;
+  if (historySince) {
+    try {
+      history = await import(resolve(__dirname, "..", "dist", "history.js"));
+      history.parseHistorySince(historySince);
+    } catch (err) {
+      console.error(`explain: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
   const { readFileSync: rf, existsSync } = await import("node:fs");
   const { homedir } = await import("node:os");
   let ec, health, shim;
@@ -717,6 +739,10 @@ async function explain() {
     ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, stickyEntry, nowMs: now, direct }),
   );
   console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
+  if (history) {
+    console.log(`\n${history.renderHistory(history.readHistory(join(stateDir, history.HISTORY_FILE)),
+      accounts.map((a) => a.id), historySince, now)}`);
+  }
 }
 
 /**
@@ -978,7 +1004,7 @@ switch (cmd) {
     break;
   }
   case "explain":
-    await explain();
+    await explain(rest);
     break;
   case "chain":
     await chain(rest);

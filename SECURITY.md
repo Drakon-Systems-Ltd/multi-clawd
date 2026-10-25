@@ -37,6 +37,9 @@ credit you (unless you'd rather we didn't), and note it in the CHANGELOG.
 - **Per-account health and usage files are written `0600`,** using temporary
   files and rename, and contain rate-limit data rather than credentials. Other
   state files include model, alert, registry and watchdog data.
+- **`history.jsonl` is a bounded `0600` account activity file** in the same
+  state directory. It contains timestamps, account/model IDs and short reason
+  codes, with no prompt, transcript, token, cost, credential, or environment values.
 
 ## Permissions
 
