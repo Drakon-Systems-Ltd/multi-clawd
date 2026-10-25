@@ -71,7 +71,9 @@ describe("issue #70 account history", () => {
     expect(readHistory(file).length).toBeGreaterThan(0);
     recordHistory(state, event());
     expect(statSync(file).size).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
-  });
+  // 651 locked read/trim/replace cycles: ~0.25 s locally, but over 5 s on the
+  // Linux Node 22 CI runner under the full parallel suite. Explicit budget.
+  }, 30_000);
 
   test("two concurrent writers keep valid, bounded events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-history-writers-"));
