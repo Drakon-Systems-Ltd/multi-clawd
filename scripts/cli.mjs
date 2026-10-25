@@ -499,17 +499,28 @@ async function update() {
     console.log("  Check your network and try again.");
     process.exit(1);
   }
-  if (!(await askYes(`  ${migrating ? "Reinstall from ClawHub" : action === "install" ? "Install" : "Update"} now?`))) return;
-
   const targetVersion = migrating ? installed : latest;
+  if (!uc.exactTargetVersion(targetVersion)) {
+    console.error("  ❌ cannot install: no valid exact target version is available.");
+    process.exit(1);
+  }
+  if (!(await askYes(`  ${migrating ? "Reinstall from ClawHub" : action === "install" ? "Install" : "Update"} now?`))) return;
   let installedOk = false;
   for (const [index, argv] of uc.pluginInstallAttempts(PKG, targetVersion).entries()) {
     if (index === 1) console.log("\n  ClawHub install failed; falling back to npm. OpenClaw may show a source caution for npm installs.");
     console.log(`\n  ${DIM}openclaw ${argv.join(" ")}${RESET}`);
-    const result = spawnSync("openclaw", argv, { stdio: "inherit" });
+    // stdin and stdout stay on the terminal so OpenClaw's install confirmation
+    // prompts still work; stderr (where OpenClaw reports failures) is captured
+    // to decide whether a ClawHub failure may fall back to npm, then echoed.
+    const result = spawnSync("openclaw", argv, { encoding: "utf8", stdio: ["inherit", "inherit", "pipe"] });
+    if (result.stderr) process.stderr.write(result.stderr);
     if (result.status === 0) {
       installedOk = true;
       break;
+    }
+    if (index === 0 && uc.classifyClawhubFailure(result.status, `${result.stderr ?? ""}\n${result.error?.message ?? ""}`) === "stop") {
+      console.error("\n  ❌ ClawHub install failed without a confirmed availability error; npm was not tried. Review the failure above before retrying.");
+      process.exit(1);
     }
   }
   if (!installedOk) {

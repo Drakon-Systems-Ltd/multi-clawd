@@ -26,11 +26,27 @@ export function decideUpdateAction(opts: {
   return compareVersions(opts.installed, opts.latest) < 0 ? "update" : "up-to-date";
 }
 
-export function pluginInstallAttempts(pkg: string, version?: string): string[][] {
+export function pluginInstallAttempts(pkg: string, version: string): string[][] {
   return [
-    ["plugins", "install", `clawhub:${pkg}${version ? `@${version}` : ""}`, "--force"],
-    ["plugins", "install", pkg, "--pin", "--force"],
+    ["plugins", "install", `clawhub:${pkg}@${version}`, "--force"],
+    ["plugins", "install", `${pkg}@${version}`, "--pin", "--force"],
   ];
+}
+
+/** Never pass an unknown or ambiguous version to either install source. */
+export function exactTargetVersion(version: string | undefined): string | undefined {
+  return version && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$/.test(version)
+    ? version : undefined;
+}
+
+/** Only known availability failures permit a change of install source. */
+export function classifyClawhubFailure(status: number | null, output: string): "fallback" | "stop" {
+  if (status === 0) return "stop";
+  if (/moderation|integrity|trust|policy|signature|security|malicious|quarantin|revoked|blocked|cancel(?:led|ed)?|abort|clawhub_(?:download_blocked|security_unavailable|archive_integrity_mismatch)/i.test(output)) return "stop";
+  if (/package not found on clawhub|version not found on clawhub|\b(?:package_not_found|version_not_found)\b/i.test(output)) return "fallback";
+  if (/clawhub.{0,80}(?:unreachable|temporarily unavailable|network error|fetch failed|connection (?:failed|refused|timed out))|ClawHub .* failed \(5\d\d\)|(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT)/i.test(output)) return "fallback";
+  if (/unknown (?:option|command)|unsupported (?:spec|source|protocol)|invalid (?:spec|source).{0,80}clawhub:|clawhub:.{0,80}(?:not supported|unsupported)/i.test(output)) return "fallback";
+  return "stop";
 }
 
 export type InstallRecord = {
@@ -231,7 +247,7 @@ export function formatUpdateBanner(opts: {
   const action = decideUpdateAction(opts);
   switch (action) {
     case "install":
-      return `not installed — latest is v${opts.latest}`;
+      return opts.latest ? `not installed — latest is v${opts.latest}` : "not installed — could not determine the latest version";
     case "update":
       return `update available: v${opts.installed} → v${opts.latest}`;
     case "up-to-date":

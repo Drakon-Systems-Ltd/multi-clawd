@@ -34,13 +34,12 @@ import { fileURLToPath } from "node:url";
 
 const HOME = homedir();
 // OpenClaw's tracked install record (#85). Asking OpenClaw costs a process
-// launch (about 2 s on an idle host), so it is only asked once an install has
-// been found on disk, and the answer is cached against that install's
-// manifest mtime: a reinstall (the only thing that changes the source)
-// rewrites the manifest and so invalidates the cache.
+// launch (about 2 s on an idle host), so skip it for an unconfigured install.
+// Cache against the manifest and legacy record, with a one-day expiry.
 let inspectText;
-function loadInspectText(foundDir) {
+function loadInspectText(foundDir, configRecord) {
   const cacheFile = join(HOME, ".openclaw", "state", "multi-clawd", "install-record.json");
+  const recordKey = JSON.stringify({ source: configRecord?.source, version: configRecord?.version, installPath: configRecord?.installPath });
   let mtimeMs;
   try {
     mtimeMs = statSync(join(foundDir, "openclaw.plugin.json")).mtimeMs;
@@ -49,7 +48,8 @@ function loadInspectText(foundDir) {
   }
   try {
     const cached = JSON.parse(readFileSync(cacheFile, "utf8"));
-    if (cached?.installDir === foundDir && cached?.manifestMtimeMs === mtimeMs && cached?.install) {
+    if (cached?.installDir === foundDir && cached?.manifestMtimeMs === mtimeMs && cached?.recordKey === recordKey &&
+      typeof cached?.checkedAt === "number" && Date.now() - cached.checkedAt < 24 * 60 * 60 * 1000 && cached?.install) {
       inspectText = JSON.stringify({ install: cached.install });
       return;
     }
@@ -70,7 +70,7 @@ function loadInspectText(foundDir) {
       mkdirSync(dirname(cacheFile), { recursive: true });
       writeFileSync(
         cacheFile,
-        JSON.stringify({ installDir: foundDir, manifestMtimeMs: mtimeMs, install }, null, 2) + "\n",
+        JSON.stringify({ installDir: foundDir, manifestMtimeMs: mtimeMs, recordKey, checkedAt: Date.now(), install }, null, 2) + "\n",
       );
     }
   } catch {
@@ -78,20 +78,14 @@ function loadInspectText(foundDir) {
   }
 }
 
-function trackedInstallPath() {
+function trackedInstallPath(configRecord) {
   try {
     const inspected = JSON.parse(inspectText ?? "");
     if (typeof inspected?.install?.installPath === "string") return inspected.install.installPath;
   } catch {
     // Fall back to the legacy config record.
   }
-  try {
-    const config = JSON.parse(readFileSync(join(HOME, ".openclaw", "openclaw.json"), "utf8"));
-    const path = config?.plugins?.installs?.["multi-clawd"]?.installPath;
-    return typeof path === "string" ? path : undefined;
-  } catch {
-    return undefined;
-  }
+  return typeof configRecord?.installPath === "string" ? configRecord.installPath : undefined;
 }
 
 /**
@@ -103,11 +97,17 @@ function trackedInstallPath() {
  */
 function resolveInstallDir() {
   const found = findInstallDirOnDisk();
-  if (!existsSync(join(found, "openclaw.plugin.json"))) return found;
-  loadInspectText(found);
-  const tracked = trackedInstallPath();
+  let config;
+  try { config = JSON.parse(readFileSync(join(HOME, ".openclaw", "openclaw.json"), "utf8")); } catch { /* no config */ }
+  const record = config?.plugins?.installs?.["multi-clawd"];
+  const legacyPath = typeof record?.installPath === "string" ? record.installPath : undefined;
+  const hasFound = existsSync(join(found, "openclaw.plugin.json"));
+  if (!hasFound && !record && !config?.plugins?.entries?.["multi-clawd"]) return found;
+  const candidate = !hasFound && legacyPath && existsSync(join(legacyPath, "openclaw.plugin.json")) ? legacyPath : found;
+  loadInspectText(candidate, record);
+  const tracked = trackedInstallPath(record);
   if (tracked && existsSync(join(tracked, "openclaw.plugin.json"))) return tracked;
-  return found;
+  return candidate;
 }
 
 function findInstallDirOnDisk() {

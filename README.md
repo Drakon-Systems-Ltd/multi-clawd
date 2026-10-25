@@ -421,8 +421,9 @@ host-provided peer.
 npx @drakon-systems/multi-clawd update
 ```
 
-One command: checks the registry, installs the new version from ClawHub (with npm
-fallback), offers the gateway restart, and finishes with a doctor health check.
+One command: checks the registry, installs the chosen version from ClawHub (with npm
+fallback only when ClawHub is unavailable), offers the gateway restart, and finishes with a doctor health check.
+Security, integrity, and policy failures stop the update without trying npm.
 (`npm i -g @drakon-systems/multi-clawd` once, and it's just `multi-clawd
 update` — with `multi-clawd setup`, `multi-clawd explain` (your setup in
 plain English), and `multi-clawd doctor` alongside.)

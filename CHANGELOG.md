@@ -8,7 +8,7 @@ versioning from v1.0.
 
 ### Added
 - Plugin updates and raw install guidance now use ClawHub first, with npm as a
-  fallback. Doctor reports OpenClaw's tracked install source. (#85)
+  fallback only when ClawHub is unavailable; security, integrity, and policy failures stop. The chosen version is pinned on both sources. Doctor reports OpenClaw's tracked install source. (#85)
 - `multi-clawd explain --history [--since 7d]` reports bounded per-account
   served launches, in-turn retries, rotations, and last served times. The shim
   writes a private, size-capped `history.jsonl` beside health state. (#70)
