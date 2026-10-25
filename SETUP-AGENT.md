@@ -40,6 +40,10 @@ npx @drakon-systems/multi-clawd update   # installs (or updates) the OpenClaw pl
 npx @drakon-systems/multi-clawd setup    # guided wizard: accounts, token storage, pool, watchdog
 ```
 
+For a raw plugin install, run `openclaw plugins install clawhub:@drakon-systems/multi-clawd`.
+ClawHub is the source OpenClaw trusts; npm installs show a source caution.
+If ClawHub fails, use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+
 **If this machine has used multi-clawd before, install the CLI globally once,
 first:**
 

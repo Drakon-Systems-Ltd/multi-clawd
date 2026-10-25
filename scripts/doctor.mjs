@@ -33,6 +33,30 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HOME = homedir();
+let inspectText;
+try {
+  inspectText = execFileSync("openclaw", ["plugins", "inspect", "multi-clawd", "--json"], {
+    encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"],
+  });
+} catch {
+  // Missing or older OpenClaw: the legacy config record is checked below.
+}
+
+function trackedInstallPath() {
+  try {
+    const inspected = JSON.parse(inspectText ?? "");
+    if (typeof inspected?.install?.installPath === "string") return inspected.install.installPath;
+  } catch {
+    // Fall back to the legacy config record.
+  }
+  try {
+    const config = JSON.parse(readFileSync(join(HOME, ".openclaw", "openclaw.json"), "utf8"));
+    const path = config?.plugins?.installs?.["multi-clawd"]?.installPath;
+    return typeof path === "string" ? path : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Where is the plugin actually installed? Path installs land in
@@ -42,6 +66,8 @@ const HOME = homedir();
  * npm-project install carrying a manifest.
  */
 function resolveInstallDir() {
+  const tracked = trackedInstallPath();
+  if (tracked && existsSync(join(tracked, "openclaw.plugin.json"))) return tracked;
   const extDir = join(HOME, ".openclaw", "extensions", "multi-clawd");
   if (existsSync(join(extDir, "openclaw.plugin.json"))) return extDir;
   const projects = join(HOME, ".openclaw", "npm", "projects");
@@ -168,7 +194,7 @@ else ok(`installed at ${EXT_DIR}`);
   );
   const cliVer = readJson(join(REPO_DIR, "package.json"))?.version;
   const pluginVer = manifest?.version;
-  const note =
+  const skewNote =
     uc && cliVer && typeof uc.formatCliSkew === "function"
       ? uc.formatCliSkew({
           cliVersion: cliVer,
@@ -177,8 +203,15 @@ else ok(`installed at ${EXT_DIR}`);
           pkg: "@drakon-systems/multi-clawd",
         })
       : undefined;
-  if (note) warn(note);
+  if (skewNote) warn(skewNote);
   else if (cliVer && pluginVer) ok(`CLI and plugin both v${cliVer}`);
+
+  if (uc && typeof uc.parseInstallRecord === "function" && typeof uc.classifyInstallSource === "function") {
+    const source = uc.classifyInstallSource(uc.parseInstallRecord(inspectText, config));
+    if (source?.level === "ok") ok(source.text);
+    else if (source?.level === "warn") warn(source.text);
+    else if (source?.level === "note") note(source.text);
+  }
 
   // Is the installed plugin behind what npm publishes? Nothing else asks:
   // `openclaw plugins update --all` compares against the PINNED spec and so
