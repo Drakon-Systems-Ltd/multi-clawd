@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -83,6 +83,9 @@ describe("weekly utilization threshold (#55)", () => {
     mkdirSync(extension, { recursive: true });
     mkdirSync(stateDir, { recursive: true });
     copyFileSync(resolve("openclaw.plugin.json"), join(extension, "openclaw.plugin.json"));
+    // Seed doctor's install-record cache (#85) so it does not launch the real
+    // OpenClaw from node_modules/.bin, which is slow on a cold temp HOME.
+    writeFileSync(join(stateDir, "install-record.json"), JSON.stringify({ installDir: extension, manifestMtimeMs: statSync(join(extension, "openclaw.plugin.json")).mtimeMs, recordKey: "{}", checkedAt: Date.now(), install: { source: "path" } }));
     writeFileSync(join(stateDir, "registry-check.json"), JSON.stringify({ latest: "2.1.3", checkedAt: Date.now() }));
     const run = (pool: object) => {
       writeFileSync(join(openclaw, "openclaw.json"), JSON.stringify({ plugins: { entries: { "multi-clawd": { enabled: true, config: { accounts: [], pool: { id: "clawd", accounts: [], ...pool } } } } } }));
@@ -104,6 +107,9 @@ describe("weekly utilization threshold (#55)", () => {
     mkdirSync(extension, { recursive: true });
     mkdirSync(stateDir, { recursive: true });
     copyFileSync(resolve("openclaw.plugin.json"), join(extension, "openclaw.plugin.json"));
+    // Seed doctor's install-record cache (#85) so it does not launch the real
+    // OpenClaw from node_modules/.bin, which is slow on a cold temp HOME.
+    writeFileSync(join(stateDir, "install-record.json"), JSON.stringify({ installDir: extension, manifestMtimeMs: statSync(join(extension, "openclaw.plugin.json")).mtimeMs, recordKey: "{}", checkedAt: Date.now(), install: { source: "path" } }));
     writeFileSync(join(stateDir, "registry-check.json"), JSON.stringify({ latest: "2.3.0", checkedAt: Date.now() }));
     const run = (accounts: object[], poolAccounts: string[], degrade?: object) => {
       writeFileSync(join(openclaw, "openclaw.json"), JSON.stringify({

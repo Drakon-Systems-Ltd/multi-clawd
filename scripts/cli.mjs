@@ -12,8 +12,7 @@
  * commands are just `multi-clawd setup` / `multi-clawd update` / …)
  *
  * `update` wraps the whole upgrade dance — registry version check, the
- * openclaw install with the right flags, gateway restart, doctor — so nobody
- * has to remember `--pin --force`.
+ * ClawHub install with npm fallback, gateway restart, doctor.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, existsSync as existsSyncEarly } from "node:fs";
@@ -53,14 +52,26 @@ Run via npx (${DIM}npx ${PKG} <command>${RESET}) or install globally
 
 const { resolveInstallDir } = await import(join(__dirname, "_shared.mjs"));
 
-function installedVersion() {
-  const dir = resolveInstallDir();
+function installedVersion(installPath) {
+  const dir = installPath ?? resolveInstallDir();
   if (!dir) return undefined;
   try {
     return JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version;
   } catch {
     return undefined;
   }
+}
+
+function trackedInstallRecord(uc) {
+  let inspected;
+  try {
+    inspected = execFileSync("openclaw", ["plugins", "inspect", "multi-clawd", "--json"], {
+      encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    // Legacy OpenClaw may expose the install only in openclaw.json.
+  }
+  return uc.parseInstallRecord(inspected, readOpenclawConfigSync());
 }
 
 function latestVersion() {
@@ -473,25 +484,46 @@ async function update() {
     console.error("  ❌ the `openclaw` CLI is not on PATH — install OpenClaw first.");
     process.exit(1);
   }
-  const installed = installedVersion();
+  const source = trackedInstallRecord(uc);
+  const installed = installedVersion(source?.installPath) ?? source?.version;
   process.stdout.write(`  checking registry… `);
   const latest = latestVersion();
   console.log(latest ? `latest is v${latest}` : "unreachable");
   const banner = uc.formatUpdateBanner({ installed, latest });
   const action = uc.decideUpdateAction({ installed, latest });
   console.log(`  ${action === "up-to-date" ? "✅" : action === "unknown" ? "⚠️ " : "⬆️ "} ${banner}\n`);
-  if (action === "up-to-date") return;
+  const migrating = action === "up-to-date" && source?.source === "npm";
+  if (action === "up-to-date" && !migrating) return;
+  if (migrating) console.log("  This plugin is tracked as an npm install. Reinstalling from ClawHub clears OpenClaw's npm source caution.\n");
   if (action === "unknown") {
     console.log("  Check your network and try again.");
     process.exit(1);
   }
-  if (!(await askYes(`  ${action === "install" ? "Install" : "Update"} now?`))) return;
-
-  console.log(`\n  ${DIM}openclaw plugins install ${PKG} --pin --force${RESET}`);
-  const inst = spawnSync("openclaw", ["plugins", "install", PKG, "--pin", "--force"], {
-    stdio: "inherit",
-  });
-  if (inst.status !== 0) {
+  const targetVersion = migrating ? installed : latest;
+  if (!uc.exactTargetVersion(targetVersion)) {
+    console.error("  ❌ cannot install: no valid exact target version is available.");
+    process.exit(1);
+  }
+  if (!(await askYes(`  ${migrating ? "Reinstall from ClawHub" : action === "install" ? "Install" : "Update"} now?`))) return;
+  let installedOk = false;
+  for (const [index, argv] of uc.pluginInstallAttempts(PKG, targetVersion).entries()) {
+    if (index === 1) console.log("\n  ClawHub install failed; falling back to npm. OpenClaw may show a source caution for npm installs.");
+    console.log(`\n  ${DIM}openclaw ${argv.join(" ")}${RESET}`);
+    // stdin and stdout stay on the terminal so OpenClaw's install confirmation
+    // prompts still work; stderr (where OpenClaw reports failures) is captured
+    // to decide whether a ClawHub failure may fall back to npm, then echoed.
+    const result = spawnSync("openclaw", argv, { encoding: "utf8", stdio: ["inherit", "inherit", "pipe"] });
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.status === 0 && !result.signal && !result.error) {
+      installedOk = true;
+      break;
+    }
+    if (index === 0 && uc.classifyClawhubFailure({ status: result.status, signal: result.signal, error: result.error }, `${result.stderr ?? ""}\n${result.error?.message ?? ""}`) === "stop") {
+      console.error("\n  ❌ ClawHub install failed without a confirmed availability error; npm was not tried. Review the failure above before retrying.");
+      process.exit(1);
+    }
+  }
+  if (!installedOk) {
     console.error("\n  ❌ install failed — see output above.");
     process.exit(1);
   }
@@ -510,7 +542,8 @@ async function update() {
     console.log(`\n  ⚠ doctor found problems — if it flagged the watchdog, run ${BOLD}npx ${PKG} setup${RESET} to repair it.`);
     process.exit(doc.status ?? 1);
   }
-  console.log(`\n  ✅ done — now on v${installedVersion() ?? "?"}`);
+  const updatedSource = trackedInstallRecord(uc);
+  console.log(`\n  ✅ done — now on v${installedVersion(updatedSource?.installPath) ?? updatedSource?.version ?? "?"}`);
 }
 
 /**

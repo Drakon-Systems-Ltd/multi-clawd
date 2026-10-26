@@ -215,13 +215,15 @@ upgrading the plugin on a host (`openclaw plugins install|update`,
 against it are host operations: they need their own authorisation from whoever
 operates that host and are verified on that host — not as part of a release.
 
-For reference, a host-side upgrade installs the pinned package, then restarts
+For reference, a host-side upgrade installs the package from ClawHub, then restarts
 that host's OpenClaw gateway (an interruption for anything it is serving, so
 only when that host's operator has agreed), then probes it:
 ```bash
-openclaw plugins install @drakon-systems/multi-clawd --pin
+openclaw plugins install clawhub:@drakon-systems/multi-clawd
 npx @drakon-systems/multi-clawd doctor --probe
 ```
+ClawHub is the source OpenClaw trusts; npm installs show a source caution.
+If ClawHub fails, use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
 A host moving from a path-installed `multi-clawd` to the registry package
 first removes the path install through OpenClaw's plugin uninstall command.
 Plugin identity is keyed by the manifest `id` (`multi-clawd`), independent of

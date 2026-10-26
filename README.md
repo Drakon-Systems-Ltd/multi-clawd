@@ -317,7 +317,7 @@ argument arrays, never through a shell string. Launch mode varies by platform.
 npm i -g @drakon-systems/multi-clawd && multi-clawd update
 ```
 
-`update` runs the registry install with the right flags, offers the gateway
+`update` installs from ClawHub first, offers the gateway
 restart, and finishes with a doctor health check.
 
 > ### ⚠️ Keeping up to date: there are two halves
@@ -348,38 +348,33 @@ restart, and finishes with a doctor health check.
 > version` shows both halves, and since v1.6.0 says plainly whether the pair
 > is a problem.
 >
-> ### ⚠️ `openclaw plugins update --all` cannot move this plugin
+> ### ⚠️ Pinned installs need `multi-clawd update`
 >
-> It will tell you the plugin is up to date when it is not. We install with
-> `--pin` (OpenClaw's own security audit raises a HIGH finding for unpinned
-> install specs, so pinning is the right side of that trade), and OpenClaw
+> For a versioned ClawHub install (or npm `--pin` fallback), `openclaw plugins
+> update --all` can tell you the plugin is up to date when it is not. OpenClaw
 > resolves registry metadata *for the pinned spec* — comparing 1.6.0 against
 > 1.6.0 and returning "up to date" while a newer version sits on npm. The
 > honest "pinned to X; registry default resolves to Y" message exists in
 > OpenClaw but is built inside its `--dry-run` branch, so a real update run
 > never prints it.
 >
-> **Use `multi-clawd update`.** Since v1.7.2 `doctor` also checks the registry
+> **Use `multi-clawd update` for versioned installs.** Since v1.7.2 `doctor` also checks the registry
 > itself (cached, and silent when offline), so a lagging plugin is reported
 > rather than left to a command that reassures you wrongly.
 
 Prefer the raw form?
 
 ```bash
-openclaw plugins install @drakon-systems/multi-clawd --pin
+openclaw plugins install clawhub:@drakon-systems/multi-clawd
 openclaw gateway restart
 ```
 
 Either way the gateway pulls the prebuilt package — no clone, no build step,
-nothing to keep in sync. `--pin` records the exact resolved version, so an
-upgrade is a deliberate act, never a surprise. `openclaw` itself is a *peer*
+nothing to keep in sync. ClawHub is the source OpenClaw trusts; npm installs show a source caution.
+For older OpenClaw or a ClawHub failure, use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+An unversioned ClawHub spec follows newer releases; add `@X.Y.Z` to keep a specific release.
+`openclaw` itself is a *peer*
 dependency (the host provides it), so the install stays lean.
-
-**From ClawHub (alternative registry):**
-
-```bash
-openclaw plugins install clawhub:@drakon-systems/multi-clawd
-```
 
 **From source (contributors, or ahead of a release):**
 
@@ -426,8 +421,9 @@ host-provided peer.
 npx @drakon-systems/multi-clawd update
 ```
 
-One command: checks the registry, installs the new version with the right
-flags, offers the gateway restart, and finishes with a doctor health check.
+One command: checks the registry, installs the chosen version from ClawHub (with npm
+fallback only when ClawHub is unavailable), offers the gateway restart, and finishes with a doctor health check.
+Security, integrity, and policy failures stop the update without trying npm.
 (`npm i -g @drakon-systems/multi-clawd` once, and it's just `multi-clawd
 update` — with `multi-clawd setup`, `multi-clawd explain` (your setup in
 plain English), and `multi-clawd doctor` alongside.)

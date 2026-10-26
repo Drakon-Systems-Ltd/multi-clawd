@@ -26,6 +26,92 @@ export function decideUpdateAction(opts: {
   return compareVersions(opts.installed, opts.latest) < 0 ? "update" : "up-to-date";
 }
 
+export function pluginInstallAttempts(pkg: string, version: string): string[][] {
+  return [
+    ["plugins", "install", `clawhub:${pkg}@${version}`, "--force"],
+    ["plugins", "install", `${pkg}@${version}`, "--pin", "--force"],
+  ];
+}
+
+/** Never pass an unknown or ambiguous version to either install source. */
+export function exactTargetVersion(version: string | undefined): string | undefined {
+  return version && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$/.test(version)
+    ? version : undefined;
+}
+
+/** Only known availability failures permit a change of install source. */
+export function classifyClawhubFailure(result: {
+  status: number | null;
+  signal?: string | null;
+  error?: unknown;
+}, output: string): "fallback" | "stop" {
+  if (result.status === 0 || result.signal || result.status === null || result.error != null || result.status >= 128) return "stop";
+  if (/moderation|integrity|trust|policy|signature|security|malicious|quarantin|revoked|blocked|cancel(?:led|ed)?|abort|clawhub_(?:download_blocked|security_unavailable|archive_integrity_mismatch)/i.test(output)) return "stop";
+  if (/package not found on clawhub|version not found on clawhub|\b(?:package_not_found|version_not_found)\b/i.test(output)) return "fallback";
+  if (/clawhub.{0,80}(?:unreachable|temporarily unavailable|network error|fetch failed|connection (?:failed|refused|timed out))|ClawHub .* failed \(5\d\d\)|(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT)/i.test(output)) return "fallback";
+  if (/unknown (?:option|command)|unsupported (?:spec|source|protocol)|invalid (?:spec|source).{0,80}clawhub:|clawhub:.{0,80}(?:not supported|unsupported)/i.test(output)) return "fallback";
+  return "stop";
+}
+
+export type InstallRecord = {
+  source: string;
+  version?: string;
+  clawhubChannel?: string;
+  installPath?: string;
+};
+
+function asInstallRecord(value: unknown): InstallRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.source !== "string") return undefined;
+  return {
+    source: record.source,
+    ...(typeof record.version === "string" ? { version: record.version } : {}),
+    ...(typeof record.clawhubChannel === "string" ? { clawhubChannel: record.clawhubChannel } : {}),
+    ...(typeof record.installPath === "string" ? { installPath: record.installPath } : {}),
+  };
+}
+
+export function parseInstallRecord(inspectJsonText: string | undefined, openclawConfig: unknown): InstallRecord | undefined {
+  let inspected: unknown;
+  try {
+    inspected = JSON.parse(inspectJsonText ?? "");
+  } catch {
+    // Older OpenClaw may not support inspect; use its config record below.
+  }
+  const inspectRecord = inspected && typeof inspected === "object" && !Array.isArray(inspected)
+    ? asInstallRecord((inspected as Record<string, unknown>).install)
+    : undefined;
+  if (inspectRecord) return inspectRecord;
+  const config = openclawConfig && typeof openclawConfig === "object" && !Array.isArray(openclawConfig)
+    ? openclawConfig as { plugins?: { installs?: Record<string, unknown> } }
+    : undefined;
+  return asInstallRecord(config?.plugins?.installs?.["multi-clawd"]);
+}
+
+export function classifyInstallSource(record: InstallRecord | undefined):
+  { level: "ok" | "warn" | "note"; text: string } | undefined {
+  switch (record?.source) {
+    case "clawhub":
+      return {
+        level: "ok",
+        text: `install source: ClawHub${record.version ? ` v${record.version}` : ""}${record.clawhubChannel ? ` (${record.clawhubChannel} channel)` : ""}`,
+      };
+    case "npm":
+      return {
+        level: "warn",
+        text: "install source: npm — OpenClaw shows an untrusted-source caution for npm installs. Fix: multi-clawd update moves it to ClawHub",
+      };
+    case "path":
+    case "archive":
+    case "git":
+    case "marketplace":
+      return { level: "note", text: `install source: ${record.source} (source/dev install)` };
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Version skew between the two halves of an install.
  *
@@ -126,8 +212,7 @@ export function registryCacheIsFresh(
  * Whether the INSTALLED PLUGIN is behind what npm publishes, and what to say.
  *
  * This exists because of a trap found on 1 Aug 2026: our installer pins the
- * plugin (`plugins install --pin --force`, correctly — OpenClaw's own security
- * audit raises a HIGH finding for unpinned install specs), and OpenClaw then
+ * plugin to a version (now via clawhub:pkg@version, with npm --pin as fallback), and OpenClaw then
  * resolves registry metadata FOR THE PINNED SPEC. `openclaw plugins update
  * --all` therefore compares 1.6.0 against 1.6.0, reports "multi-clawd is up to
  * date (1.6.0)" and returns — while 1.7.1 sat on npm. OpenClaw has an honest
@@ -166,7 +251,7 @@ export function formatUpdateBanner(opts: {
   const action = decideUpdateAction(opts);
   switch (action) {
     case "install":
-      return `not installed — latest is v${opts.latest}`;
+      return opts.latest ? `not installed — latest is v${opts.latest}` : "not installed — could not determine the latest version";
     case "update":
       return `update available: v${opts.installed} → v${opts.latest}`;
     case "up-to-date":
