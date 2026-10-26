@@ -366,12 +366,31 @@ Prefer the raw form?
 
 ```bash
 openclaw plugins install clawhub:@drakon-systems/multi-clawd
-openclaw gateway restart
+# Only after a successful install, and with operator approval:
+# openclaw gateway restart
 ```
 
 Either way the gateway pulls the prebuilt package — no clone, no build step,
 nothing to keep in sync. ClawHub is the source OpenClaw trusts; npm installs show a source caution.
-For older OpenClaw or a ClawHub failure, use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+For existing installs, prefer the guarded `multi-clawd update` command rather than a raw source retry.
+
+**Raw-install fallback boundary:** use npm only after positively identifying a
+ClawHub availability failure (for example, package/version not found or registry
+unreachable), or an older OpenClaw CLI explicitly rejecting the `clawhub:` spec
+as unsupported. An old CLI version alone is not evidence of that incompatibility.
+**Stop; do not retry through npm** for moderation, security, integrity, trust,
+signature or policy failures, unknown errors, cancellation or interruption.
+These stops take precedence even if availability diagnostics appeared first.
+If the cause is unclear, stop and investigate; do not switch sources or restart
+the gateway after a failed or interrupted install.
+
+Only after the availability/unsupported-spec check above, an unversioned fresh
+install may use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+For a versioned install, retain the same selected exact target: if ClawHub was
+`clawhub:@drakon-systems/multi-clawd@X.Y.Z`, the permitted npm retry is
+`openclaw plugins install @drakon-systems/multi-clawd@X.Y.Z --pin`.
+Replace `X.Y.Z` with that same exact version; never drop it, re-resolve latest,
+or substitute a different version during fallback.
 An unversioned ClawHub spec follows newer releases; add `@X.Y.Z` to keep a specific release.
 `openclaw` itself is a *peer*
 dependency (the host provides it), so the install stays lean.
