@@ -223,7 +223,25 @@ openclaw plugins install clawhub:@drakon-systems/multi-clawd
 npx @drakon-systems/multi-clawd doctor --probe
 ```
 ClawHub is the source OpenClaw trusts; npm installs show a source caution.
-If ClawHub fails, use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+For existing installs, prefer the guarded `multi-clawd update` command rather than a raw source retry.
+
+**Raw-install fallback boundary:** use npm only after positively identifying a
+ClawHub availability failure (for example, package/version not found or registry
+unreachable), or an older OpenClaw CLI explicitly rejecting the `clawhub:` spec
+as unsupported. An old CLI version alone is not evidence of that incompatibility.
+**Stop; do not retry through npm** for moderation, security, integrity, trust,
+signature or policy failures, unknown errors, cancellation or interruption.
+These stops take precedence even if availability diagnostics appeared first.
+If the cause is unclear, stop and investigate; do not switch sources or restart
+the gateway after a failed or interrupted install.
+
+Only after the availability/unsupported-spec check above, an unversioned fresh
+install may use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+For a versioned install, retain the same selected exact target: if ClawHub was
+`clawhub:@drakon-systems/multi-clawd@X.Y.Z`, the permitted npm retry is
+`openclaw plugins install @drakon-systems/multi-clawd@X.Y.Z --pin`.
+Replace `X.Y.Z` with that same exact version; never drop it, re-resolve latest,
+or substitute a different version during fallback.
 A host moving from a path-installed `multi-clawd` to the registry package
 first removes the path install through OpenClaw's plugin uninstall command.
 Plugin identity is keyed by the manifest `id` (`multi-clawd`), independent of
