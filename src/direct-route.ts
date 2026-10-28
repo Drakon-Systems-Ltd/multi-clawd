@@ -19,7 +19,7 @@
  * as it did before this module existed.
  */
 import { isSecretRefShape, type SecretRefShape } from "./token-resolution.js";
-import type { HealthVerdict, PoolStrategy } from "./health.js";
+import { headroomBefore, type HealthVerdict, type PoolStrategy } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
 import { spreadBefore } from "./spread.js";
 
@@ -219,7 +219,8 @@ export function collectDirectMembers(
 
 /**
  * Rank for the order behind the chosen first profile. An account that can
- * serve comes before one near its limit; an exhausted account still
+ * serve comes before one near its limit; near-limit accounts go most headroom
+ * first (#93); an exhausted account still
  * authenticates and so outranks a rejected login. Every managed profile stays
  * in the order: OpenClaw never tries a stored profile that an explicit order
  * omits, so dropping an exhausted account would remove the last resort too.
@@ -260,7 +261,7 @@ export interface DirectOrderPlan {
  * relative order — the plugin rearranges its own accounts and nothing else.
  */
 export function planDirectOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; servedInWindow?: number; lastServedAt?: number; disabled?: boolean }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; utilization?: number; servedInWindow?: number; lastServedAt?: number; disabled?: boolean }>;
   currentOrder?: readonly string[];
   sticky?: StickyEntry;
   nowMs: number;
@@ -271,7 +272,7 @@ export function planDirectOrder(params: {
   if (params.members.length === 0) return undefined;
   if (members.length === 0) throw new Error("pool.accounts[].disabled: every direct member is disabled");
   const decision = decideStickySelection({
-    verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict, sevenDayResetsAt: m.sevenDayResetsAt, servedInWindow: m.servedInWindow, lastServedAt: m.lastServedAt })),
+    verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict, sevenDayResetsAt: m.sevenDayResetsAt, utilization: m.utilization, servedInWindow: m.servedInWindow, lastServedAt: m.lastServedAt })),
     sticky: params.sticky,
     nowMs: params.nowMs,
     minDwellMs: params.minDwellMs,
@@ -289,6 +290,11 @@ export function planDirectOrder(params: {
       // route's fallback order agrees with the CLI pool's placement.
       (params.strategy === "spread" && VERDICT_RANK[a.m.verdict] === 0
         ? (spreadBefore(a.m, b.m) ? -1 : spreadBefore(b.m, a.m) ? 1 : 0)
+        : 0) ||
+      // Near-limit members most headroom first (#93), in every strategy, so
+      // the in-turn fallback lands on the fullest account last.
+      (a.m.verdict === "near_limit" && b.m.verdict === "near_limit"
+        ? (headroomBefore(a.m, b.m) ? -1 : headroomBefore(b.m, a.m) ? 1 : 0)
         : 0) || a.index - b.index)
     .map(({ m }) => m.profileId);
   const managed = new Set(params.members.map((m) => m.profileId));

@@ -6,6 +6,18 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Changed
+- When no healthy pool account is left but some are near their limit, the
+  launch goes to the near-limit account with the most headroom instead of the
+  first one in pool order. Each health verdict now carries the highest fresh
+  in-window utilization (the newer of the stream and usage-poll records per
+  window); among near-limit accounts the lowest figure wins, equal figures
+  keep pool order, an account with a figure outranks one without, and two
+  without keep pool order. Healthy and `no_data` ordering, exhausted and
+  credential-failed handling, session affinity and every strategy's own rule
+  are unchanged; the direct Anthropic route orders near-limit profiles the
+  same way; `explain` says "all near limit, picked X at N%". (#93)
+
 ## [2.5.0] - 2026-10-28
 
 First published release since 2.4.0: 2.4.1 was prepared but never published,

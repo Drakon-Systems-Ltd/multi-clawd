@@ -339,7 +339,7 @@ function sameOrder(a: readonly string[] | null | undefined, b: readonly string[]
  * never takes a profile out of rotation that OpenClaw would have tried.
  */
 export function planAgentOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; servedInWindow?: number; lastServedAt?: number; disabled?: boolean }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; utilization?: number; servedInWindow?: number; lastServedAt?: number; disabled?: boolean }>;
   snapshot: DirectRouteSnapshot;
   configOrder?: readonly string[];
   sticky?: StickyEntry;
@@ -421,11 +421,13 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
           : undefined;
         const verdicts = deps.members.map((m) => {
           const state = deps.readHealth(m.accountId);
+          const health = classifyAccountHealth(state, deps.healthOptions, nowMs);
           return {
             accountId: m.accountId,
             profileId: m.profileId,
             disabled: m.disabled,
-            verdict: classifyAccountHealth(state, deps.healthOptions, nowMs).verdict,
+            verdict: health.verdict,
+            utilization: health.utilization,
             sevenDayResetsAt: deps.strategy === "reset-aware"
               ? sevenDayReset(state, deps.healthOptions, nowMs)
               : undefined,

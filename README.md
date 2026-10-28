@@ -633,7 +633,14 @@ a gateway reload. A turn already admitted or running continues on its selected
 account; the command does not interrupt it.
 
 `pool.strategy` defaults to `"ordered"`, which retains the configured account
-order. Set it to `"reset-aware"` to use healthy weekly quota before its
+order. In every strategy, when no `ok` or `no_data` account is left but some
+are near their limit, the launch goes to the near-limit account with the most
+headroom: the lowest fresh utilization, taking the newer of the stream and
+usage-poll records for each window. Equal figures keep pool order, an account
+with a figure outranks one without, and two without keep pool order.
+Exhausted and credential-failed accounts are never chosen. `explain` says
+"all near limit, picked X at N%" and the direct Anthropic route orders its
+near-limit profiles the same way. Set it to `"reset-aware"` to use healthy weekly quota before its
 `seven_day` window resets: among `ok` accounts with live seven-day reset data,
 the soonest reset wins. Accounts without that data follow in pool order;
 near-limit or exhausted accounts never outrank a healthy one. Equal reset
@@ -687,6 +694,7 @@ How it decides, per launch (all data from each account's live
 | `allowed_warning` and **no** number, on a short window | skipped (v1.7.2) — see below |
 | `allowed_warning` and no number, on the weekly window | still used — weekly warns from ~30% and would flap |
 | no data / stale data | used — never rotate on missing evidence |
+| every usable account near its limit | the near-limit account with the most headroom (lowest fresh utilization) serves; equal figures and accounts without a number keep pool order |
 | whole pool exhausted | home account anyway → real limit error → your chain drops provider |
 
 **Why the short-window rule exists (v1.7.2).** (v1.10's live usage poll now

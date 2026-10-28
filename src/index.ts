@@ -1627,6 +1627,8 @@ export function registerPoolBackend(
       id: v.id,
       verdict: v.health.verdict,
       observedAt: v.health.observedAt,
+      // #93: among near-limit members the one with the most headroom serves.
+      utilization: v.health.utilization,
       sevenDayResetsAt: strategy === "reset-aware"
         ? sevenDayReset(states.find((s) => s.id === v.id)?.state, options, now)
         : undefined,

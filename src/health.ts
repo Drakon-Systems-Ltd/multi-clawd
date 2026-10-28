@@ -15,6 +15,9 @@
  *   for a percentage that never comes.
  * - A fully exhausted pool returns no choice: the hook then stays silent and
  *   OpenClaw's reactive chain drops to the next provider (OpenAI → xAI).
+ * - When nothing usable is left but near-limit members, the one with the most
+ *   headroom (lowest fresh utilization) serves, so a pool that is near its
+ *   limit everywhere runs out of the fullest account last, not first (#93).
  */
 import { modelWindowApplies, modelWindowKey, type AccountHealthState } from "./shim-core.js";
 import { spreadBefore } from "./spread.js";
@@ -38,6 +41,17 @@ export interface AccountHealth {
    */
   observedAt?: number;
   reason?: string;
+  /**
+   * Highest fresh utilization across the account's quota windows (#93). Per
+   * logical window the newer of the shim's stream record and the usage poll's
+   * `usage:` record is the one that counts, so a stale 99% does not outrank a
+   * fresh 86% for the same window. Carries the same freshness rules as the
+   * near-limit decision (passed resets void, reset-less records age out,
+   * spill-over counts only when `rotateOnOverage` is set). Present on `ok`
+   * and `near_limit` verdicts that rest on at least one number; absent means
+   * no usable number, never zero.
+   */
+  utilization?: number;
   /**
    * Set when paid spill-over is nearly spent but real quota is not, i.e. the
    * one case where the pool has deliberately NOT acted and the answer belongs
@@ -196,6 +210,15 @@ export function isOverageWindow(window: string): boolean {
 }
 
 /** Day/week/month-scale quota windows use the optional weekly threshold. */
+/**
+ * The window a record describes regardless of which source wrote it: the
+ * usage poll keys its records `usage:<window>` beside the shim's `<window>`
+ * so the two never overwrite each other, and the two describe one limit.
+ */
+export function logicalWindowKey(window: string): string {
+  return window.startsWith("usage:") ? window.slice("usage:".length) : window;
+}
+
 export function isLongQuotaWindow(window: string): boolean {
   return /(^|_)(days?|weeks?|months?)(_|$)/.test(window) && !isOverageWindow(window);
 }
@@ -392,6 +415,10 @@ export function classifyAccountHealth(
   // and on the real-quota windows, so the advisory can quote both (#14).
   let overageUtilization: number | undefined;
   let quotaUtilization: number | undefined;
+  // Freshest numbered record per logical window (`usage:seven_day` and
+  // `seven_day` are the same window from two sources), for the headroom
+  // figure selection ranks near-limit members by (#93).
+  const freshestByWindow = new Map<string, { utilization: number; seenAt: number }>();
   for (const [window, w] of Object.entries(state.windows)) {
     const resetMs = typeof w.resetsAt === "number" ? w.resetsAt * 1000 : undefined;
     // Reset-bearing = carries a still-future reset. Trusted until that reset
@@ -560,6 +587,15 @@ export function classifyAccountHealth(
     if (!isOverageWindow(window) && typeof w.utilization === "number") {
       quotaUtilization = Math.max(quotaUtilization ?? 0, w.utilization);
     }
+    if (
+      typeof w.utilization === "number" &&
+      (resetBearing || resetMs === undefined) &&
+      (!isOverageWindow(window) || options.rotateOnOverage)
+    ) {
+      const logical = logicalWindowKey(window);
+      const seen = freshestByWindow.get(logical);
+      if (!seen || w.seenAt > seen.seenAt) freshestByWindow.set(logical, { utilization: w.utilization, seenAt: w.seenAt });
+    }
     // Numberless warning on a short window: the only signal the 5-hour session
     // limit ever gives before it bites. Deliberately narrow —
     // - short windows only: the weekly warns from ~0.3 and would flap;
@@ -583,6 +619,11 @@ export function classifyAccountHealth(
   // No live reset-bearing window and every reset-less window is stale: nothing
   // to act on. Treated as healthy — we only ever rotate on positive evidence.
   if (worst.verdict === "ok" && !hasLiveEvidence) return { verdict: "no_data" };
+  let utilization: number | undefined;
+  for (const { utilization: u } of freshestByWindow.values()) {
+    utilization = utilization === undefined ? u : Math.max(utilization, u);
+  }
+  if (utilization !== undefined) worst = { ...worst, utilization };
   // Ask only when the answer would actually change something: spill-over is
   // nearly spent AND real quota is not, so the pool is staying put on a
   // judgement the owner may want made differently. If real quota is also over
@@ -650,6 +691,12 @@ export interface PoolVerdict {
   sevenDayResetsAt?: number;
   /** When the evidence behind an `exhausted` verdict was observed (epoch ms). */
   observedAt?: number;
+  /**
+   * Highest fresh in-window utilization (#93), from `AccountHealth.utilization`.
+   * Only read among `near_limit` members, where the lowest serves; absent means
+   * the member carries no usable number and keeps pool order behind those that do.
+   */
+  utilization?: number;
   /** Spread strategy (#92): `served` launches inside the recent window. Absent = never served. */
   servedInWindow?: number;
   /** Spread strategy (#92): epoch ms of the newest served launch inside the window. */
@@ -676,7 +723,9 @@ export function sevenDayReset(state: AccountHealthState | undefined, options: He
  * spread mode (#92) places the launch on the usable (`ok` or `no_data`)
  * member with the fewest recent served launches, least recently served
  * first on a tie, pool order on a full tie — and without any usable member
- * answers exactly as ordered does. No mode chooses exhausted or
+ * answers exactly as ordered does. With no usable member in any mode, the
+ * near-limit member with the most headroom serves (#93, see
+ * `nearLimitWithMostHeadroom`). No mode chooses exhausted or
  * credential-broken members. Undefined when nothing is usable — the caller
  * must not override anything then.
  *
@@ -711,7 +760,39 @@ export function choosePoolAccount(pool: PoolVerdict[], strategy: PoolStrategy = 
   }
   const usable = pool.find((a) => a.verdict === "ok" || a.verdict === "no_data");
   if (usable) return usable.id;
-  return pool.find((a) => a.verdict === "near_limit")?.id;
+  return nearLimitWithMostHeadroom(pool)?.id;
+}
+
+/**
+ * Strict "a has more headroom than b" among near-limit members (#93). A lower
+ * fresh utilization wins; a member with a number outranks one without, since
+ * unknown headroom is not demonstrably more than known headroom; equal
+ * numbers and two unknowns return false, which keeps pool order.
+ */
+export function headroomBefore(
+  a: Pick<PoolVerdict, "utilization">,
+  b: Pick<PoolVerdict, "utilization">,
+): boolean {
+  if (a.utilization === undefined) return false;
+  if (b.utilization === undefined) return true;
+  return a.utilization < b.utilization;
+}
+
+/**
+ * The near-limit member to spend a launch on when nothing usable is left (#93).
+ * Used to be the first near-limit member in pool order, which could land every
+ * launch on an account at 99% while a sibling sat at 86%; the sibling's
+ * headroom is the whole point of having it. Lowest fresh utilization first,
+ * then members without a number, pool order within a tie. Never an exhausted
+ * or credential-broken member: undefined when no member is near-limit.
+ */
+export function nearLimitWithMostHeadroom(pool: readonly PoolVerdict[]): PoolVerdict | undefined {
+  let best: PoolVerdict | undefined;
+  for (const member of pool) {
+    if (member.verdict !== "near_limit") continue;
+    if (!best || headroomBefore(member, best)) best = member;
+  }
+  return best;
 }
 
 /**
