@@ -6,6 +6,11 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-28
+
+First published release since 2.4.0: 2.4.1 was prepared but never published,
+so its entries below also ship in 2.5.0.
+
 ### Fixed
 - A model limit the shim cannot retry (no healthy sibling, the in-turn retry
   window has closed, the launch was never retry-eligible, or the sibling it
@@ -40,7 +45,7 @@ versioning from v1.0.
 - Stale takeover holds the observed lock file open through validation and
   removal; the final identity check and removal are not atomic. (#69)
 
-## [2.4.1] - 2026-10-22
+## [2.4.1] - 2026-10-22 (not published; shipped in 2.5.0)
 
 ### Fixed
 - The shim tells a transient provider error (529 overload, 5xx, throttle 429
