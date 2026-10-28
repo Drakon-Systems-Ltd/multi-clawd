@@ -175,7 +175,13 @@ and injects the login env of the first usable one:
 - `rejected` + future `resetsAt` → **exhausted**, skipped (auto-unbinds when
   the reset passes — the home account reclaims the pool with no timer).
 - any window `utilization >= utilizationThreshold` (default 0.85) →
-  **near_limit**, skipped while a healthier account exists.
+  **near_limit**, skipped while a healthier account exists. When only
+  near-limit accounts remain, the one with the most headroom serves (#93):
+  each verdict carries the highest fresh utilization across its windows,
+  taking the newer of the stream and usage-poll records per window; the lowest
+  figure wins, equal figures keep pool order, a figure outranks no figure.
+  Used to be the first near-limit account in pool order, which could run the
+  account at 99% out while a sibling at 86% sat idle.
 - `allowed_warning` alone does NOT rotate: the seven-day window warns at 0.3
   utilization in practice; only the utilization number is trusted.
 - missing/stale health (default > 6 h) → **no_data**, treated as healthy:
@@ -621,7 +627,8 @@ stored order in pool-health order:
   Home comes first. The pool rotates away on `near_limit`/`exhausted` while a
   healthier account exists, waits `minDwellMs` before returning home, and health
   beats stickiness. Both transports lean on the same account at the same moment.
-- **The rest, by rank:** usable, then near-limit, then exhausted, then rejected
+- **The rest, by rank:** usable, then near-limit (most headroom first, #93),
+  then exhausted, then rejected
   login, with ties in pool order. **Every managed profile stays in the order.**
   OpenClaw never tries an omitted profile, so dropping an exhausted account
   would also remove the last resort.

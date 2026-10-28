@@ -46,7 +46,14 @@ export interface ExplainModel {
   accounts: ExplainAccount[];
   pool?: ExplainPool;
   chain?: { primary?: string; fallbacks?: string[] };
-  health: Array<{ id: string; verdict: string; detail?: string; usage?: ExplainUsage[] }>;
+  health: Array<{
+    id: string;
+    verdict: string;
+    detail?: string;
+    usage?: ExplainUsage[];
+    /** `AccountHealth.utilization` (#93): the headroom figure near-limit picks rest on. */
+    utilization?: number;
+  }>;
   stickyAccount?: string;
   stickyEntry?: StickyEntry;
   /** Clock for usage reset countdowns; defaults to Date.now() at render time. */
@@ -260,6 +267,7 @@ export function renderExplanation(model: ExplainModel): string {
         return {
           id,
           verdict: h?.verdict as PoolVerdict["verdict"] ?? "no_data",
+          utilization: h?.utilization,
           sevenDayResetsAt: (h?.usage?.find((u) => u.window === "usage:seven_day" && u.resetsAt !== undefined && u.resetsAt > nowMs)
             ?? h?.usage?.find((u) => u.window === "seven_day" && u.resetsAt !== undefined && u.resetsAt > nowMs))?.resetsAt,
         };
@@ -271,7 +279,8 @@ export function renderExplanation(model: ExplainModel): string {
         const picked = verdicts.find((v) => v.id === decision.account);
         let reason: string;
         if (preferred && decision.account !== preferred) reason = "sticky dwell keeps this usable account";
-        else if (strategy === "ordered") reason = picked?.verdict === "near_limit" ? "first near-limit member in pool order" : "first healthy member in pool order";
+        else if (picked?.verdict === "near_limit") reason = describeNearLimitPick(verdicts, picked);
+        else if (strategy === "ordered") reason = "first healthy member in pool order";
         else if (strategy === "spread") reason = picked && (picked.verdict === "ok" || picked.verdict === "no_data") ? describeSpreadPick(picked, windowMs) : "no healthy member; using the existing fallback";
         else if (picked?.verdict === "ok" && picked.sevenDayResetsAt !== undefined) reason = `seven-day window resets soonest (in ${relativeUntil(picked.sevenDayResetsAt, nowMs)})`;
         else if (picked?.verdict === "ok") reason = "first healthy member without live seven-day reset data";
@@ -297,6 +306,30 @@ export function renderExplanation(model: ExplainModel): string {
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * Why a near-limit member was picked (#93): no usable member is left, so the
+ * launch goes to the near-limit member with the most headroom. Says whether
+ * every member is near its limit, the figure the pick rests on, and — when
+ * the pick carries no number — that pool order decided.
+ */
+export function describeNearLimitPick(
+  verdicts: readonly PoolVerdict[],
+  picked: PoolVerdict,
+): string {
+  const nearLimit = verdicts.filter((v) => v.verdict === "near_limit");
+  const scope = nearLimit.length === verdicts.length ? "all near limit" : "no healthy member, the rest near limit";
+  const others = nearLimit.filter((v) => v.id !== picked.id);
+  if (picked.utilization === undefined) {
+    return `${scope}, picked ${picked.id} (no utilization number; pool order)`;
+  }
+  const pct = `${Math.round(picked.utilization * 100)}%`;
+  if (others.length === 0) return `${scope}, picked ${picked.id} at ${pct}`;
+  const shown = others
+    .map((v) => `${v.id} ${v.utilization === undefined ? "no number" : `${Math.round(v.utilization * 100)}%`}`)
+    .join(", ");
+  return `${scope}, picked ${picked.id} at ${pct} — most headroom (${shown})`;
 }
 
 /**

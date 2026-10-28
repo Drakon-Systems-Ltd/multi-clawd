@@ -48,7 +48,7 @@ export function describeDirectSource(member: DirectMember): string {
 export interface DirectStatus {
   agentId: string;
   explain: ExplainDirect;
-  verdicts: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; disabled?: boolean }>;
+  verdicts: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; utilization?: number; disabled?: boolean }>;
   /** The order the gateway loop would write now; undefined = already in force. */
   pendingOrder?: string[];
   unusable: UnusableProfile[];
@@ -85,11 +85,13 @@ export async function gatherDirectStatus(params: {
     : undefined;
   const verdicts = members.map((m) => {
     const state = params.readHealth(m.accountId);
+    const health = classifyAccountHealth(state, params.healthOptions, params.nowMs);
     return {
       accountId: m.accountId,
       profileId: m.profileId,
       disabled: m.disabled,
-      verdict: classifyAccountHealth(state, params.healthOptions, params.nowMs).verdict,
+      verdict: health.verdict,
+      utilization: health.utilization,
       sevenDayResetsAt: params.strategy === "reset-aware"
         ? sevenDayReset(state, params.healthOptions, params.nowMs)
         : undefined,

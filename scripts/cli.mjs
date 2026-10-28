@@ -749,7 +749,8 @@ async function explain(args = []) {
       weeklyUtilizationThreshold: pool?.weeklyUtilizationThreshold,
       staleAfterMs: pool?.staleAfterMs,
     }, now);
-    return { id: a.id, verdict: h.verdict, detail, usage };
+    // #93: the headroom figure the pool ranks near-limit members by.
+    return { id: a.id, verdict: h.verdict, detail, usage, utilization: h.utilization };
   });
   let stickyAccount;
   let stickyEntry;
@@ -864,13 +865,14 @@ async function usageCommand(args) {
     const h = health.classifyAccountHealth(state, healthOptions, now);
     row.verdict = h.verdict;
     row.reason = h.reason;
+    if (h.utilization !== undefined) row.utilization = h.utilization;
     if (pool?.strategy === "reset-aware") resetById.set(a.id, health.sevenDayReset(state, healthOptions, now));
     rows.push(row);
   }
   let next;
   if (pool) {
     const verdicts = pool.accounts.filter((id) => !accounts.find((a) => a.id === id)?.disabled).map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data",
-      sevenDayResetsAt: resetById.get(id) }));
+      utilization: rows.find((r) => r.id === id)?.utilization, sevenDayResetsAt: resetById.get(id) }));
     if (pool.strategy === "reset-aware" || pool.strategy === "spread") {
       const stickySelection = await import(resolve(__dirname, "..", "dist", "sticky.js"));
       let sticky;

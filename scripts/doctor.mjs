@@ -635,7 +635,8 @@ else {
     };
     const rawVerdicts = members.map((id) => {
       const state = readJson(join(STATE_DIR, `${id}.json`));
-      return { id, verdict: classifyAccountHealth(state, healthOptions, now).verdict,
+      const health = classifyAccountHealth(state, healthOptions, now);
+      return { id, verdict: health.verdict, utilization: health.utilization,
         sevenDayResetsAt: pool.strategy === "reset-aware" ? sevenDayReset(state, healthOptions, now) : undefined };
     });
     const verdicts = pool.strategy === "spread"
