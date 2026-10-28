@@ -398,7 +398,12 @@ const {
 const { decideStickySelection } = await importDist("sticky.js", ["decideStickySelection"]);
 // #92: the spread strategy ranks by the shim's served-launch journal; doctor
 // re-reads the same file with the same window so its answer is the launch's.
-const { readHistory, HISTORY_FILE } = await importDist("history.js", ["readHistory", "HISTORY_FILE"]);
+// `required` names must be functions: HISTORY_FILE is a string, so it is
+// read off the module rather than listed, or the fallback would reject both
+// candidates and an install that predates history.js would fail doctor.
+const historyModule = await importDist("history.js", ["readHistory"]);
+const readHistory = historyModule.readHistory;
+const HISTORY_FILE = typeof historyModule.HISTORY_FILE === "string" ? historyModule.HISTORY_FILE : "history.jsonl";
 const { spreadStatsFromHistory, spreadWindowMs, withSpreadStats, describeWindow } = await importDist(
   "spread.js", ["spreadStatsFromHistory", "spreadWindowMs", "withSpreadStats", "describeWindow"],
 );
