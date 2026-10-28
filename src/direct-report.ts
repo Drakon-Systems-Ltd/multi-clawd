@@ -7,6 +7,8 @@
  * plugin config. Secret references are described by provider name only.
  */
 import { classifyAccountHealth, sevenDayReset, type HealthOptions, type HealthVerdict, type PoolStrategy } from "./health.js";
+import type { HistoryEvent } from "./history.js";
+import { spreadStatsFor, spreadStatsFromHistory, spreadWindowMs } from "./spread.js";
 import type { AccountHealthState } from "./shim-core.js";
 import {
   DIRECT_PROVIDER,
@@ -68,6 +70,9 @@ export async function gatherDirectStatus(params: {
   sticky?: StickyEntry;
   minDwellMs?: number;
   strategy?: PoolStrategy;
+  /** Spread strategy (#92): the served-launch journal behind the placement shown. */
+  readHistory?: () => readonly HistoryEvent[];
+  spreadWindowMs?: number;
   nowMs: number;
   /** Skip `models status --json` (a few seconds) when cooldowns are not needed. */
   skipCooldowns?: boolean;
@@ -75,6 +80,9 @@ export async function gatherDirectStatus(params: {
   const { members, problems } = collectDirectMembers(params.accounts, params.poolAccounts ?? []);
   if (members.length === 0 && problems.length === 0) return undefined;
   const errors: string[] = [];
+  const spread = params.strategy === "spread"
+    ? spreadStatsFromHistory(params.readHistory?.() ?? [], params.nowMs, spreadWindowMs(params.spreadWindowMs))
+    : undefined;
   const verdicts = members.map((m) => {
     const state = params.readHealth(m.accountId);
     return {
@@ -85,6 +93,7 @@ export async function gatherDirectStatus(params: {
       sevenDayResetsAt: params.strategy === "reset-aware"
         ? sevenDayReset(state, params.healthOptions, params.nowMs)
         : undefined,
+      ...(spread ? spreadStatsFor(spread, m.accountId) : {}),
     };
   });
 

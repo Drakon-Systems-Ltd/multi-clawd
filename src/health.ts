@@ -17,6 +17,7 @@
  *   OpenClaw's reactive chain drops to the next provider (OpenAI → xAI).
  */
 import { modelWindowApplies, modelWindowKey, type AccountHealthState } from "./shim-core.js";
+import { spreadBefore } from "./spread.js";
 
 export type HealthVerdict =
   | "ok"
@@ -649,13 +650,17 @@ export interface PoolVerdict {
   sevenDayResetsAt?: number;
   /** When the evidence behind an `exhausted` verdict was observed (epoch ms). */
   observedAt?: number;
+  /** Spread strategy (#92): `served` launches inside the recent window. Absent = never served. */
+  servedInWindow?: number;
+  /** Spread strategy (#92): epoch ms of the newest served launch inside the window. */
+  lastServedAt?: number;
 }
 
-export type PoolStrategy = "ordered" | "reset-aware";
+export type PoolStrategy = "ordered" | "reset-aware" | "spread";
 
 /** The manifest rejects invalid values; this guard also protects direct callers. */
 export function poolStrategy(value: unknown): PoolStrategy {
-  return value === "reset-aware" ? "reset-aware" : "ordered";
+  return value === "reset-aware" || value === "spread" ? value : "ordered";
 }
 
 export function sevenDayReset(state: AccountHealthState | undefined, options: HealthOptions, nowMs: number): number | undefined {
@@ -667,10 +672,13 @@ export function sevenDayReset(state: AccountHealthState | undefined, options: He
 /**
  * Pick the account that should serve the next turn. Ordered mode keeps the
  * original pool-order choice byte-for-byte; reset-aware mode orders `ok`
- * members by their live weekly reset before no-data and near-limit members.
- * Neither mode chooses exhausted or credential-broken members. Undefined
- * when nothing is usable — the caller must not
- * override anything then.
+ * members by their live weekly reset before no-data and near-limit members;
+ * spread mode (#92) places the launch on the usable (`ok` or `no_data`)
+ * member with the fewest recent served launches, least recently served
+ * first on a tie, pool order on a full tie — and without any usable member
+ * answers exactly as ordered does. No mode chooses exhausted or
+ * credential-broken members. Undefined when nothing is usable — the caller
+ * must not override anything then.
  *
  * `credential_failed` is unusable in the strongest sense: an exhausted account
  * would at least authenticate, so it stays behind near-limit as a last resort,
@@ -690,6 +698,16 @@ export function choosePoolAccount(pool: PoolVerdict[], strategy: PoolStrategy = 
     // Only an `ok` member with a live weekly reset can outrank pool order.
     // Without one, reset-aware answers exactly as ordered does.
     if (best?.sevenDayResetsAt !== undefined) return best.id;
+  }
+  if (strategy === "spread") {
+    // Near-limit members are never spread onto: placing a fresh session on
+    // an account about to hand over would only move the queue there.
+    let best: PoolVerdict | undefined;
+    for (const member of pool) {
+      if (member.verdict !== "ok" && member.verdict !== "no_data") continue;
+      if (!best || spreadBefore(member, best)) best = member;
+    }
+    if (best) return best.id;
   }
   const usable = pool.find((a) => a.verdict === "ok" || a.verdict === "no_data");
   if (usable) return usable.id;

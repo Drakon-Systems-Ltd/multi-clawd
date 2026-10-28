@@ -7,7 +7,7 @@
  *
  * The one hard rule: HEALTH BEATS STICKINESS. In ordered mode dwell delays
  * returning home; in reset-aware mode it delays switching to a newly preferred
- * healthy account. It never keeps
+ * healthy account; spread mode has no dwell at all (#92). It never keeps
  * a launch on an account that is near-limit or exhausted while a healthier
  * account exists.
  */
@@ -46,6 +46,11 @@ export function decideStickySelection(params: {
   // that includes a re-probe of an overdue rejection (#26): it is a question,
   // not a rotation, and if the answer is no there is nothing to dwell on.
   if (!healthChoice) return { account: fallbackPoolAccount(verdicts, nowMs) };
+
+  // Spread (#92) places each launch on its own evidence; there is no home to
+  // return to and no rotation to dwell on, so no sticky entry is ever kept.
+  // A session stays where it started through session affinity, not dwell.
+  if (params.strategy === "spread") return { account: healthChoice };
 
   if (params.strategy === "reset-aware") {
     const current = sticky && verdicts.find((v) => v.id === sticky.account);

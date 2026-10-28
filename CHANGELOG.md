@@ -7,6 +7,15 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Added
+- Optional `pool.strategy: "spread"` starts each new session on the healthy
+  account with the fewest served launches in a bounded recent window
+  (`spreadWindowMs`, default one hour), least recently served first on a tie,
+  pool order on a full tie. Sessions stay on the account that first served
+  them (spread implies `sessionAffinity`); near-limit, exhausted and
+  credential-failed accounts are never chosen; `ordered` remains the default
+  and is byte-for-byte unchanged. `explain`, `usage` and `doctor` show the
+  strategy, the next placement and its reason; the direct route orders
+  profiles by the same counts. (#92)
 - Plugin updates and raw install guidance now use ClawHub first, with npm as a
   fallback only when ClawHub is unavailable; security, integrity, and policy failures stop. The chosen version is pinned on both sources. Doctor reports OpenClaw's tracked install source. (#85)
 - `multi-clawd explain --history [--since 7d]` reports bounded per-account
