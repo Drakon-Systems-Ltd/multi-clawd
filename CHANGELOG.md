@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-10-28
+
 ### Changed
 - When no healthy pool account is left but some are near their limit, the
   launch goes to the near-limit account with the most headroom instead of the
