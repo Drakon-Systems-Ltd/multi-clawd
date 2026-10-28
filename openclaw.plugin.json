@@ -1,7 +1,7 @@
 {
   "id": "multi-clawd",
   "name": "multi-clawd",
-  "version": "2.4.1",
+  "version": "2.5.0",
   "description": "Register additional Claude Code logins (Max/Pro accounts) as first-class OpenClaw CLI backends for cross-account failover, keeping the full skills/MCP harness on every account.",
   "cliBackends": [
     "claw1",
@@ -189,7 +189,7 @@
             },
             "oauthTokenRef": {
               "type": "object",
-              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers \u2014 same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
+              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers — same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
               "additionalProperties": true,
               "properties": {
                 "source": {
