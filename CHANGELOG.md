@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.4.1] - Unreleased
+
 ### Added
 - Plugin updates and raw install guidance now use ClawHub first, with npm as a
   fallback only when ClawHub is unavailable; security, integrity, and policy failures stop. The chosen version is pinned on both sources. Doctor reports OpenClaw's tracked install source. (#85)
@@ -15,14 +17,30 @@ versioning from v1.0.
 - Concurrent shims use short, stale-recovering advisory locks for per-account
   health-state writes and in-turn retry decisions. Retry choices re-read
   sibling health after earlier decisions. These locks are best effort and add
-  no request pacing; lock timeouts fail open so turns continue, and rare
-  contention can still lose an observation. (#69)
+  no request pacing; lock timeouts fail open so turns continue, and health
+  observations are no longer dropped on a timeout (see #82/#83 under Fixed).
+  (#69, #77)
 - Stale takeover holds the observed lock file open through validation and
-  removal; the final identity check and removal are not atomic. (#69)
-
-## [2.4.1] - 2026-10-22
+  removal; the final identity check and removal are not atomic. (#69, #77)
 
 ### Fixed
+- Health observations are never dropped when the per-account state lock times
+  out. A writer that cannot take the lock publishes its observation as a
+  small private pending delta file next to the health file instead of
+  skipping the write; the next lock holder merges and removes pending deltas
+  (corrupt ones are set aside, not deleted), and readers include unfolded
+  deltas so a spent window or dead login is still seen by sibling shims.
+  Snapshot replacement stays with lock holders, so journal growth is bounded
+  by contention. The turn still never waits on or fails because of the lock;
+  no process is killed and no session or data is lost. (#82, #83)
+- In-turn retries now wait for a terminal failure and the original CLI
+  process to close naturally, including cleanup after stdout ends. Retry
+  decisions no longer send SIGTERM to the original process. A later success
+  or auth failure, a notice without a terminal failure, an expired hold or
+  exceeded output cap, or no eligible sibling preserves the original attempt
+  without replay. Sibling health is re-read under the advisory decision lock
+  at close; retries remain limited to one hop. Regression fixtures verify
+  original cleanup and exit before sibling launch. (#78, #79)
 - The shim tells a transient provider error (529 overload, 5xx, throttle 429
   that is not a spent window) apart from a reactive model limit and gives it the
   same single in-turn hop to an idle sibling, without recording a rejected
