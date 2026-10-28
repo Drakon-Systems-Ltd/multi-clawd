@@ -59,11 +59,13 @@ import {
   lastAuthSuccessAt,
   overdueProbeAccount,
   pickPoolAccountForLaunch,
+  poolStrategy,
   sevenDayReset,
   type PoolStrategy,
 } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
-import { recordHistory } from "./history.js";
+import { HISTORY_FILE, readHistory, recordHistory } from "./history.js";
+import { spreadStatsFromHistory, spreadWindowMs, withSpreadStats } from "./spread.js";
 import {
   DEFAULT_SESSION_AFFINITY_TTL_MS, launchSessionId, readSessionPin, SESSION_AFFINITY_ENV,
 } from "./session-affinity.js";
@@ -1372,6 +1374,8 @@ interface PoolConfig {
   accounts?: string[];
   /** Healthy-member preference; ordered preserves the original pool order. */
   strategy?: PoolStrategy;
+  /** Spread strategy (#92): served launches inside this window count. Default 1h. */
+  spreadWindowMs?: number;
   utilizationThreshold?: number;
   weeklyUtilizationThreshold?: number;
   staleAfterMs?: number;
@@ -1451,6 +1455,15 @@ function mergeStoredHealth(
  * Returns whether anything was cleared. Best-effort: a failure to write is
  * reported by the return value, never thrown — no state file is worth a turn.
  */
+
+/**
+ * The shim's served-launch journal (#70): one file beside the per-account
+ * health state, so every member's launches are in it. Spread (#92) ranks
+ * from it; a missing or unreadable journal reads as nobody served.
+ */
+function poolHistoryFile(): string {
+  return join(homedir(), ".openclaw", "state", "multi-clawd", HISTORY_FILE);
+}
 
 function readStickyEntry(file: string): StickyEntry | undefined {
   try {
@@ -1559,6 +1572,18 @@ export function registerPoolBackend(
     defaultModel: pool.defaultModel,
   };
   const minDwellMs = pool.minDwellMs;
+  const strategy = poolStrategy(pool.strategy);
+  // Spread (#92) is a NEW-session placement: a conversation must keep the
+  // account that started it, and session affinity is the memory that makes
+  // that true. So spread switches affinity on for the pool; an explicit
+  // `false` would move every turn of every conversation and is overridden,
+  // with a warning rather than silently.
+  const affinityOn = pool.sessionAffinity === true || strategy === "spread";
+  if (strategy === "spread" && pool.sessionAffinity === false) {
+    logger.warn(
+      `[multi-clawd] pool "${poolId}": strategy "spread" keeps each session on the account that first served it — sessionAffinity: false is ignored`,
+    );
+  }
   const stickyFile = join(
     homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
   );
@@ -1598,20 +1623,24 @@ export function registerPoolBackend(
       throw new Error(`[multi-clawd] ${text}`);
     }
     const previousSticky = readStickyEntry(stickyFile);
-    const poolVerdicts = verdicts.map((v) => ({
+    const rawVerdicts = verdicts.map((v) => ({
       id: v.id,
       verdict: v.health.verdict,
       observedAt: v.health.observedAt,
-      sevenDayResetsAt: pool.strategy === "reset-aware"
+      sevenDayResetsAt: strategy === "reset-aware"
         ? sevenDayReset(states.find((s) => s.id === v.id)?.state, options, now)
         : undefined,
     }));
+    // Spread (#92): read the served-launch journal once per launch.
+    const poolVerdicts = strategy === "spread"
+      ? withSpreadStats(rawVerdicts, spreadStatsFromHistory(readHistory(poolHistoryFile()), now, spreadWindowMs(pool.spreadWindowMs)))
+      : rawVerdicts;
     const decision = decideStickySelection({
       verdicts: poolVerdicts,
       sticky: previousSticky,
       nowMs: now,
       minDwellMs,
-      strategy: pool.strategy,
+      strategy,
     });
     const chosen = members.find((a) => a.id === decision.account) ?? members[0];
     const previousAccount = previousSticky?.account ?? members[0].id;
@@ -1639,7 +1668,9 @@ export function registerPoolBackend(
         `[multi-clawd] pool ${poolId}: no proven account can serve ${requestedModel} — ` +
           `launching on ${decision.account} to re-test a login last rejected by the Claude CLI`,
       );
-    } else if (decision.account !== previousAccount) {
+    } else if (strategy !== "spread" && decision.account !== previousAccount) {
+      // Under spread a launch landing off home is a placement, not a
+      // rotation: nothing moved and nothing is coming back, so no alert.
       recordHistory(join(homedir(), ".openclaw", "state", "multi-clawd", `${previousAccount}.json`),
         { at: new Date(now).toISOString(), kind: "rotation", accountId: previousAccount,
           toAccountId: decision.account, modelId: requestedModel, reason: "pool_selection" });
@@ -1796,7 +1827,7 @@ export function registerPoolBackend(
     // written by a different member. The shim sees the session id (argv) and
     // copies the newest transcript into the launched account's dir. Paths only.
     env[SESSION_DIRS_ENV] = JSON.stringify([...new Set(configuredMembers.map(accountConfigDir))]);
-    if (pool.sessionAffinity) {
+    if (affinityOn) {
       env[SESSION_AFFINITY_ENV] = JSON.stringify({
         file: join(homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sessions.json`),
         ttlMs: typeof pool.sessionAffinityTtlMs === "number" &&
@@ -1851,7 +1882,7 @@ export function registerPoolBackend(
     // the gateway can resolve that account's reference for this launch only.
     // The shim still owns pin recording after the actual child succeeds.
     const affinityTransport: CliBackendExecuteFn | undefined =
-      pool.sessionAffinity && transport && launch.kind === "verified"
+      affinityOn && transport && launch.kind === "verified"
         ? async function* (execution) {
             const id = launchSessionId(execution.args);
             const pin = id ? readSessionPin(
@@ -2000,6 +2031,7 @@ export function startDirectOrderSync(params: {
     healthOptions,
     minDwellMs: params.pool?.minDwellMs,
     strategy: params.pool?.strategy,
+    spreadWindowMs: params.pool?.spreadWindowMs,
     command: params.directRoute?.openclawCommand,
   });
   if (directController?.signature === signature && directTimer) {
@@ -2015,6 +2047,8 @@ export function startDirectOrderSync(params: {
     healthOptions,
     minDwellMs: params.pool?.minDwellMs,
     strategy: params.pool?.strategy,
+    readHistory: () => readHistory(poolHistoryFile()),
+    spreadWindowMs: params.pool?.spreadWindowMs,
     configOrder: params.configOrder,
     readSticky: () => readStickyEntry(stickyFile),
     writeSticky: (entry) => writeStickyEntry(stickyFile, entry, logger),

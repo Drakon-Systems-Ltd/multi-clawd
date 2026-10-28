@@ -178,13 +178,14 @@ async function loadDirect(config) {
   const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
   const accounts = Array.isArray(pc.accounts) ? pc.accounts : [];
   if (!accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) return undefined;
-  let dr, ds, rep, run, shim;
+  let dr, ds, rep, run, shim, hist;
   try {
     dr = await import(resolve(__dirname, "..", "dist", "direct-route.js"));
     ds = await import(resolve(__dirname, "..", "dist", "direct-sync.js"));
     rep = await import(resolve(__dirname, "..", "dist", "direct-report.js"));
     run = await import(resolve(__dirname, "..", "dist", "openclaw-runner.js"));
     shim = await import(resolve(__dirname, "..", "dist", "shim-core.js"));
+    hist = await import(resolve(__dirname, "..", "dist", "history.js"));
   } catch (err) {
     console.error(distFailure("direct", "direct-report.js", err));
     process.exit(1);
@@ -228,6 +229,8 @@ async function loadDirect(config) {
       sticky,
       minDwellMs: pool?.minDwellMs,
       strategy: pool?.strategy,
+      readHistory: () => { try { return hist.readHistory(join(stateDir, hist.HISTORY_FILE)); } catch { return []; } },
+      spreadWindowMs: pool?.spreadWindowMs,
       nowMs: Date.now(),
       ...opts,
     });
@@ -759,6 +762,18 @@ async function explain(args = []) {
       /* no sticky state */
     }
   }
+  // #92: the spread strategy places by the served-launch journal; hand
+  // explain the same events the launch path reads so the reason shown is the
+  // reason acted on.
+  let spreadHistory;
+  if (pool?.strategy === "spread") {
+    try {
+      const hist = history ?? await import(resolve(__dirname, "..", "dist", "history.js"));
+      spreadHistory = hist.readHistory(join(stateDir, hist.HISTORY_FILE));
+    } catch {
+      /* no journal yet: every account counts as never served */
+    }
+  }
   // v1.9: the direct anthropic/* route, when any account opted in.
   let direct;
   const dctx = await loadDirect(config);
@@ -769,7 +784,7 @@ async function explain(args = []) {
   }
   console.log(`\n${BOLD}🦞 multi-clawd — your setup, in plain English${RESET}\n`);
   console.log(
-    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, stickyEntry, nowMs: now, direct }),
+    ec.renderExplanation({ accounts, pool, chain, health: healthRows, stickyAccount, stickyEntry, nowMs: now, direct, history: spreadHistory }),
   );
   console.log(`\n${DIM}(health checks: multi-clawd doctor · change things: multi-clawd setup)${RESET}`);
   if (history) {
@@ -856,11 +871,20 @@ async function usageCommand(args) {
   if (pool) {
     const verdicts = pool.accounts.filter((id) => !accounts.find((a) => a.id === id)?.disabled).map((id) => ({ id, verdict: rows.find((r) => r.id === id)?.verdict ?? "no_data",
       sevenDayResetsAt: resetById.get(id) }));
-    if (pool.strategy === "reset-aware") {
+    if (pool.strategy === "reset-aware" || pool.strategy === "spread") {
       const stickySelection = await import(resolve(__dirname, "..", "dist", "sticky.js"));
       let sticky;
       try { sticky = JSON.parse(rf(join(stateDir, `pool-${pool.id}.sticky.json`), "utf8")); } catch { /* none */ }
-      next = verdicts.length ? stickySelection.decideStickySelection({ verdicts, sticky, nowMs: now, minDwellMs: pool.minDwellMs, strategy: pool.strategy }).account : undefined;
+      let ranked = verdicts;
+      if (pool.strategy === "spread") {
+        // Same journal and window as the launch path (#92).
+        const hist = await import(resolve(__dirname, "..", "dist", "history.js"));
+        const spread = await import(resolve(__dirname, "..", "dist", "spread.js"));
+        let events = [];
+        try { events = hist.readHistory(join(stateDir, hist.HISTORY_FILE)); } catch { /* none */ }
+        ranked = spread.withSpreadStats(verdicts, spread.spreadStatsFromHistory(events, now, spread.spreadWindowMs(pool.spreadWindowMs)));
+      }
+      next = ranked.length ? stickySelection.decideStickySelection({ verdicts: ranked, sticky, nowMs: now, minDwellMs: pool.minDwellMs, strategy: pool.strategy }).account : undefined;
     } else {
       next = verdicts.length ? health.choosePoolAccount(verdicts) : undefined;
     }

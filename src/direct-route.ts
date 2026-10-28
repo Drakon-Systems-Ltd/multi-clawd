@@ -21,6 +21,7 @@
 import { isSecretRefShape, type SecretRefShape } from "./token-resolution.js";
 import type { HealthVerdict, PoolStrategy } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
+import { spreadBefore } from "./spread.js";
 
 export const DIRECT_PROVIDER = "anthropic";
 export const DIRECT_PROFILE_PREFIX = `${DIRECT_PROVIDER}:`;
@@ -259,7 +260,7 @@ export interface DirectOrderPlan {
  * relative order — the plugin rearranges its own accounts and nothing else.
  */
 export function planDirectOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; disabled?: boolean }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; servedInWindow?: number; lastServedAt?: number; disabled?: boolean }>;
   currentOrder?: readonly string[];
   sticky?: StickyEntry;
   nowMs: number;
@@ -270,7 +271,7 @@ export function planDirectOrder(params: {
   if (params.members.length === 0) return undefined;
   if (members.length === 0) throw new Error("pool.accounts[].disabled: every direct member is disabled");
   const decision = decideStickySelection({
-    verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict, sevenDayResetsAt: m.sevenDayResetsAt })),
+    verdicts: members.map((m) => ({ id: m.accountId, verdict: m.verdict, sevenDayResetsAt: m.sevenDayResetsAt, servedInWindow: m.servedInWindow, lastServedAt: m.lastServedAt })),
     sticky: params.sticky,
     nowMs: params.nowMs,
     minDwellMs: params.minDwellMs,
@@ -283,6 +284,11 @@ export function planDirectOrder(params: {
     .sort((a, b) => VERDICT_RANK[a.m.verdict] - VERDICT_RANK[b.m.verdict] ||
       (params.strategy === "reset-aware" && a.m.verdict === "ok"
         ? (a.m.sevenDayResetsAt ?? Infinity) - (b.m.sevenDayResetsAt ?? Infinity)
+        : 0) ||
+      // Spread (#92): usable members least served first, so the direct
+      // route's fallback order agrees with the CLI pool's placement.
+      (params.strategy === "spread" && VERDICT_RANK[a.m.verdict] === 0
+        ? (spreadBefore(a.m, b.m) ? -1 : spreadBefore(b.m, a.m) ? 1 : 0)
         : 0) || a.index - b.index)
     .map(({ m }) => m.profileId);
   const managed = new Set(params.members.map((m) => m.profileId));

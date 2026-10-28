@@ -396,6 +396,12 @@ const {
   "cli",
 );
 const { decideStickySelection } = await importDist("sticky.js", ["decideStickySelection"]);
+// #92: the spread strategy ranks by the shim's served-launch journal; doctor
+// re-reads the same file with the same window so its answer is the launch's.
+const { readHistory, HISTORY_FILE } = await importDist("history.js", ["readHistory", "HISTORY_FILE"]);
+const { spreadStatsFromHistory, spreadWindowMs, withSpreadStats, describeWindow } = await importDist(
+  "spread.js", ["spreadStatsFromHistory", "spreadWindowMs", "withSpreadStats", "describeWindow"],
+);
 // Keychain reads name the account the Claude CLI uses (`-a`), never just the
 // service. Token values are reduced to expiry metadata where they are read and
 // are never printed.
@@ -622,11 +628,14 @@ else {
       weeklyUtilizationThreshold: pool.weeklyUtilizationThreshold,
       rotateOnOverage: pool.rotateOnOverage,
     };
-    const verdicts = members.map((id) => {
+    const rawVerdicts = members.map((id) => {
       const state = readJson(join(STATE_DIR, `${id}.json`));
       return { id, verdict: classifyAccountHealth(state, healthOptions, now).verdict,
         sevenDayResetsAt: pool.strategy === "reset-aware" ? sevenDayReset(state, healthOptions, now) : undefined };
     });
+    const verdicts = pool.strategy === "spread"
+      ? withSpreadStats(rawVerdicts, spreadStatsFromHistory(readHistory(join(STATE_DIR, HISTORY_FILE)), now, spreadWindowMs(pool.spreadWindowMs)))
+      : rawVerdicts;
     const decision = decideStickySelection({
       verdicts,
       sticky,
@@ -639,7 +648,15 @@ else {
       identity?.status === "resolved" ? ` (${describeIdentity(identity, { raw: RAW })})` : "";
     const verdict = verdicts.find((v) => v.id === decision.account)?.verdict ?? "no_data";
     const home = members[0];
-    if (decision.account === home) {
+    if (pool.strategy === "spread") {
+      // No home under spread: a launch off the first member is a placement,
+      // not a rotation, so it is never reported as one.
+      const picked = verdicts.find((v) => v.id === decision.account);
+      ok(
+        `next new session on ${decision.account}${who} — spread, ${picked?.servedInWindow ?? 0} served in the last ${
+          describeWindow(spreadWindowMs(pool.spreadWindowMs))}, health ${verdict}; existing sessions stay on their serving account`,
+      );
+    } else if (decision.account === home) {
       ok(`serving on ${decision.account}${who} — home account, health ${verdict}`);
       if (sticky) {
         note(

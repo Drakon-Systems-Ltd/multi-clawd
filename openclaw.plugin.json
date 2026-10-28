@@ -47,9 +47,15 @@
             "type": "string",
             "enum": [
               "ordered",
-              "reset-aware"
+              "reset-aware",
+              "spread"
             ],
-            "description": "Healthy account selection: ordered (default) keeps pool order; reset-aware prefers the healthy account whose live seven-day quota window resets soonest."
+            "description": "Healthy account selection: ordered (default) keeps pool order; reset-aware prefers the healthy account whose live seven-day quota window resets soonest; spread starts each new session on the healthy account with the fewest served launches in the recent window (spreadWindowMs) and keeps sessions on their serving account (implies sessionAffinity). Near-limit, exhausted and credential-failed accounts are never chosen by any strategy."
+          },
+          "spreadWindowMs": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Spread strategy only: how far back served launches count when placing a new session. Default 3600000 (1h); clamped to 60000..604800000."
           },
           "utilizationThreshold": {
             "type": "number",
@@ -183,7 +189,7 @@
             },
             "oauthTokenRef": {
               "type": "object",
-              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers — same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
+              "description": "Secret reference resolving to this account's Claude Code setup-token via the gateway's configured secret providers \u2014 same shape as every other secret in openclaw.json, e.g. {\"source\":\"exec\",\"provider\":\"onepassword\",\"id\":\"op://Vault/Item/field\"}. Preferred over oauthTokenFile (no plaintext on disk). Resolution failures degrade the account (auth fails, chain steps) rather than crashing the launch.",
               "additionalProperties": true,
               "properties": {
                 "source": {

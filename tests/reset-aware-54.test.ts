@@ -90,7 +90,7 @@ describe("pool reset-aware strategy (#54)", () => {
   test("invalid strategy values are rejected by schema and runtime guard defaults to ordered", () => {
     const schema = JSON.parse(readFileSync(new URL("../openclaw.plugin.json", import.meta.url), "utf8"));
     const values: string[] = schema.configSchema.properties.pool.properties.strategy.enum;
-    expect(values).toEqual(["ordered", "reset-aware"]);
+    expect(values).toEqual(["ordered", "reset-aware", "spread"]);
     expect(values).not.toContain("random");
     expect(poolStrategy("random")).toBe("ordered");
   });

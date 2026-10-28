@@ -22,6 +22,8 @@
  * reaches a log.
  */
 import { classifyAccountHealth, sevenDayReset, type HealthOptions, type HealthVerdict, type PoolStrategy } from "./health.js";
+import type { HistoryEvent } from "./history.js";
+import { spreadStatsFor, spreadStatsFromHistory, spreadWindowMs } from "./spread.js";
 import type { AccountHealthState } from "./shim-core.js";
 import type { StickyEntry } from "./sticky.js";
 import { DIRECT_PROVIDER, planDirectOrder, type DirectMember } from "./direct-route.js";
@@ -337,7 +339,7 @@ function sameOrder(a: readonly string[] | null | undefined, b: readonly string[]
  * never takes a profile out of rotation that OpenClaw would have tried.
  */
 export function planAgentOrder(params: {
-  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; disabled?: boolean }>;
+  members: Array<{ accountId: string; profileId: string; verdict: HealthVerdict; sevenDayResetsAt?: number; servedInWindow?: number; lastServedAt?: number; disabled?: boolean }>;
   snapshot: DirectRouteSnapshot;
   configOrder?: readonly string[];
   sticky?: StickyEntry;
@@ -374,6 +376,9 @@ export interface DirectOrderControllerDeps {
   healthOptions: HealthOptions;
   minDwellMs?: number;
   strategy?: PoolStrategy;
+  /** Spread strategy (#92): the served-launch journal; read per tick so placement follows live launches. */
+  readHistory?: () => readonly HistoryEvent[];
+  spreadWindowMs?: number;
   configOrder: () => readonly string[] | undefined;
   readSticky: () => StickyEntry | undefined;
   writeSticky: (entry: StickyEntry | undefined) => void;
@@ -411,6 +416,9 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
       if (running) return { managedOrder: [], agents: [] };
       running = true;
       try {
+        const spread = deps.strategy === "spread"
+          ? spreadStatsFromHistory(deps.readHistory?.() ?? [], nowMs, spreadWindowMs(deps.spreadWindowMs))
+          : undefined;
         const verdicts = deps.members.map((m) => {
           const state = deps.readHealth(m.accountId);
           return {
@@ -421,6 +429,7 @@ export function createDirectOrderController(deps: DirectOrderControllerDeps): {
             sevenDayResetsAt: deps.strategy === "reset-aware"
               ? sevenDayReset(state, deps.healthOptions, nowMs)
               : undefined,
+            ...(spread ? spreadStatsFor(spread, m.accountId) : {}),
           };
         });
         const sticky = deps.readSticky();

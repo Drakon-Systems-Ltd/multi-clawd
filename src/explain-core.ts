@@ -8,6 +8,8 @@
  */
 import { DEFAULT_UTILIZATION_THRESHOLD, choosePoolAccount, poolStrategy, type PoolVerdict, type PoolStrategy } from "./health.js";
 import { decideStickySelection, type StickyEntry } from "./sticky.js";
+import type { HistoryEvent } from "./history.js";
+import { describeSpreadPick, describeWindow, spreadStatsFromHistory, spreadWindowMs, withSpreadStats } from "./spread.js";
 
 export interface ExplainAccount {
   id: string;
@@ -27,6 +29,9 @@ export interface ExplainPool {
   weeklyUtilizationThreshold?: number;
   minDwellMs?: number;
   strategy?: PoolStrategy;
+  /** Spread strategy (#92): how far back served launches count. */
+  spreadWindowMs?: number;
+  sessionAffinity?: boolean;
   degrade?: { ladder?: string[]; pins?: unknown[] };
 }
 
@@ -48,6 +53,8 @@ export interface ExplainModel {
   nowMs?: number;
   /** The direct `anthropic/*` route; absent when no account opted in. */
   direct?: ExplainDirect;
+  /** Served-launch journal (#70); the spread strategy's placement evidence. */
+  history?: readonly HistoryEvent[];
 }
 
 /**
@@ -92,6 +99,11 @@ export function relativeUntil(ms: number, nowMs: number): string {
   const hours = Math.round(mins / 60);
   if (hours < 36) return `~${hours}h`;
   return `~${Math.round(hours / 24)}d`;
+}
+
+/** How long ago `ms` was, in the same coarse units as relativeUntil. */
+export function relativeSince(ms: number, nowMs: number): string {
+  return relativeUntil(nowMs + Math.max(0, nowMs - ms), nowMs);
 }
 
 /** One usage line: "weekly 12% (resets ~3d) · 5-hour 4% (resets ~2h)". */
@@ -187,6 +199,10 @@ export function renderExplanation(model: ExplainModel): string {
     lines.push(`  Strategy: ${poolStrategy(model.pool.strategy)}.`);
     if (poolStrategy(model.pool.strategy) === "reset-aware") {
       lines.push("  Healthy accounts with a live seven-day reset are preferred by soonest reset.");
+    } else if (poolStrategy(model.pool.strategy) === "spread") {
+      lines.push(`  Each new session starts on the healthy account with the fewest served launches in the last ${describeWindow(spreadWindowMs(model.pool.spreadWindowMs))};`);
+      lines.push("  a session then stays on its account while that account is healthy (session affinity is on).");
+      if (model.pool.sessionAffinity === false) lines.push("  sessionAffinity: false is ignored under spread — without it a conversation would move every turn.");
     } else {
       lines.push("  Every Claude launch runs on the first account below its threshold;");
       lines.push("  the home account reclaims work");
@@ -237,7 +253,9 @@ export function renderExplanation(model: ExplainModel): string {
     }
     if (model.pool) {
       const strategy = poolStrategy(model.pool.strategy);
-      const verdicts: PoolVerdict[] = model.pool.accounts.filter((id) => !model.accounts.find((a) => a.id === id)?.disabled).map((id) => {
+      const windowMs = spreadWindowMs(model.pool.spreadWindowMs);
+      const spread = strategy === "spread" ? spreadStatsFromHistory(model.history ?? [], nowMs, windowMs) : undefined;
+      const rawVerdicts: PoolVerdict[] = model.pool.accounts.filter((id) => !model.accounts.find((a) => a.id === id)?.disabled).map((id) => {
         const h = model.health.find((row) => row.id === id);
         return {
           id,
@@ -246,6 +264,7 @@ export function renderExplanation(model: ExplainModel): string {
             ?? h?.usage?.find((u) => u.window === "seven_day" && u.resetsAt !== undefined && u.resetsAt > nowMs))?.resetsAt,
         };
       });
+      const verdicts = spread ? withSpreadStats(rawVerdicts, spread) : rawVerdicts;
       if (verdicts.length) {
         const preferred = choosePoolAccount(verdicts, strategy);
         const decision = decideStickySelection({ verdicts, sticky: model.stickyEntry, nowMs, minDwellMs: model.pool.minDwellMs, strategy });
@@ -253,15 +272,22 @@ export function renderExplanation(model: ExplainModel): string {
         let reason: string;
         if (preferred && decision.account !== preferred) reason = "sticky dwell keeps this usable account";
         else if (strategy === "ordered") reason = picked?.verdict === "near_limit" ? "first near-limit member in pool order" : "first healthy member in pool order";
+        else if (strategy === "spread") reason = picked && (picked.verdict === "ok" || picked.verdict === "no_data") ? describeSpreadPick(picked, windowMs) : "no healthy member; using the existing fallback";
         else if (picked?.verdict === "ok" && picked.sevenDayResetsAt !== undefined) reason = `seven-day window resets soonest (in ${relativeUntil(picked.sevenDayResetsAt, nowMs)})`;
         else if (picked?.verdict === "ok") reason = "first healthy member without live seven-day reset data";
         else if (picked?.verdict === "no_data") reason = "first member without live health data";
         else reason = "no healthy member; using the existing fallback";
-        lines.push(`  strategy: ${strategy} — picked ${decision.account}: ${reason}`);
+        lines.push(`  strategy: ${strategy} — ${strategy === "spread" ? "next new session on" : "picked"} ${decision.account}: ${reason}`);
+        if (spread) {
+          for (const v of verdicts) {
+            lines.push(`      ${v.id}: ${v.servedInWindow ?? 0} served in the last ${describeWindow(windowMs)}${v.lastServedAt !== undefined ? `, last ${relativeSince(v.lastServedAt, nowMs)} ago` : ""}`);
+          }
+        }
       } else {
         lines.push(`  strategy: ${strategy} — pool.accounts[].disabled: every pool member is disabled`);
       }
-      lines.push(
+      if (strategy === "spread") lines.push("  pool has no home account under spread; existing sessions keep the account that served them");
+      else lines.push(
         model.stickyAccount
           ? strategy === "reset-aware"
             ? `  pool is on ${model.stickyAccount} (dwell applies while it remains usable)`

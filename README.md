@@ -585,7 +585,9 @@ error.
   "pool": {
     "id": "clawd",
     "accounts": ["claw1", "claw2"],   // preference order; first = home for ordered strategy
-    "strategy": "ordered",            // optional: "reset-aware" drains healthy weekly quota that resets soonest
+    "strategy": "ordered",            // optional: "reset-aware" drains healthy weekly quota that resets soonest;
+                                      //           "spread" starts each new session on the least-served healthy account
+    // "spreadWindowMs": 3600000,     // optional, spread only: how far back served launches count (default 1h)
     "utilizationThreshold": 0.85,     // default hand-over; minute/hour and overage windows use this
     "weeklyUtilizationThreshold": 0.97, // optional: day/week/month quota windows at 97%
     "minDwellMs": 600000,             // v0.3: anti-flap dwell before returning home
@@ -638,6 +640,25 @@ near-limit or exhausted accounts never outrank a healthy one. Equal reset
 times keep pool order. The existing `minDwellMs` delay still holds an account
 that remains usable. Both CLI launches and the direct Anthropic route use the
 same preference. Other values are rejected by the plugin config schema.
+
+Set `pool.strategy` to `"spread"` when several agent lanes start sessions at
+once and you want them on different accounts instead of queueing behind one
+account's concurrency ceiling. Each **new** session starts on the healthy
+(`ok` or `no_data`) account that served the fewest launches in the last
+`spreadWindowMs` (default one hour; clamped between one minute and seven
+days), counted from the served-launch journal `explain --history` reads. On a
+tie the account served least recently wins, then pool order, so equally idle
+accounts are used in turn. Near-limit, exhausted and credential-failed
+accounts are never chosen; when no healthy account is left the pool answers
+exactly as `ordered` does. Spread keeps every session on the account that
+first served it: it switches `sessionAffinity` on for the pool (an explicit
+`sessionAffinity: false` is overridden with a warning, because without it a
+conversation would move on every turn). A pinned session moves only when its
+account stops being healthy, exactly as under `sessionAffinity`. Launches
+without a session id take the spread pick. There is no home account, no
+dwell and no rotation alert under spread; `explain`, `usage` and `doctor`
+show the strategy, the next placement and the served counts behind it. The
+direct Anthropic route orders its profiles by the same counts.
 
 `pool.sessionAffinity: true` remembers the account that successfully served each
 Claude CLI session (`--session-id` or `--resume`) and prefers it on later turns
