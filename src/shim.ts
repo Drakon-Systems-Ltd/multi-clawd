@@ -2,8 +2,9 @@
  * multi-clawd stream shim — a transparent wrapper around the `claude` CLI.
  *
  * The gateway spawns this instead of `claude` directly. It passes stdin,
- * stdout, stderr, argv, and the exit code through untouched, while scanning
- * the stream-json output for `rate_limit_event` records and folding them into
+ * stdout, stderr, argv, and the exit code through untouched (bar the two
+ * bounded exceptions below), while scanning the stream-json output for
+ * `rate_limit_event` records and folding them into
  * a per-account health-state file (MULTI_CLAWD_STATE_FILE). The steering hook
  * reads that snapshot and any pending deltas to rotate accounts *before*
  * they hit their usage limits.
@@ -12,7 +13,7 @@
  * - Passthrough fidelity beats capture: stream bytes are forwarded as-is,
  *   and any capture/state failure is swallowed (stderr note only) — a broken
  *   state file must never break a live turn.
- * - The ONE exception, and it is bounded (#19): while a launch is eligible for
+ * - The ONE timing exception, and it is bounded (#19): while a launch is eligible for
  *   an in-turn retry, the stream's preamble records (`system`, `rate_limit_event`)
  *   are held back until the first record that is neither. If a model limit
  *   arrives in that window the turn has not begun downstream, so the shim
@@ -21,6 +22,19 @@
  *   avoids losing the turn to the host's next provider. The moment anything
  *   else is seen — content, a non-retry result, an unparseable line, or a size cap — the
  *   held bytes are released in order and the shim is a pure passthrough again.
+ * - The ONE content exception, and it is narrower still (#97): a terminal
+ *   error `result` that parseModelLimitError accepts, which the shim is
+ *   forwarding because it is NOT retrying it (no healthy sibling, the retry
+ *   window has closed, the launch was never retry-eligible, or the sibling a
+ *   retry moved to refused as well), gets " (rate limit: 429)" appended to the
+ *   error text the host classifies, after the CLI's own wording. Without it
+ *   the host's stock failover patterns do not recognise the refusal and the
+ *   turn dies instead of moving to the next model. Only that record is
+ *   re-serialised. Successful results (even ones quoting limit text),
+ *   assistant bytes, the `<synthetic>` notice and every non-limit record are
+ *   forwarded as the original bytes; a line that may still be a `result` is
+ *   held only until its own newline. A failure the shim retries is never
+ *   forwarded, so the retry path is unaffected. See createForwardWriter.
  * - Tolerant parsing: rate_limit_event is CLI-internal and undocumented;
  *   unknown fields, statuses, and window types are preserved or ignored,
  *   never fatal.
@@ -33,6 +47,7 @@ import { recordHistory, type HistoryReason } from "./history.js";
 import {
   clearCredentialFailure,
   clearModelRejection,
+  createForwardWriter,
   createLineScanner,
   limitFamilyFor,
   parseAuthFailure,
@@ -385,6 +400,17 @@ function observeLine(line: string): void {
 
 const scanner = createLineScanner(observeLine);
 
+// Every byte bound for the host goes through here (#97): unchanged, except a
+// terminal model-limit error the shim is not retrying, which gets the
+// rate-limit marker so the host's stock classifier fails the turn over.
+const forward = createForwardWriter(
+  (bytes) => process.stdout.write(bytes),
+  () =>
+    process.stderr.write(
+      `[multi-clawd shim] model limit on ${accountId} forwarded to the host marked as a rate limit\n`,
+    ),
+);
+
 // ── held preamble (#19) ─────────────────────────────────────────────────────
 // Only records that carry nothing for the user are ever held: `system` (the
 // init handshake) and `rate_limit_event` (telemetry the gateway ignores).
@@ -444,12 +470,12 @@ function isPreambleRecord(line: string): boolean {
 /** Flush everything held, in order, and become a plain passthrough. */
 function releaseHeldOutput(): void {
   if (held.length > 0) {
-    process.stdout.write(held.join(""));
+    forward.push(Buffer.from(held.join(""), "utf8"));
     held = [];
     heldBytes = 0;
   }
   if (holdTail.length > 0) {
-    process.stdout.write(holdTail);
+    forward.push(Buffer.from(holdTail, "utf8"));
     // Lines completed inside the tail have not been observed yet — hand them
     // to the scanner so releasing the hold never costs us telemetry.
     scanner.push(holdTail);
@@ -624,7 +650,7 @@ function onArmedChunk(chunk: Buffer): void {
     // stream now.
     const rest = holdTail;
     holdTail = "";
-    process.stdout.write(rest);
+    forward.push(Buffer.from(rest, "utf8"));
     scanner.push(rest);
   }
 }
@@ -659,7 +685,7 @@ function extendHold(ms: number): void {
 if (retryArmed) armHoldTimer();
 
 function onPassthroughChunk(chunk: Buffer): void {
-  process.stdout.write(chunk); // passthrough first, always
+  forward.push(chunk); // passthrough first, always (a held result line excepted, #97)
   scanner.push(chunk.toString("utf8"));
 }
 
@@ -673,6 +699,7 @@ function attachChildHandlers(): void {
     // Release an incomplete attempt, but keep a complete retryable failure.
     // EOF is not process completion: cleanup may still be running.
     if (retryArmed && (!sawTerminalFailure || holdTail.length > 0)) releaseHeldOutput();
+    if (!retryArmed) forward.flush();
     scanner.flush();
   });
   child.on("close", onChildClose);
@@ -760,6 +787,7 @@ function onChildClose(code: number | null, signal: NodeJS.Signals | null): void 
     }
   }
   if (retryArmed) releaseHeldOutput();
+  forward.flush();
   if (signal) {
     process.kill(process.pid, signal);
     return;
