@@ -6,6 +6,17 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A model limit the shim cannot retry (no healthy sibling, the in-turn retry
+  window has closed, the launch was never retry-eligible, or the sibling it
+  retried onto refused too) now reaches the host as a rate limit: the
+  terminal error result keeps the CLI's own wording and gains
+  ` (rate limit: 429)`, which OpenClaw's stock failover patterns recognise,
+  so the turn moves to the next model in the chain instead of ending.
+  Only that one record changes; successful results (including ones quoting
+  limit text), assistant output and every other error are forwarded
+  byte-for-byte. (#97)
+
 ### Added
 - Optional `pool.strategy: "spread"` starts each new session on the healthy
   account with the fewest served launches in a bounded recent window

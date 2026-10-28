@@ -635,6 +635,160 @@ export function parseModelLimitError(line: string): { displayName: string } | un
   return undefined;
 }
 
+// ── a forwarded model limit must still read as a rate limit (#97) ───────────
+//
+// When the shim cannot retry a model limit (no healthy sibling, the retry
+// window has closed, the turn was never retry-eligible) the CLI's error result
+// goes downstream, and the host decides from its text whether to move to the
+// next model in its chain. The host's Claude CLI backend reads that text from
+// the terminal `result` record on stdout: the first non-diagnostic string in
+// `errors`, else `result`, else the nested error message. The exit code only
+// picks which of the host's two error builders runs; both read this record.
+// The CLI's wording ("You've reached your Fable 5 limit. /model to switch
+// models.") matches none of the host's stock rate-limit patterns, so the turn
+// ended as a plain failure instead of failing over. A bracketed marker the
+// stock patterns do match is appended; the original wording stays in front of
+// it for the human reading the error.
+
+/** Appended to a forwarded limit's error text; matches the host's stock rate-limit patterns. */
+export const LIMIT_PASSTHROUGH_MARKER = " (rate limit: 429)";
+
+/** Diagnostic entries the host skips when it picks a result's error text. */
+const HOST_DIAGNOSTIC_ERROR_PREFIX = "[ede_diagnostic]";
+
+/**
+ * Return `line` with the rate-limit marker appended to the error text the host
+ * classifies, if and only if `line` is a TERMINAL error result (`type:
+ * "result"`, flagged as an error) that parseModelLimitError accepts. Every
+ * other line comes back as the very same string, unparsed past the cheap
+ * pre-filter: successful results that quote limit text, the CLI's
+ * `<synthetic>` assistant notice, non-limit errors and all content.
+ */
+export function markForwardedLimitLine(line: string): string {
+  if (!parseModelLimitError(line)) return line;
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    return line;
+  }
+  if (typeof record !== "object" || record === null || Array.isArray(record)) return line;
+  const r = record as Record<string, unknown>;
+  const subtype = typeof r.subtype === "string" ? r.subtype : "";
+  if (r.type !== "result" || !(r.is_error === true || subtype.startsWith("error"))) return line;
+
+  const mark = (text: string): string | undefined =>
+    text.includes(LIMIT_PASSTHROUGH_MARKER) ? undefined : `${text.trimEnd()}${LIMIT_PASSTHROUGH_MARKER}`;
+
+  // Same field order the host uses to pick the text it classifies.
+  if (Array.isArray(r.errors)) {
+    const idx = r.errors.findIndex(
+      (e) => typeof e === "string" && e.trim() !== "" && !e.trim().startsWith(HOST_DIAGNOSTIC_ERROR_PREFIX),
+    );
+    if (idx >= 0) {
+      const marked = mark(r.errors[idx] as string);
+      if (marked === undefined) return line;
+      const errors = [...r.errors];
+      errors[idx] = marked;
+      return JSON.stringify({ ...r, errors });
+    }
+  }
+  if (typeof r.result === "string" && r.result.trim() !== "") {
+    const marked = mark(r.result);
+    return marked === undefined ? line : JSON.stringify({ ...r, result: marked });
+  }
+  if (typeof r.error === "object" && r.error !== null && !Array.isArray(r.error)) {
+    const err = r.error as Record<string, unknown>;
+    if (typeof err.message === "string" && err.message.trim() !== "") {
+      const marked = mark(err.message);
+      return marked === undefined ? line : JSON.stringify({ ...r, error: { ...err, message: marked } });
+    }
+  }
+  if (typeof r.error === "string" && r.error.trim() !== "") {
+    const marked = mark(r.error);
+    return marked === undefined ? line : JSON.stringify({ ...r, error: marked });
+  }
+  return line;
+}
+
+export interface ForwardWriter {
+  /** Forward one chunk of child stdout. */
+  push(chunk: Buffer): void;
+  /** Forward whatever is still pending (end of stream). */
+  flush(): void;
+}
+
+const RESULT_LINE_PREFIX = Buffer.from('{"type":"result"', "utf8");
+/** A pending line longer than this is no limit refusal; stop holding it. */
+const FORWARD_HOLD_CAP_BYTES = 256 * 1024;
+
+function couldBeResultLine(pending: Buffer): boolean {
+  let i = 0;
+  while (i < pending.length && (pending[i] === 0x20 || pending[i] === 0x09 || pending[i] === 0x0d)) i++;
+  const rest = pending.subarray(i);
+  const n = Math.min(rest.length, RESULT_LINE_PREFIX.length);
+  return rest.subarray(0, n).equals(RESULT_LINE_PREFIX.subarray(0, n));
+}
+
+function forwardCompleteLine(line: Buffer, onMark?: () => void): Buffer {
+  const text = line.toString("utf8");
+  const ending = text.endsWith("\r\n") ? "\r\n" : text.endsWith("\n") ? "\n" : "";
+  const body = text.slice(0, text.length - ending.length).trim();
+  const marked = markForwardedLimitLine(body);
+  if (marked === body) return line; // the original bytes, untouched
+  onMark?.();
+  return Buffer.from(marked + ending, "utf8");
+}
+
+/**
+ * The shim's stdout path to the host (#97). Bytes go straight through, chunk
+ * by chunk, except a line that could still be a `result` record: that one
+ * line is held until its newline (the host cannot parse it before then) and
+ * passed through markForwardedLimitLine. Every line it does not change is
+ * written as the original bytes, so passthrough fidelity holds for all
+ * output except a terminal model-limit error.
+ */
+export function createForwardWriter(write: (bytes: Buffer) => void, onMark?: () => void): ForwardWriter {
+  let pending: Buffer | undefined;
+  let streaming = false; // the current line has been ruled out: forward as it comes
+  return {
+    push(chunk: Buffer) {
+      const out: Buffer[] = [];
+      let start = 0;
+      while (start < chunk.length) {
+        const nl = chunk.indexOf(0x0a, start);
+        const end = nl < 0 ? chunk.length : nl + 1;
+        const piece = chunk.subarray(start, end);
+        start = end;
+        if (streaming) {
+          out.push(piece);
+          if (nl >= 0) streaming = false;
+          continue;
+        }
+        const line = pending ? Buffer.concat([pending, piece]) : piece;
+        pending = undefined;
+        if (nl >= 0) {
+          out.push(forwardCompleteLine(line, onMark));
+        } else if (!couldBeResultLine(line) || line.length > FORWARD_HOLD_CAP_BYTES) {
+          out.push(line);
+          streaming = true;
+        } else {
+          pending = Buffer.from(line); // copy: the chunk is not ours to keep
+        }
+      }
+      if (out.length > 0) write(out.length === 1 ? out[0] : Buffer.concat(out));
+    },
+    flush() {
+      if (pending) {
+        const line = pending;
+        pending = undefined;
+        write(forwardCompleteLine(line, onMark));
+      }
+      streaming = false;
+    },
+  };
+}
+
 /**
  * Record a reactive model-limit hit as a model-scoped rejected window, so the
  * NEXT launch for that model rotates accounts even when no proactive weekly
