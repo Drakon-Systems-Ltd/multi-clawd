@@ -66,7 +66,7 @@ const COMMAND_HELP = {
   version: "multi-clawd version\n\n  Show CLI and installed plugin versions.",
 };
 
-if (cmd in COMMAND_HELP && rest.some((a) => a === "--help" || a === "-h")) {
+if (Object.hasOwn(COMMAND_HELP, cmd) && rest.some((a) => a === "--help" || a === "-h")) {
   console.log(`\n${COMMAND_HELP[cmd]}\n`);
   process.exit(0);
 }

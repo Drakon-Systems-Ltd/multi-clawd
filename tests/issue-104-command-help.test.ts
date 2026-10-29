@@ -95,6 +95,19 @@ describe("per-command help (#104)", () => {
     expect(run(["nonsense", "--help"]).r.status).toBe(1);
   });
 
+  test("inherited prototype names are not commands: general usage, exit 1", () => {
+    const names = ["toString", "constructor", "__proto__", "valueOf", "hasOwnProperty"];
+    for (const name of names) {
+      for (const flag of ["--help", "-h"]) {
+        const { r } = run([name, flag]);
+        const out = `${r.stdout}${r.stderr}`;
+        expect(r.status, `${name} ${flag}`).toBe(1);
+        expect(out, `${name} ${flag}`).not.toMatch(/\[native code\]|\[object /);
+        expect(out, `${name} ${flag}`).toMatch(/usage/i);
+      }
+    }
+  });
+
   test("normal invocation is not swallowed: account without args still errors", () => {
     const { r } = run(["account"]);
     expect(r.status).toBe(1);
