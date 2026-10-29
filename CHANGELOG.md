@@ -6,6 +6,14 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- `<command> --help` / `-h` now prints that command's usage and exits 0 for
+  `setup`, `login`, `account`, `explain`, `chain`, `direct`, `usage`, `update`,
+  `doctor` and `version` (#104). Previously `setup --help` entered the wizard,
+  `doctor --help` ran the health check and `usage|chain|direct|login --help`
+  read the OpenClaw config. Help is handled before dispatch: no config reads,
+  writes, prompts or provider calls. `hermes` keeps its own help.
+
 ### Added
 - `explain` shows a display-only weekly pace estimate per account (#94): the
   share of the week gone, ahead or behind pace, and whether the weekly window
