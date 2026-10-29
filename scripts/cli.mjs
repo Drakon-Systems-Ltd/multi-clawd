@@ -50,6 +50,27 @@ Run via npx (${DIM}npx ${PKG} <command>${RESET}) or install globally
 `);
 }
 
+// Per-command usage, printed for `<command> --help` / `-h` before anything is
+// dispatched, so asking for help never reads config, runs checks, or starts the
+// setup wizard. `hermes` is absent on purpose: it handles its own help.
+const COMMAND_HELP = {
+  setup: "multi-clawd setup [--dry-run]\n\n  Guided setup wizard (accounts, pool, watchdog).\n  --dry-run   preview the changes without writing anything",
+  login: "multi-clawd login [<id>]\n\n  Log a configured account in (or re-auth it). Without <id>, lists the\n  configured accounts to choose from.",
+  account: "multi-clawd account <enable|disable> <id> [--dry-run]\n\n  Disable or enable a pool account.\n  --dry-run   preview the change without writing it",
+  explain: "multi-clawd explain [--json | --history [--since 7d|24h]]\n\n  Your setup in plain English: accounts, pool, fallback chain.\n  --json      machine-readable output\n  --history   recent pool events; --since limits the window",
+  chain: "multi-clawd chain [--raw]\n\n  Audit your model routing: what actually serves each turn.\n  --raw       include raw routing detail",
+  direct: "multi-clawd direct [status | sync [--dry-run] [--yes] [--resync]]\n\n  The direct anthropic/* route. Default is status.\n  sync        store profiles for the direct route\n  --dry-run   preview without writing\n  --yes       skip the confirmation prompt\n  --resync    refresh profiles that are already stored",
+  usage: "multi-clawd usage [--json]\n\n  Live usage per account from the provider: what is left, and what the\n  pool will do.\n  --json      machine-readable output",
+  update: "multi-clawd update\n\n  Update the plugin to the latest version.",
+  doctor: "multi-clawd doctor [--probe] [--probe-pool] [--verbose] [--raw]\n\n  Health check.\n  --probe       run a live turn per account plus the pool\n  --probe-pool  with --probe: probe the pool ref only (one turn)\n  --verbose     show more detail\n  --raw         show raw output",
+  version: "multi-clawd version\n\n  Show CLI and installed plugin versions.",
+};
+
+if (cmd in COMMAND_HELP && rest.some((a) => a === "--help" || a === "-h")) {
+  console.log(`\n${COMMAND_HELP[cmd]}\n`);
+  process.exit(0);
+}
+
 const { resolveInstallDir } = await import(join(__dirname, "_shared.mjs"));
 
 function installedVersion(installPath) {
