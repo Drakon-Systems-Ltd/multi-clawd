@@ -6,6 +6,14 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- `explain` shows a display-only weekly pace estimate per account (#94): the
+  share of the week gone, ahead or behind pace, and whether the weekly window
+  is projected to run out before it resets. It is a rough linear estimate from
+  figures `explain` already reads, hidden until a tenth of the week has passed
+  and whenever the sample is invalid. `explain --json` carries the same fields
+  (`weeklyPace`). Nothing in account selection reads it.
+
 ## [2.5.1] - 2026-10-28
 
 ### Changed

@@ -125,6 +125,73 @@ export function renderUsageLine(usage: ExplainUsage[], nowMs: number): string {
     .join(" · ");
 }
 
+const WEEK_MS = 7 * 86_400_000;
+/** Below this share of the week elapsed, a linear projection is noise. */
+const MIN_PACE_ELAPSED_MS = WEEK_MS / 10;
+/** A reset farther out than the window itself cannot belong to this window. */
+const PACE_RESET_SLACK_MS = 3_600_000;
+
+/**
+ * Display-only weekly pace (#94). A rough linear estimate from the figures
+ * `explain` already holds — never read by selection, never a verdict.
+ */
+export interface WeeklyPace {
+  /** Which window the figures came from. */
+  window: string;
+  /** Share (0..1) of a seven-day window that has elapsed. */
+  expectedPct: number;
+  /** Consumed minus expected, in fraction points; positive = ahead of pace (burning faster). */
+  aheadOfPace: number;
+  /** Epoch ms the window would hit 100% at the current average rate; absent when nothing is consumed. */
+  projectedExhaustionAt?: number;
+  willLastToReset: boolean;
+  resetsAt: number;
+  estimate: true;
+}
+
+/**
+ * Pace for the weekly window, or undefined when the sample cannot support one:
+ * no future reset, a reset further away than a week (not a weekly cycle),
+ * a non-finite or out-of-range utilization, or too little of the week elapsed.
+ * The live-poll window outranks stream telemetry, as in the pool's own reads.
+ */
+export function computeWeeklyPace(usage: readonly ExplainUsage[] | undefined, nowMs: number): WeeklyPace | undefined {
+  const u = ["usage:seven_day", "seven_day"]
+    .map((w) => usage?.find((x) => x.window === w))
+    .find((x): x is ExplainUsage => x !== undefined);
+  if (!u || u.resetsAt === undefined) return undefined;
+  if (!Number.isFinite(u.utilization) || u.utilization < 0 || u.utilization > 1) return undefined;
+  if (!Number.isFinite(u.resetsAt) || !Number.isFinite(nowMs)) return undefined;
+  const remaining = u.resetsAt - nowMs;
+  if (remaining <= 0 || remaining > WEEK_MS + PACE_RESET_SLACK_MS) return undefined;
+  const elapsed = Math.max(0, WEEK_MS - remaining);
+  if (elapsed < MIN_PACE_ELAPSED_MS) return undefined;
+  const expectedPct = elapsed / WEEK_MS;
+  const projectedExhaustionAt = u.utilization >= 1
+    ? nowMs
+    : u.utilization > 0 ? nowMs + ((1 - u.utilization) * elapsed) / u.utilization : undefined;
+  return {
+    window: u.window,
+    expectedPct,
+    aheadOfPace: u.utilization - expectedPct,
+    projectedExhaustionAt,
+    willLastToReset: projectedExhaustionAt === undefined || projectedExhaustionAt >= u.resetsAt,
+    resetsAt: u.resetsAt,
+    estimate: true,
+  };
+}
+
+/** One plain line for a pace, or undefined; always labelled an estimate. */
+export function renderPaceLine(pace: WeeklyPace | undefined, nowMs: number): string | undefined {
+  if (!pace) return undefined;
+  const pts = Math.round(pace.aheadOfPace * 100);
+  const where = pts === 0 ? "on pace" : pts > 0 ? `${pts} points ahead of pace` : `${-pts} points behind pace`;
+  const verdict = pace.willLastToReset
+    ? "should last to the reset"
+    : `could run out in ${relativeUntil(pace.projectedExhaustionAt ?? nowMs, nowMs)}, before the reset in ${relativeUntil(pace.resetsAt, nowMs)}`;
+  return `weekly pace (rough estimate): ~${Math.round(pace.expectedPct * 100)}% of the week gone, ${where}; ${verdict}`;
+}
+
 /** One-line plain-English description of where an account's login lives. */
 export function describeAccount(acc: ExplainAccount): string {
   if (acc.native) {
@@ -257,6 +324,8 @@ export function renderExplanation(model: ExplainModel): string {
       lines.push(
         `      usage: ${h.usage?.length ? renderUsageLine(h.usage, nowMs) : "no live telemetry"}`,
       );
+      const paceLine = renderPaceLine(computeWeeklyPace(h.usage, nowMs), nowMs);
+      if (paceLine) lines.push(`      ${paceLine}`);
     }
     if (model.pool) {
       const strategy = poolStrategy(model.pool.strategy);

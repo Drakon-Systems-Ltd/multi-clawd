@@ -31,6 +31,7 @@ multi-clawd setup     # guided wizard: accounts, isolated second login, pool, wa
 multi-clawd login claw2   # launch the right Claude sign-in for an account (or re-auth it)
 multi-clawd explain   # your whole setup in plain English — accounts, chain, live health
 multi-clawd explain --history --since 7d   # per-account launches, retries, rotations
+multi-clawd explain --json   # live health plus a rough weekly pace estimate, machine-readable
 multi-clawd account disable claw2 --dry-run  # preview benching an account
 multi-clawd chain     # audit your model routing — what actually serves each turn
 multi-clawd direct    # the direct anthropic/* route: status, or `direct sync` (v1.9, optional)

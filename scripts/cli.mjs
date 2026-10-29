@@ -677,11 +677,12 @@ async function healWatchdogUnit() {
 /** `explain` — gather config + live health, render the plain-English view. */
 async function explain(args = []) {
   let historySince;
-  if (args.length) {
+  const asJson = args.length === 1 && args[0] === "--json";
+  if (args.length && !asJson) {
     const allowed = args[0] === "--history" && (args.length === 1 ||
       (args.length === 3 && args[1] === "--since"));
     if (!allowed) {
-      console.error("explain: usage: multi-clawd explain [--history [--since 7d|24h]]");
+      console.error("explain: usage: multi-clawd explain [--json | --history [--since 7d|24h]]");
       process.exitCode = 1;
       return;
     }
@@ -774,6 +775,14 @@ async function explain(args = []) {
     } catch {
       /* no journal yet: every account counts as never served */
     }
+  }
+  if (asJson) {
+    // #94: machine-readable health with the display-only weekly pace estimate.
+    console.log(JSON.stringify({
+      at: new Date(now).toISOString(),
+      accounts: healthRows.map((r) => ({ ...r, weeklyPace: ec.computeWeeklyPace(r.usage, now) ?? null })),
+    }, null, 2));
+    return;
   }
   // v1.9: the direct anthropic/* route, when any account opted in.
   let direct;
