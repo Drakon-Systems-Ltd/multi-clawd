@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-30
+
 ### Fixed
 - `<command> --help` / `-h` now prints that command's usage and exits 0 for
   `setup`, `login`, `account`, `explain`, `chain`, `direct`, `usage`, `update`,
