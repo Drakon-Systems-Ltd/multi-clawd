@@ -1115,7 +1115,8 @@ switch (cmd) {
     break;
   case "version":
   case "--version":
-  case "-v": {
+  case "-v":
+  case "-V": {
     const cliVersion = JSON.parse(
       readFileSync(resolve(__dirname, "..", "package.json"), "utf8"),
     ).version;
@@ -1128,7 +1129,14 @@ switch (cmd) {
     if (skewNote) console.log(`\n⚠️  ${skewNote}`);
     break;
   }
-  default:
+  default: {
+    const wantsHelp = cmd === undefined || cmd === "help" || cmd === "--help" || cmd === "-h";
+    if (!wantsHelp) {
+      // Say what went wrong on stderr, then show the list and exit non-zero.
+      console.error(`multi-clawd: unknown command '${cmd}'`);
+      console.error("Run 'multi-clawd --help' for the list of commands.");
+    }
     usage();
-    process.exit(cmd === undefined || cmd === "help" || cmd === "--help" ? 0 : 1);
+    process.exit(wantsHelp ? 0 : 1);
+  }
 }
