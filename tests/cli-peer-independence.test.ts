@@ -124,7 +124,7 @@ describe("the CLI runs without the openclaw peer", () => {
       // The bar is that login WORKS here, not merely that it fails politely:
       // it must get past module loading and reach its own argument handling.
       // (Asserting only on the wording let the bug back in during review.)
-      expect(out).toMatch(/Which account\?|no multi-clawd accounts|could not read/);
+      expect(out).toMatch(/Which account\?|no multi-clawd accounts|OpenClaw config not found/);
       expect(out).not.toMatch(/built dist|cannot load|openclaw.*not.*resolvable/i);
       expect(out).not.toMatch(/ERR_MODULE_NOT_FOUND[\s\S]*openclaw|openclaw[\s\S]*ERR_MODULE_NOT_FOUND/i);
     } finally {

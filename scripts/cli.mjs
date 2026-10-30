@@ -190,6 +190,23 @@ function readOpenclawConfigSync() {
 }
 
 /**
+ * The OpenClaw config for a command that cannot run without it (#106). On any
+ * read or parse failure, prints the one shared diagnostic — resolved path,
+ * what is wrong, next step — on stderr and exits 1. Read-only: never creates
+ * or repairs the file.
+ */
+async function requireOpenclawConfig(command) {
+  const { describeOpenclawConfigError, openclawConfigPath } = await import(join(__dirname, "_shared.mjs"));
+  const path = openclawConfigPath();
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    console.error(`${command}: ${describeOpenclawConfigError(err, path)}`);
+    process.exit(1);
+  }
+}
+
+/**
  * Everything the direct-route surfaces need, loaded from dist. None of these
  * modules import the `openclaw` peer, so they load from a global install.
  * Returns undefined when no account mentions `direct` — callers then print
@@ -268,11 +285,7 @@ async function loadDirect(config) {
 async function direct(args = []) {
   const { readFileSync: rf, mkdtempSync, writeFileSync, rmSync, statSync } = await import("node:fs");
   const { homedir, tmpdir } = await import("node:os");
-  const config = readOpenclawConfigSync();
-  if (!config) {
-    console.error("direct: could not read your OpenClaw config");
-    process.exit(1);
-  }
+  const config = await requireOpenclawConfig("direct");
   const ctx = await loadDirect(config);
   const sub = args.find((a) => !a.startsWith("--")) ?? "status";
   console.log(`\n${BOLD}🦞 multi-clawd — direct anthropic/* route${RESET}\n`);
@@ -397,13 +410,7 @@ async function chain(args = []) {
     process.exit(1);
   }
 
-  let config;
-  try {
-    config = JSON.parse(rf(join(homedir(), ".openclaw", "openclaw.json"), "utf8"));
-  } catch {
-    console.error("chain: could not read ~/.openclaw/openclaw.json");
-    process.exit(1);
-  }
+  const config = await requireOpenclawConfig("chain");
 
   const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
   const poolId = pc.pool?.id?.trim() || (pc.pool ? "clawd" : undefined);
@@ -731,13 +738,7 @@ async function explain(args = []) {
     console.error(distFailure("explain", "explain-core.js", err));
     process.exit(1);
   }
-  let config = {};
-  try {
-    config = JSON.parse(rf(join(homedir(), ".openclaw", "openclaw.json"), "utf8"));
-  } catch {
-    console.error("explain: could not read ~/.openclaw/openclaw.json");
-    process.exit(1);
-  }
+  const config = await requireOpenclawConfig("explain");
   const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
   const accounts = Array.isArray(pc.accounts) ? pc.accounts : [];
   const pool = pc.pool
@@ -844,11 +845,7 @@ async function usageCommand(args) {
     console.error(distFailure("usage", "usage-poll.js", err));
     process.exit(1);
   }
-  const config = readOpenclawConfigSync();
-  if (!config) {
-    console.error("usage: could not read ~/.openclaw/openclaw.json");
-    process.exit(1);
-  }
+  const config = await requireOpenclawConfig("usage");
   const pc = config?.plugins?.entries?.["multi-clawd"]?.config ?? {};
   const accounts = Array.isArray(pc.accounts) ? pc.accounts : [];
   const pool = pc.pool ? { ...pc.pool, id: pc.pool.id?.trim() || "clawd", accounts: pc.pool.accounts ?? [] } : undefined;
@@ -984,13 +981,7 @@ async function login() {
     console.error(distFailure("login", "login-plan.js", err));
     process.exit(1);
   }
-  let config = {};
-  try {
-    config = JSON.parse(rf(join(homedir(), ".openclaw", "openclaw.json"), "utf8"));
-  } catch {
-    console.error("login: could not read ~/.openclaw/openclaw.json — run `multi-clawd setup` first.");
-    process.exit(1);
-  }
+  const config = await requireOpenclawConfig("login");
   const accounts = config?.plugins?.entries?.["multi-clawd"]?.config?.accounts ?? [];
   if (accounts.length === 0) {
     console.error("login: no multi-clawd accounts configured — run `multi-clawd setup` first.");
@@ -1080,6 +1071,9 @@ switch (cmd) {
       process.exitCode = 1;
       break;
     }
+    // Same missing/unreadable/malformed diagnostic as every other config
+    // reader (#106), instead of the raw fs error changeAccount would throw.
+    await requireOpenclawConfig("account");
     try {
       const { changeAccount } = await import("./account-config.mjs");
       const result = changeAccount(id, action === "disable", flags.includes("--dry-run"));
