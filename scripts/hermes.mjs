@@ -58,6 +58,17 @@ function safePath(raw, label) {
 class ReadLimitedError extends Error {}
 
 /**
+ * A directory at the path. Carries EISDIR, the code `readFileSync` raises for
+ * it, so a caller's `describe` (the shared #106 diagnostic) names the cause
+ * and the next step instead of the generic size-cap line; without `describe`
+ * it still fails closed with that line. Other non-regular files keep the
+ * generic guard: nothing is read from them either way.
+ */
+class NotRegularFileError extends ReadLimitedError {
+  code = "EISDIR";
+}
+
+/**
  * `requirePrivate` rejects a POSIX file readable or writable by group/other
  * (mode & 0o077 != 0) — checked via fstat on the already-open fd, so nothing
  * can be swapped between the check and the read. Windows has no equivalent
@@ -69,6 +80,7 @@ function readLimited(path, limit, label, { requirePrivate = false, describe } = 
   try {
     fd = openSync(path, "r");
     const stat = fstatSync(fd);
+    if (stat.isDirectory()) throw new NotRegularFileError(`${label} is unavailable or too large`);
     if (!stat.isFile() || stat.size > limit) throw new ReadLimitedError(`${label} is unavailable or too large`);
     if (requirePrivate && process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
       throw new ReadLimitedError(
@@ -79,6 +91,7 @@ function readLimited(path, limit, label, { requirePrivate = false, describe } = 
     if (data.byteLength > limit) throw new ReadLimitedError(`${label} is unavailable or too large`);
     return data.toString("utf8");
   } catch (error) {
+    if (error instanceof NotRegularFileError && describe) fail(describe(error));
     if (error instanceof ReadLimitedError) fail(error.message);
     if (describe) fail(describe(error));
     fail(`${label} could not be read`);

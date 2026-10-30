@@ -14,8 +14,11 @@ versioning from v1.0.
   when `~/.openclaw` does not exist — on stderr with exit 1. `account` no
   longer surfaces a raw `ENOENT`. Missing, permission-denied and malformed
   JSON are told apart; malformed JSON never echoes file content. Diagnosing
-  reads only: nothing creates or repairs the file. `hermes --config <path>`
-  points at the flag instead of `setup`, which writes only the default path.
+  reads only: nothing creates or repairs the file. A directory, symlink loop
+  or file-as-parent at the path is named as "not a regular file" with the
+  cause, from `hermes` too (its size-capped reader used to answer "unavailable
+  or too large" first). `hermes --config <path>` points at the flag or the
+  named path instead of `setup`, which writes only the default path.
 
 ## [2.6.0] - 2026-10-30
 

@@ -67,7 +67,8 @@ export function openclawConfigPath() {
  * a JSON SyntaxError quotes a slice of the file, which may hold credentials.
  *
  * A `configPath` other than the default (hermes `--config`) gets a "check the
- * path" step instead of `multi-clawd setup`, which only writes the default.
+ * path" step instead of `multi-clawd setup`, which only writes the default;
+ * that split applies to the missing and the not-a-regular-file cases alike.
  */
 export function describeOpenclawConfigError(error, configPath = openclawConfigPath()) {
   const code = typeof error?.code === "string" ? error.code : undefined;
@@ -87,9 +88,15 @@ export function describeOpenclawConfigError(error, configPath = openclawConfigPa
     return `${at} is not readable: permission denied. Run multi-clawd as the user that ` +
       "owns the OpenClaw install, or fix the file's ownership and mode; `multi-clawd setup` cannot fix this.";
   }
-  if (code === "EISDIR" || code === "ENOTDIR" || code === "ELOOP") {
-    return `${at} is not a regular file. Move whatever is at that path aside, then run ` +
-      "`multi-clawd setup` or restore the OpenClaw config file.";
+  const notRegular = { EISDIR: "it is a directory", ELOOP: "it is a symbolic-link loop",
+    ENOTDIR: "a parent in the path is not a directory" }[code];
+  if (notRegular) {
+    // `multi-clawd setup` writes only the default path, so for a custom
+    // `--config` the fix is the named path (or the option), never setup.
+    return `${at} is not a regular file (${notRegular}). ` + (isDefault
+      ? "Move whatever is at that path aside, then run `multi-clawd setup` or restore the OpenClaw config file."
+      : "Restore the OpenClaw config file at that path, or correct the --config path (omit it to use the " +
+        "default location); `multi-clawd setup` only writes the default path.");
   }
   if (error instanceof SyntaxError) {
     return `${at} is malformed JSON. Fix the file by hand (a JSON validator helps) and retry; ` +
