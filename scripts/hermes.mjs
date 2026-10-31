@@ -15,6 +15,7 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describeOpenclawConfigError } from "./_shared.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = join(HERE, "hermes_bridge.py");
@@ -57,17 +58,29 @@ function safePath(raw, label) {
 class ReadLimitedError extends Error {}
 
 /**
+ * A directory at the path. Carries EISDIR, the code `readFileSync` raises for
+ * it, so a caller's `describe` (the shared #106 diagnostic) names the cause
+ * and the next step instead of the generic size-cap line; without `describe`
+ * it still fails closed with that line. Other non-regular files keep the
+ * generic guard: nothing is read from them either way.
+ */
+class NotRegularFileError extends ReadLimitedError {
+  code = "EISDIR";
+}
+
+/**
  * `requirePrivate` rejects a POSIX file readable or writable by group/other
  * (mode & 0o077 != 0) — checked via fstat on the already-open fd, so nothing
  * can be swapped between the check and the read. Windows has no equivalent
  * bit layout, so the check is skipped there; the config JSON is read through
  * here too but never with this flag, since it holds no secret.
  */
-function readLimited(path, limit, label, { requirePrivate = false } = {}) {
+function readLimited(path, limit, label, { requirePrivate = false, describe } = {}) {
   let fd;
   try {
     fd = openSync(path, "r");
     const stat = fstatSync(fd);
+    if (stat.isDirectory()) throw new NotRegularFileError(`${label} is unavailable or too large`);
     if (!stat.isFile() || stat.size > limit) throw new ReadLimitedError(`${label} is unavailable or too large`);
     if (requirePrivate && process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
       throw new ReadLimitedError(
@@ -78,7 +91,9 @@ function readLimited(path, limit, label, { requirePrivate = false } = {}) {
     if (data.byteLength > limit) throw new ReadLimitedError(`${label} is unavailable or too large`);
     return data.toString("utf8");
   } catch (error) {
+    if (error instanceof NotRegularFileError && describe) fail(describe(error));
     if (error instanceof ReadLimitedError) fail(error.message);
+    if (describe) fail(describe(error));
     fail(`${label} could not be read`);
   } finally {
     if (fd !== undefined) closeSync(fd);
@@ -254,12 +269,15 @@ function invokeBridge(hermes, home, request) {
 }
 
 function loadPluginConfig(configPath) {
-  const text = readLimited(configPath, MAX_CONFIG_BYTES, "OpenClaw config");
+  // Same resolved-path + next-step diagnostic as the cli.mjs commands (#106).
+  const text = readLimited(configPath, MAX_CONFIG_BYTES, "OpenClaw config", {
+    describe: (error) => describeOpenclawConfigError(error, configPath),
+  });
   let config;
   try {
     config = JSON.parse(text);
-  } catch {
-    fail("OpenClaw config is malformed JSON");
+  } catch (error) {
+    fail(describeOpenclawConfigError(error, configPath));
   }
   return config?.plugins?.entries?.["multi-clawd"]?.config;
 }

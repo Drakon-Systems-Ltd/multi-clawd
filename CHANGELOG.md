@@ -6,6 +6,20 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- A missing, unreadable or malformed OpenClaw config now produces one shared
+  diagnostic from `usage`, `chain`, `explain`, `direct`, `account`, `login`
+  and `hermes sync|doctor` (#106): the resolved path (no literal `~`), what is
+  wrong, and the next step — `multi-clawd setup`, or install OpenClaw first
+  when `~/.openclaw` does not exist — on stderr with exit 1. `account` no
+  longer surfaces a raw `ENOENT`. Missing, permission-denied and malformed
+  JSON are told apart; malformed JSON never echoes file content. Diagnosing
+  reads only: nothing creates or repairs the file. A directory, symlink loop
+  or file-as-parent at the path is named as "not a regular file" with the
+  cause, from `hermes` too (its size-capped reader used to answer "unavailable
+  or too large" first). `hermes --config <path>` points at the flag or the
+  named path instead of `setup`, which writes only the default path.
+
 ## [2.6.0] - 2026-10-30
 
 ### Fixed
