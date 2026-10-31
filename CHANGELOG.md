@@ -6,7 +6,13 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-10-31
+
 ### Fixed
+- An unknown top-level command (`multi-clawd bogus`) now says so on stderr
+  (`multi-clawd: unknown command 'bogus'`, with a pointer to `--help`) before
+  the usage list, and exits 1 (#105). Top-level `-h` behaves like `--help`:
+  usage on stdout, exit 0. `-V` is accepted as an alias of `-v`/`--version`.
 - A missing, unreadable or malformed OpenClaw config now produces one shared
   diagnostic from `usage`, `chain`, `explain`, `direct`, `account`, `login`
   and `hermes sync|doctor` (#106): the resolved path (no literal `~`), what is
