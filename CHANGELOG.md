@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-11-01
+
 ### Fixed
 - `doctor` no longer prints raw `systemctl` stderr in the watchdog section, and a failed scheduler query (for example no user session bus) is reported as "watchdog state unknown" instead of "no watchdog found". A confirmed-absent watchdog still warns, and an existing unit file still counts as found (#107).
 
