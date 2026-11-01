@@ -1055,17 +1055,35 @@ if (accounts.some((a) => a && a.direct !== undefined && a.direct !== false)) {
 // ── 9. watchdog ─────────────────────────────────────────────────────────────
 console.log("eviction watchdog");
 let watchdogFound = false;
+// A scheduler query that FAILS (no user session bus, no systemd, container)
+// says nothing about whether a watchdog exists. Only a query that succeeded
+// can confirm absence. Tool stderr is never inherited: it is raw noise.
+let watchdogQueried = false;
+const WATCHDOG_NAME = /multi-?clawd|eviction/;
 try {
-  const out = execFileSync("launchctl", ["list"], { encoding: "utf8" });
+  const out = execFileSync("launchctl", ["list"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  watchdogQueried = true;
   if (out.includes("multiclawd")) watchdogFound = true;
 } catch {
-  /* not macOS */
+  /* not macOS, or launchctl could not be queried */
 }
 try {
-  const out = execFileSync("systemctl", ["--user", "list-timers", "--all"], { encoding: "utf8" });
-  if (out.includes("multi-clawd") || out.includes("multiclawd") || out.includes("eviction")) watchdogFound = true;
+  const out = execFileSync("systemctl", ["--user", "list-timers", "--all"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  watchdogQueried = true;
+  if (WATCHDOG_NAME.test(out)) watchdogFound = true;
 } catch {
-  /* not systemd */
+  /* not systemd, or the user manager could not be queried */
+}
+if (!watchdogFound && !watchdogQueried) {
+  // Query unavailable: fall back to the unit files on disk, which need no
+  // running manager.
+  for (const d of [join(HOME, "Library", "LaunchAgents"), join(HOME, ".config", "systemd", "user")]) {
+    try {
+      if (readdirSync(d).some((f) => /\.(plist|service|timer)$/.test(f) && WATCHDOG_NAME.test(f))) watchdogFound = true;
+    } catch {
+      /* no such directory */
+    }
+  }
 }
 if (watchdogFound) {
   // "Scheduled" is not enough: the unit points at a script INSIDE an install
@@ -1108,7 +1126,11 @@ if (watchdogFound) {
       `watchdog unit ${orphan.file} points at a MISSING script (${orphan.target}) — it fails silently every tick. Repoint it at ${join(EXT_DIR, "scripts", "eviction-watchdog.mjs")} or run the setup wizard to repair.`,
     );
   } else ok("watchdog scheduled");
-} else warn("no watchdog found (needed until openclaw#107596 ships — see README)");
+} else if (watchdogQueried) {
+  warn("no watchdog found (needed until openclaw#107596 ships — see README)");
+} else {
+  note("could not query the scheduler (no user session or no systemd/launchd) and found no watchdog unit file — watchdog state unknown. Run doctor from a normal login session to confirm.");
+}
 
 // ── 10. optional live probe ─────────────────────────────────────────────────
 if (args.has("--probe")) {
