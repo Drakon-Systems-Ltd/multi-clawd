@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describeOpenclawConfigError } from "./_shared.mjs";
 
 const HOME = homedir();
 // OpenClaw's tracked install record (#85). Asking OpenClaw costs a process
@@ -216,10 +217,21 @@ function newestMtime(dir, exts) {
 
 console.log("multi-clawd doctor\n");
 
+// #117: every other command stops with one actionable line when the OpenClaw
+// config is missing, unreadable or malformed. Doctor used to swallow the error
+// and evaluate each check against `{}`, printing green lines derived from a
+// file that was never read. Stop here instead, before any check can run.
+let config;
+try {
+  config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+} catch (err) {
+  console.error(`doctor: ${describeOpenclawConfigError(err, CONFIG_PATH)}`);
+  process.exit(1);
+}
+
 // ── 1. install + manifest/config agreement ─────────────────────────────────
 console.log("install & config");
 const manifest = readJson(join(EXT_DIR, "openclaw.plugin.json"));
-const config = readJson(CONFIG_PATH);
 const entry = config?.plugins?.entries?.["multi-clawd"];
 const pluginConfig = entry?.config ?? {};
 if (!manifest) bad(`no installed manifest at ${EXT_DIR}`);
