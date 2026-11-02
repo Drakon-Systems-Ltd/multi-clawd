@@ -14,6 +14,15 @@
 export const WATCHDOG_LAUNCHD_LABEL = "com.multi-clawd.eviction-watchdog";
 export const WATCHDOG_SYSTEMD_NAME = "multi-clawd-eviction-watchdog";
 
+function xmlEscape(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** systemd `Environment="K=V"` quoting: backslash and double quote are escaped. */
+function systemdEscape(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 export interface UnitFile {
   /** Path relative to the user's home directory. */
   path: string;
@@ -25,8 +34,22 @@ export function renderWatchdogUnit(opts: {
   platform: string;
   nodePath: string;
   scriptPath: string;
+  /**
+   * Instance variables to pin (#116): OPENCLAW_STATE_DIR, OPENCLAW_CONFIG_PATH
+   * and OPENCLAW_HOME as resolved by openclaw-paths#openclawInstanceEnv. A
+   * scheduler starts the unit with its own environment, so without these a
+   * watchdog set up for a relocated instance would act on the default one.
+   * Absent or empty for the default instance: the unit text is unchanged.
+   */
+  env?: Record<string, string>;
 }): UnitFile[] {
+  const pinned = Object.entries(opts.env ?? {}).filter(([, v]) => v !== "").sort(([a], [b]) => a.localeCompare(b));
   if (opts.platform === "darwin") {
+    const envDict = pinned.length === 0 ? "" : `  <key>EnvironmentVariables</key>
+  <dict>
+${pinned.map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`).join("\n")}
+  </dict>
+`;
     return [
       {
         path: `Library/LaunchAgents/${WATCHDOG_LAUNCHD_LABEL}.plist`,
@@ -41,7 +64,7 @@ export function renderWatchdogUnit(opts: {
     <string>${opts.nodePath}</string>
     <string>${opts.scriptPath}</string>
   </array>
-  <key>StartInterval</key>
+${envDict}  <key>StartInterval</key>
   <integer>300</integer>
   <key>RunAtLoad</key>
   <true/>
@@ -60,7 +83,7 @@ Description=multi-clawd eviction watchdog (turn-safe; openclaw#107408 mitigation
 
 [Service]
 Type=oneshot
-ExecStart=${opts.nodePath} ${opts.scriptPath}
+${pinned.map(([k, v]) => `Environment="${k}=${systemdEscape(v)}"\n`).join("")}ExecStart=${opts.nodePath} ${opts.scriptPath}
 `,
       },
       {
@@ -107,7 +130,9 @@ export function classifyWatchdogUnit(
  * regenerates that directory on every update, orphaning the unit each time.
  */
 export function isFragileWatchdogTarget(target: string): boolean {
-  return target.includes("/.openclaw/npm/projects/");
+  // Any `npm/projects` tree, not only `~/.openclaw/...`: a relocated state
+  // dir (OPENCLAW_STATE_DIR, #116) regenerates its installs the same way.
+  return /[\\/]npm[\\/]projects[\\/]/.test(target);
 }
 
 /**
@@ -124,15 +149,26 @@ export function renderWatchdogLauncher(): string {
 // runs its eviction watchdog. Managed by the setup wizard / update command.
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const HOME = homedir();
+// Same instance selection as the plugin and CLI (openclaw-paths): the state
+// dir is OPENCLAW_STATE_DIR, else <OPENCLAW_HOME or home>/.openclaw. The unit
+// that runs this pins those variables for a non-default instance.
+const pick = (name) => {
+  const v = process.env[name];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+};
+const expand = (p, home) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : resolve(p));
+const OC_HOME = pick("OPENCLAW_HOME");
+const HOME = OC_HOME ? expand(OC_HOME, homedir()) : homedir();
+const OC_STATE = pick("OPENCLAW_STATE_DIR");
+const STATE_DIR = OC_STATE ? expand(OC_STATE, HOME) : join(HOME, ".openclaw");
 
 function installDir() {
-  const ext = join(HOME, ".openclaw", "extensions", "multi-clawd");
+  const ext = join(STATE_DIR, "extensions", "multi-clawd");
   if (existsSync(join(ext, "openclaw.plugin.json"))) return ext;
-  const projects = join(HOME, ".openclaw", "npm", "projects");
+  const projects = join(STATE_DIR, "npm", "projects");
   let best;
   let bestM = -1;
   try {
@@ -150,7 +186,7 @@ function installDir() {
 
 const dir = installDir();
 if (!dir) {
-  console.error("[watchdog-launcher] no multi-clawd install found — nothing to do");
+  console.error("[watchdog-launcher] no multi-clawd install found under " + STATE_DIR + " — nothing to do");
   process.exit(0);
 }
 const script = join(dir, "scripts", "eviction-watchdog.mjs");

@@ -31,7 +31,13 @@ import readline from "node:readline/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DRY_RUN = process.argv.includes("--dry-run");
-const CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
+// The instance this wizard edits is chosen by the environment (#116):
+// OPENCLAW_CONFIG_PATH, else <OPENCLAW_STATE_DIR>/openclaw.json, else the
+// default. The banner names the resolved path and what chose it.
+const { describeOpenclawPathSource, openclawInstanceEnv, resolveOpenclawPaths, WATCHDOG_LAUNCHER } =
+  await import(resolve(__dirname, "_shared.mjs"));
+const OC = resolveOpenclawPaths();
+const CONFIG_PATH = OC.configPath;
 
 let core, wds;
 try {
@@ -93,8 +99,8 @@ How it works:
     Claude "app") — the two logins can never overwrite each other.
   • A POOL (one backend id, e.g. "clawd") fronts both: each launch runs on
     the first account that is not nearly maxed out.
-This wizard edits ~/.openclaw/openclaw.json (backup taken first). It never
-sees, stores, or prints a token value.${DRY_RUN ? "\n  (dry-run: nothing will be written)" : ""}
+This wizard edits ${CONFIG_PATH}${describeOpenclawPathSource(OC.configSource)} (backup taken first).
+It never sees, stores, or prints a token value.${DRY_RUN ? "\n  (dry-run: nothing will be written)" : ""}
 `);
 
 // ── preflight ────────────────────────────────────────────────────────────────
@@ -327,9 +333,11 @@ async function watchdogStep() {
   // Units point at the STABLE LAUNCHER, never at an install path: the npm
   // install dir is regenerated on every update (orphaning any unit that
   // points into it), and under npx our own __dirname is an ephemeral cache.
-  // The launcher lives in the state dir and finds the install at runtime.
-  const { WATCHDOG_LAUNCHER } = await import(resolve(__dirname, "_shared.mjs"));
+  // The launcher lives in the instance's state dir and finds the install at
+  // runtime; for a non-default instance the unit pins the OPENCLAW_* variables
+  // so the scheduled run serves that instance, not the default one (#116).
   const scriptPath = WATCHDOG_LAUNCHER;
+  const instanceEnv = openclawInstanceEnv();
   const refreshLauncher = () => {
     mkdirSync(dirname(WATCHDOG_LAUNCHER), { recursive: true });
     writeFileSync(WATCHDOG_LAUNCHER, wds.renderWatchdogLauncher());
@@ -403,7 +411,7 @@ async function watchdogStep() {
   }
   if (!(await yes("  Not scheduled. Schedule it now (runs every 5 min)?"))) return;
   refreshLauncher();
-  const unitFiles = wds.renderWatchdogUnit({ platform, nodePath: process.execPath, scriptPath });
+  const unitFiles = wds.renderWatchdogUnit({ platform, nodePath: process.execPath, scriptPath, env: instanceEnv });
   for (const uf of unitFiles) {
     const abs = join(homedir(), uf.path);
     mkdirSync(dirname(abs), { recursive: true });

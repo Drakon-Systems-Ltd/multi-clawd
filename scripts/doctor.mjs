@@ -31,14 +31,20 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { describeOpenclawPathSource, resolveOpenclawPaths } from "./_shared.mjs";
 
+// The OS home: Claude's native login dir (~/.claude) and the scheduler unit
+// dirs hang off it. OpenClaw's own tree does NOT (#116): that follows
+// OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH / OPENCLAW_HOME via OC below, so a
+// relocated or second instance is diagnosed, never the default one.
 const HOME = homedir();
+const OC = resolveOpenclawPaths();
 // OpenClaw's tracked install record (#85). Asking OpenClaw costs a process
 // launch (about 2 s on an idle host), so skip it for an unconfigured install.
 // Cache against the manifest and legacy record, with a one-day expiry.
 let inspectText;
 function loadInspectText(foundDir, configRecord) {
-  const cacheFile = join(HOME, ".openclaw", "state", "multi-clawd", "install-record.json");
+  const cacheFile = join(OC.multiClawdStateDir, "install-record.json");
   const recordKey = JSON.stringify({ source: configRecord?.source, version: configRecord?.version, installPath: configRecord?.installPath });
   let mtimeMs;
   try {
@@ -98,7 +104,7 @@ function trackedInstallPath(configRecord) {
 function resolveInstallDir() {
   const found = findInstallDirOnDisk();
   let config;
-  try { config = JSON.parse(readFileSync(join(HOME, ".openclaw", "openclaw.json"), "utf8")); } catch { /* no config */ }
+  try { config = JSON.parse(readFileSync(OC.configPath, "utf8")); } catch { /* no config */ }
   const record = config?.plugins?.installs?.["multi-clawd"];
   const legacyPath = typeof record?.installPath === "string" ? record.installPath : undefined;
   const hasFound = existsSync(join(found, "openclaw.plugin.json"));
@@ -111,9 +117,9 @@ function resolveInstallDir() {
 }
 
 function findInstallDirOnDisk() {
-  const extDir = join(HOME, ".openclaw", "extensions", "multi-clawd");
+  const extDir = join(OC.extensionsDir, "multi-clawd");
   if (existsSync(join(extDir, "openclaw.plugin.json"))) return extDir;
-  const projects = join(HOME, ".openclaw", "npm", "projects");
+  const projects = OC.npmProjectsDir;
   let best = extDir;
   let bestM = -1;
   try {
@@ -134,8 +140,8 @@ function findInstallDirOnDisk() {
   return best;
 }
 const EXT_DIR = resolveInstallDir();
-const CONFIG_PATH = join(HOME, ".openclaw", "openclaw.json");
-const STATE_DIR = join(HOME, ".openclaw", "state", "multi-clawd");
+const CONFIG_PATH = OC.configPath;
+const STATE_DIR = OC.multiClawdStateDir;
 const REPO_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const args = new Set(process.argv.slice(2));
@@ -224,6 +230,9 @@ const entry = config?.plugins?.entries?.["multi-clawd"];
 const pluginConfig = entry?.config ?? {};
 if (!manifest) bad(`no installed manifest at ${EXT_DIR}`);
 else ok(`installed at ${EXT_DIR}`);
+// Which instance this report describes (#116): the config path actually read,
+// and the variable that chose it when the environment did.
+note(`config ${CONFIG_PATH}${describeOpenclawPathSource(OC.configSource)}`);
 
 // Doctor itself ships in the CLI half, so a stale CLI means these very
 // findings were produced by older logic than the plugin they describe. That
@@ -808,7 +817,7 @@ if (!pool) {
     "locateSessionStore",
     "readSessionStore",
   ]);
-  const AGENTS_DIR = join(HOME, ".openclaw", "agents");
+  const AGENTS_DIR = OC.agentsDir;
   const stores = [];
   try {
     for (const agent of readdirSync(AGENTS_DIR)) {
@@ -1114,7 +1123,7 @@ if (watchdogFound) {
       }
       const target = text.match(/[^<>\s="']*(?:eviction-watchdog|watchdog-launcher)\.mjs/)?.[0];
       if (target && !existsSync(target)) orphan = { file: join(d, f), target };
-      else if (target && target.includes("/.openclaw/npm/projects/")) {
+      else if (target && /[\\/]npm[\\/]projects[\\/]/.test(target)) {
         warn(
           `watchdog unit ${join(d, f)} points INTO the npm install dir — regenerated on every update, so it WILL orphan. Run the setup wizard (or \`update\`) to move it to the stable launcher.`,
         );

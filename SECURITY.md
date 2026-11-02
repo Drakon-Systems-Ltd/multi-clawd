@@ -77,9 +77,10 @@ uses the same form.
 - **The watchdog is persistence.** `setup` schedules a user-level systemd timer
   (or launchd agent) that can restart the OpenClaw gateway. It is optional —
   skip it if you don't want that.
-- **The setup wizard edits `~/.openclaw/openclaw.json`.** It backs the file up
-  first and merges rather than overwrites, and `--dry-run` shows you the
-  changes without writing. Use it.
+- **The setup wizard edits the OpenClaw config file** (`~/.openclaw/openclaw.json`,
+  or the file `OPENCLAW_CONFIG_PATH` / `OPENCLAW_STATE_DIR` select; the banner
+  names it). It backs the file up first and merges rather than overwrites, and
+  `--dry-run` shows you the changes without writing. Use it.
 - **The agent-install one-liner is pinned to a release tag,** not `master`, so
   what your assistant reads and executes is fixed at a version you chose.
   Inspect `SETUP-AGENT.md` before pointing an agent at it — that advice holds

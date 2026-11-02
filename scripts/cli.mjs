@@ -17,9 +17,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, existsSync as existsSyncEarly } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { homedir as osHomedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
+import { describeOpenclawConfigError, multiClawdStateDir, openclawAgentsDir, openclawConfigPath, WATCHDOG_LAUNCHER } from "./_shared.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG = "@drakon-systems/multi-clawd";
@@ -183,7 +183,7 @@ async function cliSkewNote(cli = cliVersion(), plugin = installedVersion()) {
 /** The OpenClaw config as parsed JSON, or undefined when unreadable. */
 function readOpenclawConfigSync() {
   try {
-    return JSON.parse(readFileSync(join(osHomedir(), ".openclaw", "openclaw.json"), "utf8"));
+    return JSON.parse(readFileSync(openclawConfigPath(), "utf8"));
   } catch {
     return undefined;
   }
@@ -196,7 +196,6 @@ function readOpenclawConfigSync() {
  * or repairs the file.
  */
 async function requireOpenclawConfig(command) {
-  const { describeOpenclawConfigError, openclawConfigPath } = await import(join(__dirname, "_shared.mjs"));
   const path = openclawConfigPath();
   try {
     return JSON.parse(readFileSync(path, "utf8"));
@@ -229,8 +228,7 @@ async function loadDirect(config) {
     process.exit(1);
   }
   const { readFileSync: rf } = await import("node:fs");
-  const { homedir } = await import("node:os");
-  const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
+  const stateDir = multiClawdStateDir();
   const pool = pc.pool;
   const directRoute = pc.directRoute ?? {};
   const agents = Array.isArray(directRoute.agents) && directRoute.agents.length > 0 ? directRoute.agents : ["main"];
@@ -399,7 +397,6 @@ async function direct(args = []) {
  */
 async function chain(args = []) {
   const { readFileSync: rf, existsSync, readdirSync } = await import("node:fs");
-  const { homedir } = await import("node:os");
   const raw = args.includes("--raw");
 
   let ca;
@@ -473,7 +470,7 @@ async function chain(args = []) {
   // Session pins, across every agent's session store (2026.8.x SQLite database
   // or the older sessions.json — src/session-store.ts owns the where/how).
   const sessionFindings = [];
-  const agentsDir = join(homedir(), ".openclaw", "agents");
+  const agentsDir = openclawAgentsDir();
   try {
     const store = await import(resolve(__dirname, "..", "dist", "session-store.js"));
     for (const agent of readdirSync(agentsDir)) {
@@ -644,7 +641,6 @@ async function offerCliSelfUpdate(uc) {
 async function healWatchdogUnit() {
   try {
     const wds = await import(resolve(__dirname, "..", "dist", "watchdog-schedule.js"));
-    const { WATCHDOG_LAUNCHER } = await import(join(__dirname, "_shared.mjs"));
     const { existsSync, readdirSync, readFileSync: rf, writeFileSync, mkdirSync } = await import("node:fs");
     const { homedir } = await import("node:os");
     const { dirname: dn } = await import("node:path");
@@ -728,7 +724,6 @@ async function explain(args = []) {
     }
   }
   const { readFileSync: rf, existsSync } = await import("node:fs");
-  const { homedir } = await import("node:os");
   let ec, health, shim;
   try {
     ec = await import(resolve(__dirname, "..", "dist", "explain-core.js"));
@@ -745,7 +740,7 @@ async function explain(args = []) {
     ? { ...pc.pool, id: pc.pool.id?.trim() || "clawd", accounts: pc.pool.accounts ?? [] }
     : undefined;
   const chain = config?.agents?.defaults?.model;
-  const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
+  const stateDir = multiClawdStateDir();
   const now = Date.now();
   const rel = (ms) => {
     const m = Math.round((ms - now) / 60000);
@@ -834,7 +829,6 @@ async function explain(args = []) {
  */
 async function usageCommand(args) {
   const { readFileSync: rf } = await import("node:fs");
-  const { homedir } = await import("node:os");
   let up, health, shim, env;
   try {
     up = await import(resolve(__dirname, "..", "dist", "usage-poll.js"));
@@ -858,7 +852,7 @@ async function usageCommand(args) {
   const warnThreshold = up.effectiveUsageWarnThreshold(pool?.usagePoll);
   const rotateAt = pool?.utilizationThreshold ?? 0.85;
   const weeklyRotateAt = pool?.weeklyUtilizationThreshold;
-  const stateDir = join(homedir(), ".openclaw", "state", "multi-clawd");
+  const stateDir = multiClawdStateDir();
   const now = Date.now();
   const rows = [];
   const resetById = new Map();
@@ -1076,7 +1070,7 @@ switch (cmd) {
     await requireOpenclawConfig("account");
     try {
       const { changeAccount } = await import("./account-config.mjs");
-      const result = changeAccount(id, action === "disable", flags.includes("--dry-run"));
+      const result = changeAccount(id, action === "disable", flags.includes("--dry-run"), openclawConfigPath());
       console.log(`${result.dryRun ? "dry run: " : ""}${id}: ${action === "disable" ? "disabled" : "enabled"}${result.changed ? "" : " (already set)"}`);
       if (result.backup) console.log(`backup: ${result.backup}`);
       if (!result.dryRun && result.changed) console.log("Takes effect when the plugin next reads config (for example after gateway reload); running turns continue.");

@@ -10,8 +10,8 @@
  * a missing build. Nothing here may import `openclaw`, directly or
  * transitively — tests/cli-peer-independence.test.ts enforces it.
  */
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { multiClawdStateDir } from "./openclaw-paths.js";
 import { persistHealthState, readHealthStateFile } from "./health-journal.js";
 import {
   clearCredentialFailure,
@@ -19,7 +19,7 @@ import {
 
 /** Per-account health state written by the shim, read by the steering hook. */
 export function healthStateFile(accountId: string): string {
-  return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.json`);
+  return join(multiClawdStateDir(), `${accountId}.json`);
 }
 
 /**
@@ -29,7 +29,7 @@ export function healthStateFile(accountId: string): string {
  * lost-update race between the two read-merge-write paths.
  */
 export function usageStateFile(accountId: string): string {
-  return join(homedir(), ".openclaw", "state", "multi-clawd", `${accountId}.usage.json`);
+  return join(multiClawdStateDir(), `${accountId}.usage.json`);
 }
 
 /**

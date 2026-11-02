@@ -35,12 +35,14 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { multiClawdStateDir, openclawAgentsDir } from "./_shared.mjs";
 
-const HOME = homedir();
-const STATE_DIR = join(HOME, ".openclaw", "state", "multi-clawd");
+// The instance this watchdog serves is chosen by the environment (#116); the
+// scheduler unit pins OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH for a
+// non-default one.
+const STATE_DIR = multiClawdStateDir();
 const stateFile = process.env.MULTI_CLAWD_WATCHDOG_STATE ?? join(STATE_DIR, "watchdog.json");
 const spoolFile = join(STATE_DIR, "alerts-spool.jsonl");
 const SIGNATURE = /Unknown CLI backend: /;
@@ -91,7 +93,7 @@ try {
 }
 
 function newestTranscriptMtime() {
-  const agentsDir = join(HOME, ".openclaw", "agents");
+  const agentsDir = openclawAgentsDir();
   let newest = 0;
   try {
     for (const agent of readdirSync(agentsDir)) {
