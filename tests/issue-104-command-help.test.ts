@@ -72,7 +72,10 @@ describe("per-command help (#104)", () => {
         expect(r.status).toBe(0);
         expect(r.stdout).toContain(`multi-clawd ${cmd}`);
         expect(out).not.toContain("sentinel-acct-104");
-        expect(out).not.toMatch(/could not read|preflight|Which account\?|no multi-clawd accounts|✓|✗/i);
+        // `preflight:` (with the colon) is how both the wizard's and doctor's
+        // preflight messages start; the bare word also appears in doctor's
+        // help text, where it is not a side effect.
+        expect(out).not.toMatch(/could not read|preflight:|Which account\?|no multi-clawd accounts|✓|✗/i);
         expect(after).toEqual(before);
       });
     }

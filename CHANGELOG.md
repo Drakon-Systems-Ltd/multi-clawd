@@ -6,6 +6,19 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- Every CLI command now rejects a flag its `--help` does not list, the way
+  `explain` already did (#121). One shared check in the CLI runs before
+  anything is dispatched: it prints one line naming the flag plus the
+  command's usage line, exits 1, and does nothing else — no config read, no
+  sibling script spawned. `setup --dryrun` (a typo for `--dry-run`) used to
+  run the wizard in write mode and rewrite `openclaw.json` with a backup
+  beside it; `chain --json`, `usage --bogus` and `doctor --bogus` used to run
+  normally and exit 0. Only exact spellings pass (`--dry-run=yes` is
+  unknown), a flag's value such as `--since 24h` is not treated as a flag,
+  and `hermes` keeps handling its own flags. `doctor --help` now lists
+  `--preflight`, which the health check already accepted.
+
 ## [2.6.3] - 2026-11-03
 
 ### Fixed
