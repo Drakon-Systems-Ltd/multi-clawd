@@ -53,23 +53,85 @@ Run via npx (${DIM}npx ${PKG} <command>${RESET}) or install globally
 // Per-command usage, printed for `<command> --help` / `-h` before anything is
 // dispatched, so asking for help never reads config, runs checks, or starts the
 // setup wizard. `hermes` is absent on purpose: it handles its own help.
+//
+// `flags` is the complete set each command accepts and is what
+// rejectUnknownFlags checks against (#121), so a flag that is not in the help
+// text is, by construction, not accepted. Keep `usage` and `flags` in step.
 const COMMAND_HELP = {
-  setup: "multi-clawd setup [--dry-run]\n\n  Guided setup wizard (accounts, pool, watchdog).\n  --dry-run   preview the changes without writing anything",
-  login: "multi-clawd login [<id>]\n\n  Log a configured account in (or re-auth it). Without <id>, lists the\n  configured accounts to choose from.",
-  account: "multi-clawd account <enable|disable> <id> [--dry-run]\n\n  Disable or enable a pool account.\n  --dry-run   preview the change without writing it",
-  explain: "multi-clawd explain [--json | --history [--since 7d|24h]]\n\n  Your setup in plain English: accounts, pool, fallback chain.\n  --json      machine-readable output\n  --history   recent pool events; --since limits the window",
-  chain: "multi-clawd chain [--raw]\n\n  Audit your model routing: what actually serves each turn.\n  --raw       include raw routing detail",
-  direct: "multi-clawd direct [status | sync [--dry-run] [--yes] [--resync]]\n\n  The direct anthropic/* route. Default is status.\n  sync        store profiles for the direct route\n  --dry-run   preview without writing\n  --yes       skip the confirmation prompt\n  --resync    refresh profiles that are already stored",
-  usage: "multi-clawd usage [--json]\n\n  Live usage per account from the provider: what is left, and what the\n  pool will do.\n  --json      machine-readable output",
-  update: "multi-clawd update\n\n  Update the plugin to the latest version.",
-  doctor: "multi-clawd doctor [--probe] [--probe-pool] [--verbose] [--raw]\n\n  Health check.\n  --probe       run a live turn per account plus the pool\n  --probe-pool  with --probe: probe the pool ref only (one turn)\n  --verbose     show more detail\n  --raw         show raw output",
-  version: "multi-clawd version\n\n  Show CLI and installed plugin versions.",
+  setup: {
+    usage: "multi-clawd setup [--dry-run]",
+    flags: ["--dry-run"],
+    detail: "  Guided setup wizard (accounts, pool, watchdog).\n  --dry-run   preview the changes without writing anything",
+  },
+  login: {
+    usage: "multi-clawd login [<id>]",
+    flags: [],
+    detail: "  Log a configured account in (or re-auth it). Without <id>, lists the\n  configured accounts to choose from.",
+  },
+  account: {
+    usage: "multi-clawd account <enable|disable> <id> [--dry-run]",
+    flags: ["--dry-run"],
+    detail: "  Disable or enable a pool account.\n  --dry-run   preview the change without writing it",
+  },
+  explain: {
+    usage: "multi-clawd explain [--json | --history [--since 7d|24h]]",
+    flags: ["--json", "--history", "--since"],
+    detail: "  Your setup in plain English: accounts, pool, fallback chain.\n  --json      machine-readable output\n  --history   recent pool events; --since limits the window",
+  },
+  chain: {
+    usage: "multi-clawd chain [--raw]",
+    flags: ["--raw"],
+    detail: "  Audit your model routing: what actually serves each turn.\n  --raw       include raw routing detail",
+  },
+  direct: {
+    usage: "multi-clawd direct [status | sync [--dry-run] [--yes] [--resync]]",
+    flags: ["--dry-run", "--yes", "--resync"],
+    detail: "  The direct anthropic/* route. Default is status.\n  sync        store profiles for the direct route\n  --dry-run   preview without writing\n  --yes       skip the confirmation prompt\n  --resync    refresh profiles that are already stored",
+  },
+  usage: {
+    usage: "multi-clawd usage [--json]",
+    flags: ["--json"],
+    detail: "  Live usage per account from the provider: what is left, and what the\n  pool will do.\n  --json      machine-readable output",
+  },
+  update: {
+    usage: "multi-clawd update",
+    flags: [],
+    detail: "  Update the plugin to the latest version.",
+  },
+  doctor: {
+    usage: "multi-clawd doctor [--probe] [--probe-pool] [--verbose] [--raw] [--preflight]",
+    flags: ["--probe", "--probe-pool", "--verbose", "--raw", "--preflight"],
+    detail: "  Health check.\n  --probe       run a live turn per account plus the pool\n  --probe-pool  with --probe: probe the pool ref only (one turn)\n  --verbose     show more detail\n  --raw         show raw output\n  --preflight   plan the install-manifest strip (used before an update)",
+  },
+  version: {
+    usage: "multi-clawd version",
+    flags: [],
+    detail: "  Show CLI and installed plugin versions.",
+  },
 };
 
 if (Object.hasOwn(COMMAND_HELP, cmd) && rest.some((a) => a === "--help" || a === "-h")) {
-  console.log(`\n${COMMAND_HELP[cmd]}\n`);
+  console.log(`\n${COMMAND_HELP[cmd].usage}\n\n${COMMAND_HELP[cmd].detail}\n`);
   process.exit(0);
 }
+
+// #121: a flag the command's help does not list is an error, not a no-op. It
+// runs before anything is dispatched — before config is read and, for `setup`
+// and `doctor`, before the sibling script is spawned — so a mistyped
+// `--dry-run` can never turn a preview into a write. Only the exact spellings
+// in `flags` pass: `--dry-run=yes` is as unknown as `--dryrun`. A flag's value
+// (`--since 24h`) is not a flag and is left to the command. `hermes` is not in
+// the table and keeps handling its own flags.
+function rejectUnknownFlags(command, args) {
+  if (!Object.hasOwn(COMMAND_HELP, command)) return;
+  const { usage, flags } = COMMAND_HELP[command];
+  const unknown = args.find((a) => a.startsWith("-") && a.length > 1 && !flags.includes(a));
+  if (unknown === undefined) return;
+  console.error(`${command}: unknown flag '${unknown}'`);
+  console.error(`usage: ${usage}`);
+  process.exit(1);
+}
+rejectUnknownFlags(cmd, rest);
 
 const { resolveInstallDir } = await import(join(__dirname, "_shared.mjs"));
 
@@ -654,7 +716,7 @@ async function explain(args = []) {
     const allowed = args[0] === "--history" && (args.length === 1 ||
       (args.length === 3 && args[1] === "--since"));
     if (!allowed) {
-      console.error("explain: usage: multi-clawd explain [--json | --history [--since 7d|24h]]");
+      console.error(`explain: usage: ${COMMAND_HELP.explain.usage}`);
       process.exitCode = 1;
       return;
     }
