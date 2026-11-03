@@ -328,11 +328,16 @@ What this means in practice:
   under *install & config*, so a report always says which instance it is about.
 - `setup` run for a non-default instance writes the watchdog launcher into
   that instance's state dir and pins `OPENCLAW_STATE_DIR` /
-  `OPENCLAW_CONFIG_PATH` / `OPENCLAW_HOME` into the scheduler unit it creates,
-  so the scheduled run serves the same instance. There is one watchdog unit per
-  user (`multi-clawd-eviction-watchdog` / `com.multi-clawd.eviction-watchdog`),
-  and it follows whichever instance last ran `setup`; the gateway plugin and
-  shim take the variables from the gateway process that loads them.
+  `OPENCLAW_CONFIG_PATH` / `OPENCLAW_HOME` into the scheduler unit, so the
+  scheduled run serves the same instance (the launcher reads those variables,
+  not its own location). There is one watchdog unit per user
+  (`multi-clawd-eviction-watchdog` / `com.multi-clawd.eviction-watchdog`), and
+  it follows whichever instance last ran `setup` or `update`: an existing unit
+  that runs another instance's launcher, or the right launcher without this
+  instance's variables, is reported as not serving this instance and rewritten
+  (after a yes in `setup`; automatically by `update`'s self-heal), with the
+  previous unit kept next to it as a `.bak-…` copy. The gateway plugin and shim
+  take the variables from the gateway process that loads them.
 
 ## Platform support
 

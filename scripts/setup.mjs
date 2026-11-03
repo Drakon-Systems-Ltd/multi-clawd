@@ -369,40 +369,66 @@ async function watchdogStep() {
     /* scan dir missing — treated as absent */
   }
   const state = wds.classifyWatchdogUnit(found?.target, existsSync);
-  if (state === "ok" && !wds.isFragileWatchdogTarget(found.target)) {
-    if (found.target === WATCHDOG_LAUNCHER && !DRY_RUN) refreshLauncher();
-    console.log(`  ✅ already scheduled and healthy → ${found.target}`);
-    return;
-  }
-  if (state === "ok") {
-    // Exists today, but points INTO the npm install — orphans on next update.
-    console.log(
-      `  ⚠ ${found.file}\n    points INTO the npm install dir:\n    ${found.target}\n    That directory is regenerated on every update — the unit will orphan.`,
-    );
-    if (DRY_RUN) {
-      console.log(`  dry-run: would move it to the stable launcher ${scriptPath}`);
+  if (state !== "absent") {
+    // An existing unit serves THIS instance only when it runs this instance's
+    // launcher with this instance's OPENCLAW_* variables pinned (#116). The
+    // launcher reads those variables, not its own location, so a unit that
+    // runs the right file unpinned (or pinned for another instance) scans the
+    // wrong instance and no-ops. There is one unit per user; it follows the
+    // instance that last ran setup.
+    let plan;
+    try {
+      plan = wds.planWatchdogUnit({
+        platform,
+        unitText: found.text,
+        target: found.target,
+        launcher: scriptPath,
+        env: instanceEnv,
+        nodePath: process.execPath,
+        exists: existsSync,
+      });
+    } catch (err) {
+      // A path or pinned value that cannot be written into a unit file (a line
+      // break): say so and leave the existing unit alone.
+      console.log(`  ⚠ ${found.file} left unchanged — ${err?.message ?? err}`);
       return;
     }
-    if (!(await yes("  Move it to the stable launcher (survives every update)?"))) return;
-    refreshLauncher();
-    writeFileSync(found.file, found.text.split(found.target).join(scriptPath));
-    reloadWatchdogUnit(platform, found.file);
-    console.log(`  ✅ now → ${scriptPath}`);
-    return;
-  }
-  if (state === "orphaned") {
-    console.log(
-      `  ⚠ ${found.file}\n    points at a MISSING script: ${found.target}\n    (an old install dir — the watchdog has been failing silently)`,
-    );
-    if (DRY_RUN) {
-      console.log(`  dry-run: would repoint it at the stable launcher ${scriptPath}`);
+    const pinKeys = Object.keys(instanceEnv).sort();
+    const pinNote = pinKeys.length ? ` (pins ${pinKeys.join(", ")})` : "";
+    if (plan.action === "keep") {
+      if (!DRY_RUN) refreshLauncher();
+      console.log(`  ✅ already scheduled and healthy → ${found.target}${pinNote}`);
       return;
     }
-    if (!(await yes("  Repoint it at the stable launcher (survives every update)?"))) return;
+    const why = {
+      orphaned: `points at a MISSING script: ${found.target}\n    (an old install dir — the watchdog has been failing silently)`,
+      fragile: `points INTO the npm install dir:\n    ${found.target}\n    That directory is regenerated on every update — the unit will orphan.`,
+      "other-launcher": `points at ${found.target}\n    which is not this instance's launcher.`,
+      "instance-env": pinKeys.length
+        ? `does not pin this instance's ${pinKeys.join(", ")} — the scheduled run would act on a different OpenClaw instance.`
+        : `pins OPENCLAW_* variables for another instance — the scheduled run would not act on the default instance.`,
+    };
+    console.log(`  ⚠ ${found.file}\n    ${plan.reasons.map((r) => why[r]).join("\n    ")}`);
+    const verb = plan.action === "rewrite"
+      ? `rewrite it for this instance → ${scriptPath}${pinNote}`
+      : `repoint it at the stable launcher → ${scriptPath}`;
+    if (DRY_RUN) {
+      console.log(`  dry-run: would ${verb}`);
+      return;
+    }
+    const question = plan.action === "rewrite"
+      ? "  Rewrite it for this instance (launcher + OPENCLAW_* pin; the old unit is kept as a .bak)?"
+      : "  Repoint it at the stable launcher (survives every update)?";
+    if (!(await yes(question))) return;
     refreshLauncher();
-    writeFileSync(found.file, found.text.split(found.target).join(scriptPath));
+    if (plan.action === "rewrite") {
+      const backup = `${found.file}.bak-setup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      copyFileSync(found.file, backup);
+      console.log(`  backup: ${backup}`);
+    }
+    writeFileSync(found.file, plan.content);
     reloadWatchdogUnit(platform, found.file);
-    console.log(`  ✅ repointed → ${scriptPath}`);
+    console.log(`  ✅ now → ${scriptPath}${pinNote}`);
     return;
   }
   if (DRY_RUN) {
@@ -411,7 +437,13 @@ async function watchdogStep() {
   }
   if (!(await yes("  Not scheduled. Schedule it now (runs every 5 min)?"))) return;
   refreshLauncher();
-  const unitFiles = wds.renderWatchdogUnit({ platform, nodePath: process.execPath, scriptPath, env: instanceEnv });
+  let unitFiles;
+  try {
+    unitFiles = wds.renderWatchdogUnit({ platform, nodePath: process.execPath, scriptPath, env: instanceEnv });
+  } catch (err) {
+    console.log(`  ⚠ not scheduled — ${err?.message ?? err}`);
+    return;
+  }
   for (const uf of unitFiles) {
     const abs = join(homedir(), uf.path);
     mkdirSync(dirname(abs), { recursive: true });

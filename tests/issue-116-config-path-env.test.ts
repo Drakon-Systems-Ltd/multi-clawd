@@ -24,7 +24,9 @@ import { join, resolve } from "node:path";
 // Both resolvers, imported as the code imports them.
 import * as scriptsPaths from "../scripts/_shared.mjs";
 import * as srcPaths from "../src/openclaw-paths.js";
-import { renderWatchdogLauncher, renderWatchdogUnit, isFragileWatchdogTarget } from "../src/watchdog-schedule.js";
+import {
+  extractWatchdogEnv, isFragileWatchdogTarget, planWatchdogUnit, renderWatchdogLauncher, renderWatchdogUnit,
+} from "../src/watchdog-schedule.js";
 
 const ROOT = join(__dirname, "..");
 const CLI = join(ROOT, "scripts", "cli.mjs");
@@ -458,6 +460,226 @@ describe("the watchdog launcher and units carry the instance (#116)", () => {
     expect(isFragileWatchdogTarget("/inst/a/npm/projects/drakon-systems-multi-clawd-x/node_modules/@drakon-systems/multi-clawd/scripts/eviction-watchdog.mjs")).toBe(true);
     expect(isFragileWatchdogTarget("/inst/a/extensions/multi-clawd/scripts/eviction-watchdog.mjs")).toBe(false);
     expect(isFragileWatchdogTarget("/inst/a/state/multi-clawd/watchdog-launcher.mjs")).toBe(false);
+  });
+});
+
+describe("an existing watchdog unit is moved onto the selected instance (#116)", () => {
+  // The one user unit follows the instance that last ran setup / update. A
+  // unit is healthy for an instance only when it runs THAT instance's launcher
+  // with THAT instance's variables pinned: the launcher reads process.env, not
+  // its own path, so a right-file/wrong-pin unit scans another instance.
+  const NODE = "/usr/bin/node";
+  const DEFAULT_LAUNCHER = "/home/u/.openclaw/state/multi-clawd/watchdog-launcher.mjs";
+  const A_LAUNCHER = "/inst/a/state/multi-clawd/watchdog-launcher.mjs";
+  const A_ENV = { OPENCLAW_STATE_DIR: "/inst/a" };
+  const unitFor = (scriptPath: string, env?: Record<string, string>) =>
+    renderWatchdogUnit({ platform: "linux", nodePath: NODE, scriptPath, env })[0].content;
+  const plan = (unitText: string, target: string, launcher: string, env: Record<string, string>, platform = "linux", exists = () => true) =>
+    planWatchdogUnit({ platform, unitText, target, launcher, env, nodePath: NODE, exists });
+
+  test("a healthy DEFAULT unit is not healthy for OPENCLAW_STATE_DIR: it is rewritten with the instance launcher and pin", () => {
+    const p = plan(unitFor(DEFAULT_LAUNCHER), DEFAULT_LAUNCHER, A_LAUNCHER, A_ENV);
+    expect(p.action).toBe("rewrite");
+    expect(p.reasons).toEqual(["other-launcher", "instance-env"]);
+    expect(p.content).toContain('Environment="OPENCLAW_STATE_DIR=/inst/a"');
+    expect(p.content).toContain(`ExecStart=${NODE} ${A_LAUNCHER}`);
+    expect(p.content).not.toContain(DEFAULT_LAUNCHER);
+  });
+
+  test("the same unit IS healthy for the default instance", () => {
+    expect(plan(unitFor(DEFAULT_LAUNCHER), DEFAULT_LAUNCHER, DEFAULT_LAUNCHER, {})).toEqual({ action: "keep", reasons: [] });
+  });
+
+  test("a unit pinned for instance a is rewritten without the pin when the default instance runs setup", () => {
+    const p = plan(unitFor(A_LAUNCHER, A_ENV), A_LAUNCHER, DEFAULT_LAUNCHER, {});
+    expect(p.action).toBe("rewrite");
+    expect(p.reasons).toEqual(["other-launcher", "instance-env"]);
+    expect(p.content).not.toMatch(/OPENCLAW_|Environment=/);
+    expect(p.content).toContain(`ExecStart=${NODE} ${DEFAULT_LAUNCHER}`);
+  });
+
+  test("the right launcher without the pin still scans the wrong instance, so it is rewritten", () => {
+    const p = plan(unitFor(A_LAUNCHER), A_LAUNCHER, A_LAUNCHER, A_ENV);
+    expect(p.action).toBe("rewrite");
+    expect(p.reasons).toEqual(["instance-env"]);
+    expect(p.content).toContain('Environment="OPENCLAW_STATE_DIR=/inst/a"');
+  });
+
+  test("a stale pin for another instance is a mismatch even when the launcher path is right", () => {
+    const p = plan(unitFor(A_LAUNCHER, { OPENCLAW_STATE_DIR: "/inst/b" }), A_LAUNCHER, A_LAUNCHER, A_ENV);
+    expect(p.action).toBe("rewrite");
+    expect(p.reasons).toEqual(["instance-env"]);
+  });
+
+  test("a healthy, correctly pinned instance unit is kept (darwin too)", () => {
+    expect(plan(unitFor(A_LAUNCHER, A_ENV), A_LAUNCHER, A_LAUNCHER, A_ENV)).toEqual({ action: "keep", reasons: [] });
+    const plist = renderWatchdogUnit({ platform: "darwin", nodePath: NODE, scriptPath: A_LAUNCHER, env: A_ENV })[0].content;
+    expect(plan(plist, A_LAUNCHER, A_LAUNCHER, A_ENV, "darwin")).toEqual({ action: "keep", reasons: [] });
+    const p = plan(plist, A_LAUNCHER, DEFAULT_LAUNCHER, {}, "darwin");
+    expect(p.action).toBe("rewrite");
+    expect(p.content).not.toContain("EnvironmentVariables");
+    expect(p.content).toContain(`<string>${DEFAULT_LAUNCHER}</string>`);
+  });
+
+  test("orphaned or fragile with the pin already right: repoint only, the operator's unit text survives", () => {
+    const custom = `[Unit]\nDescription=my watchdog (custom)\n\n[Service]\nType=oneshot\nEnvironment="OPENCLAW_STATE_DIR=/inst/a"\nExecStart=${NODE} /inst/a/npm/projects/drakon-systems-multi-clawd-x/node_modules/@drakon-systems/multi-clawd/scripts/eviction-watchdog.mjs\n`;
+    const fragileTarget = "/inst/a/npm/projects/drakon-systems-multi-clawd-x/node_modules/@drakon-systems/multi-clawd/scripts/eviction-watchdog.mjs";
+    const p = plan(custom, fragileTarget, A_LAUNCHER, A_ENV);
+    expect(p).toMatchObject({ action: "repoint", reasons: ["fragile"] });
+    expect(p.content).toBe(custom.split(fragileTarget).join(A_LAUNCHER));
+    const gone = plan(custom, fragileTarget, A_LAUNCHER, A_ENV, "linux", () => false);
+    expect(gone).toMatchObject({ action: "repoint", reasons: ["orphaned"] });
+  });
+
+  test("orphaned AND unpinned: rewritten, both reasons reported", () => {
+    const p = plan(unitFor("/gone/scripts/eviction-watchdog.mjs"), "/gone/scripts/eviction-watchdog.mjs", A_LAUNCHER, A_ENV, "linux", () => false);
+    expect(p.action).toBe("rewrite");
+    expect(p.reasons).toEqual(["orphaned", "instance-env"]);
+  });
+
+  test("extractWatchdogEnv reads systemd quoting (escapes, several per line, bare) and the launchd dict (XML entities)", () => {
+    const unit = `[Service]\nEnvironment="OPENCLAW_STATE_DIR=/a b/\\"q\\"" OPENCLAW_HOME=/h\nEnvironment=OTHER=1 'OPENCLAW_CONFIG_PATH=/c d.json'\n`;
+    expect(extractWatchdogEnv(unit)).toEqual({
+      OPENCLAW_STATE_DIR: '/a b/"q"',
+      OPENCLAW_HOME: "/h",
+      OPENCLAW_CONFIG_PATH: "/c d.json",
+    });
+    const plist = `<dict><key>EnvironmentVariables</key>\n<dict>\n<key>OPENCLAW_STATE_DIR</key>\n<string>/r&amp;d/&lt;a&gt;</string>\n<key>PATH</key><string>/x</string></dict></dict>`;
+    expect(extractWatchdogEnv(plist)).toEqual({ OPENCLAW_STATE_DIR: "/r&d/<a>" });
+    expect(extractWatchdogEnv(`ExecStart=${NODE} ${A_LAUNCHER}\n`)).toEqual({});
+  });
+
+  test("a rendered pin round-trips through extractWatchdogEnv on both platforms, including quotes, backslashes and ampersands", () => {
+    const env = { OPENCLAW_STATE_DIR: '/odd \\ "dir" & co', OPENCLAW_CONFIG_PATH: "/c<fg>.json" };
+    for (const platform of ["linux", "darwin"]) {
+      const [unit] = renderWatchdogUnit({ platform, nodePath: NODE, scriptPath: A_LAUNCHER, env });
+      expect(extractWatchdogEnv(unit.content)).toEqual(env);
+    }
+  });
+
+  test("a line break in a path or pinned value never reaches a unit file (would start a second directive)", () => {
+    const base = { platform: "linux", nodePath: NODE };
+    expect(() => renderWatchdogUnit({ ...base, scriptPath: "/x/launcher.mjs\nExecStart=/bin/sh evil" })).toThrow(/line break/);
+    expect(() => renderWatchdogUnit({ ...base, scriptPath: A_LAUNCHER, env: { OPENCLAW_STATE_DIR: "/a\n[Service]\nExecStart=/bin/sh" } })).toThrow(/line break/);
+    expect(() => renderWatchdogUnit({ ...base, scriptPath: A_LAUNCHER, env: { "BAD KEY": "/a" } })).toThrow(/not a valid environment variable name/);
+    expect(() => renderWatchdogUnit({ ...base, platform: "darwin", scriptPath: "/x/launcher.mjs\n<string>evil</string>" })).toThrow(/line break/);
+  });
+
+  test("darwin ProgramArguments escape XML in the script and node paths", () => {
+    const [plist] = renderWatchdogUnit({ platform: "darwin", nodePath: "/opt/<n>/node", scriptPath: "/inst/r&d/state/multi-clawd/watchdog-launcher.mjs" });
+    expect(plist.content).toContain("<string>/opt/&lt;n&gt;/node</string>");
+    expect(plist.content).toContain("<string>/inst/r&amp;d/state/multi-clawd/watchdog-launcher.mjs</string>");
+    expect(plist.content).not.toContain("r&d");
+  });
+
+  // ── through the wizard and the update self-heal, against a fixture HOME ──
+  function instanceWithUnit(f: Fixture) {
+    const state = join(f.root, "instance-a");
+    writeConfig(join(state, "openclaw.json"), config(["claw1"]));
+    const defaultLauncher = join(f.home, ".openclaw", "state", "multi-clawd", "watchdog-launcher.mjs");
+    mkdirSync(join(defaultLauncher, ".."), { recursive: true });
+    writeFileSync(defaultLauncher, "// default-instance launcher, must stay byte-identical\n");
+    const unitDir = join(f.home, ".config", "systemd", "user");
+    mkdirSync(unitDir, { recursive: true });
+    const service = join(unitDir, "multi-clawd-eviction-watchdog.service");
+    const [svc, timer] = renderWatchdogUnit({ platform: "linux", nodePath: process.execPath, scriptPath: defaultLauncher });
+    writeFileSync(service, svc.content);
+    writeFileSync(join(unitDir, "multi-clawd-eviction-watchdog.timer"), timer.content);
+    stub(f, "claude", "echo 1.0.0");
+    stub(f, "systemctl", 'echo "NEXT LEFT LAST PASSED UNIT ACTIVATES"');
+    return { state, service, defaultLauncher, instanceLauncher: join(state, "state", "multi-clawd", "watchdog-launcher.mjs") };
+  }
+
+  test("setup --dry-run: an existing healthy default unit is reported as serving another instance, with the rewrite it would do", () => {
+    if (process.platform !== "linux") return;
+    withFixture((f) => {
+      const { state, service, instanceLauncher } = instanceWithUnit(f);
+      const r = run(f, ["--dry-run"], { OPENCLAW_STATE_DIR: state }, join(ROOT, "scripts", "setup.mjs"), "n\nn\n");
+      expect(r.status).toBe(0);
+      expect(r.out).not.toContain("already scheduled and healthy");
+      expect(r.out).toContain(`⚠ ${service}`);
+      expect(r.out).toContain("does not pin this instance's OPENCLAW_STATE_DIR");
+      expect(r.out).toContain(`dry-run: would rewrite it for this instance → ${instanceLauncher} (pins OPENCLAW_STATE_DIR)`);
+      expect(r.after).toEqual(r.before);
+    });
+  });
+
+  test("setup: answering yes rewrites the unit for the instance (launcher + pin), keeps a backup and leaves the default launcher untouched", () => {
+    if (process.platform !== "linux") return;
+    withFixture((f) => {
+      const { state, service, defaultLauncher, instanceLauncher } = instanceWithUnit(f);
+      const before = readFileSync(defaultLauncher, "utf8");
+      // MAIN? no. SECOND? no. direct route? no. (pool exists, nothing to write.) Rewrite the unit? yes.
+      const r = run(f, [], { OPENCLAW_STATE_DIR: state }, join(ROOT, "scripts", "setup.mjs"), "n\nn\nn\ny\n");
+      expect(r.status).toBe(0);
+      expect(r.out).toContain(`✅ now → ${instanceLauncher} (pins OPENCLAW_STATE_DIR)`);
+      const unit = readFileSync(service, "utf8");
+      expect(unit).toContain(`Environment="OPENCLAW_STATE_DIR=${state}"`);
+      expect(unit).toContain(`ExecStart=${process.execPath} ${instanceLauncher}`);
+      expect(unit).not.toContain(defaultLauncher);
+      expect(extractWatchdogEnv(unit)).toEqual({ OPENCLAW_STATE_DIR: state });
+      const backups = readdirSync(join(service, "..")).filter((n) => n.startsWith("multi-clawd-eviction-watchdog.service.bak-setup-"));
+      expect(backups).toHaveLength(1);
+      expect(readFileSync(join(service, "..", backups[0]), "utf8")).toContain(defaultLauncher);
+      expect(existsSync(instanceLauncher)).toBe(true);
+      expect(readFileSync(instanceLauncher, "utf8")).toBe(renderWatchdogLauncher());
+      expect(readFileSync(defaultLauncher, "utf8")).toBe(before);
+      // Second run: now healthy for this instance, nothing more to change.
+      const again = run(f, ["--dry-run"], { OPENCLAW_STATE_DIR: state }, join(ROOT, "scripts", "setup.mjs"), "n\nn\n");
+      expect(again.out).toContain(`already scheduled and healthy → ${instanceLauncher} (pins OPENCLAW_STATE_DIR)`);
+      expect(again.after).toEqual(again.before);
+    });
+  });
+
+  test("update's self-heal applies the same rule: default unit + OPENCLAW_STATE_DIR → rewritten and pinned, then idempotent", () => {
+    if (process.platform !== "linux") return;
+    withFixture((f) => {
+      const { state, service, defaultLauncher, instanceLauncher } = instanceWithUnit(f);
+      const driver = join(f.root, "heal-driver.mjs");
+      writeFileSync(driver, [
+        "const wds = await import(process.argv[2]);",
+        "const { healWatchdogUnits } = await import(process.argv[3]);",
+        "console.log(JSON.stringify(healWatchdogUnits(wds, { log: () => {} })));",
+      ].join("\n"));
+      const args = [join(ROOT, "dist", "watchdog-schedule.js"), join(ROOT, "scripts", "_watchdog-heal.mjs")];
+      const r = run(f, args, { OPENCLAW_STATE_DIR: state }, driver);
+      expect(r.status).toBe(0);
+      expect(JSON.parse(r.out.trim())).toEqual([service]);
+      const unit = readFileSync(service, "utf8");
+      expect(unit).toContain(`Environment="OPENCLAW_STATE_DIR=${state}"`);
+      expect(unit).toContain(`ExecStart=${process.execPath} ${instanceLauncher}`);
+      expect(readdirSync(join(service, "..")).some((n) => n.startsWith("multi-clawd-eviction-watchdog.service.bak-update-"))).toBe(true);
+      expect(existsSync(instanceLauncher)).toBe(true);
+      expect(readFileSync(defaultLauncher, "utf8")).toContain("must stay byte-identical");
+      const again = run(f, args, { OPENCLAW_STATE_DIR: state }, driver);
+      expect(JSON.parse(again.out.trim())).toEqual([]);
+      expect(again.after).toEqual(again.before);
+    });
+  });
+
+  test("update's self-heal for the default instance still repoints an orphan in place without touching its text otherwise", () => {
+    if (process.platform !== "linux") return;
+    withFixture((f) => {
+      const unitDir = join(f.home, ".config", "systemd", "user");
+      mkdirSync(unitDir, { recursive: true });
+      const service = join(unitDir, "custom-watchdog.service");
+      const gone = join(f.root, "old-install", "scripts", "eviction-watchdog.mjs");
+      writeFileSync(service, `[Unit]\nDescription=operator's own unit\n\n[Service]\nType=oneshot\nExecStart=${process.execPath} ${gone}\n`);
+      stub(f, "systemctl", "exit 0");
+      const driver = join(f.root, "heal-driver.mjs");
+      writeFileSync(driver, [
+        "const wds = await import(process.argv[2]);",
+        "const { healWatchdogUnits } = await import(process.argv[3]);",
+        "console.log(JSON.stringify(healWatchdogUnits(wds, { log: () => {} })));",
+      ].join("\n"));
+      const r = run(f, [join(ROOT, "dist", "watchdog-schedule.js"), join(ROOT, "scripts", "_watchdog-heal.mjs")], {}, driver);
+      expect(r.status).toBe(0);
+      expect(JSON.parse(r.out.trim())).toEqual([service]);
+      const launcher = join(f.home, ".openclaw", "state", "multi-clawd", "watchdog-launcher.mjs");
+      expect(readFileSync(service, "utf8")).toBe(`[Unit]\nDescription=operator's own unit\n\n[Service]\nType=oneshot\nExecStart=${process.execPath} ${launcher}\n`);
+      expect(readdirSync(unitDir).some((n) => n.includes(".bak-"))).toBe(false);
+      expect(existsSync(launcher)).toBe(true);
+    });
   });
 });
 

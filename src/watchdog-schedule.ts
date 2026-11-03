@@ -18,10 +18,35 @@ function xmlEscape(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
 /** systemd `Environment="K=V"` quoting: backslash and double quote are escaped. */
 function systemdEscape(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
+
+/**
+ * A unit file is line-oriented (systemd) or element-oriented (plist): a
+ * newline or NUL inside an interpolated value would start a second directive
+ * (`ExecStart=` twice, a stray `<string>`), so no such value is ever rendered.
+ * Paths come from the operator's environment, never from a remote source,
+ * which makes refusing the right answer: the unit is not written at all.
+ */
+function assertUnitSafe(what: string, value: string): void {
+  if (/[\r\n\0]/.test(value)) {
+    throw new Error(`watchdog unit: ${what} contains a line break or NUL and cannot be written to a scheduler unit`);
+  }
+}
+
+/** The variables that select an OpenClaw instance; the only ones a unit pins. */
+export const OPENCLAW_INSTANCE_KEYS = ["OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH"] as const;
 
 export interface UnitFile {
   /** Path relative to the user's home directory. */
@@ -44,6 +69,12 @@ export function renderWatchdogUnit(opts: {
   env?: Record<string, string>;
 }): UnitFile[] {
   const pinned = Object.entries(opts.env ?? {}).filter(([, v]) => v !== "").sort(([a], [b]) => a.localeCompare(b));
+  assertUnitSafe("node path", opts.nodePath);
+  assertUnitSafe("script path", opts.scriptPath);
+  for (const [k, v] of pinned) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`watchdog unit: "${k}" is not a valid environment variable name`);
+    assertUnitSafe(`${k} value`, v);
+  }
   if (opts.platform === "darwin") {
     const envDict = pinned.length === 0 ? "" : `  <key>EnvironmentVariables</key>
   <dict>
@@ -61,8 +92,8 @@ ${pinned.map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscap
   <string>${WATCHDOG_LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${opts.nodePath}</string>
-    <string>${opts.scriptPath}</string>
+    <string>${xmlEscape(opts.nodePath)}</string>
+    <string>${xmlEscape(opts.scriptPath)}</string>
   </array>
 ${envDict}  <key>StartInterval</key>
   <integer>300</integer>
@@ -123,6 +154,128 @@ export function classifyWatchdogUnit(
 ): WatchdogUnitState {
   if (targetPath === undefined) return "absent";
   return exists(targetPath) ? "ok" : "orphaned";
+}
+
+/**
+ * The OpenClaw instance variables an existing unit pins, read back from its
+ * text: systemd `Environment=` assignments (quoted or bare, several per line,
+ * C-style escapes inside double quotes) or the launchd `EnvironmentVariables`
+ * dict. Only the instance keys are returned; anything else the operator
+ * added to the unit is theirs and never compared.
+ */
+export function extractWatchdogEnv(unitText: string): Record<string, string> {
+  const found: Record<string, string> = {};
+  const keep = (k: string, v: string) => {
+    if ((OPENCLAW_INSTANCE_KEYS as readonly string[]).includes(k)) found[k] = v;
+  };
+  for (const line of unitText.split(/\r?\n/)) {
+    const m = line.match(/^\s*Environment\s*=\s*(.*)$/);
+    if (!m) continue;
+    for (const token of splitSystemdAssignments(m[1])) {
+      const eq = token.indexOf("=");
+      if (eq > 0) keep(token.slice(0, eq), token.slice(eq + 1));
+    }
+  }
+  const dict = unitText.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+  if (dict) {
+    for (const pair of dict[1].matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g)) {
+      keep(xmlUnescape(pair[1]), xmlUnescape(pair[2]));
+    }
+  }
+  return found;
+}
+
+/** `Environment=` value → assignments, honouring systemd's quoting. */
+function splitSystemdAssignments(value: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < value.length) {
+    if (/\s/.test(value[i])) {
+      i += 1;
+      continue;
+    }
+    let token = "";
+    while (i < value.length && !/\s/.test(value[i])) {
+      const q = value[i];
+      if (q === '"' || q === "'") {
+        i += 1;
+        while (i < value.length && value[i] !== q) {
+          if (q === '"' && value[i] === "\\" && i + 1 < value.length) {
+            i += 1;
+            token += value[i] === "n" ? "\n" : value[i] === "t" ? "\t" : value[i];
+          } else {
+            token += value[i];
+          }
+          i += 1;
+        }
+        i += 1;
+      } else {
+        token += q;
+        i += 1;
+      }
+    }
+    out.push(token);
+  }
+  return out;
+}
+
+export type WatchdogUnitReason = "orphaned" | "fragile" | "other-launcher" | "instance-env";
+
+export interface WatchdogUnitPlan {
+  /** keep = serves this instance already; repoint = swap the script path; rewrite = render the unit afresh. */
+  action: "keep" | "repoint" | "rewrite";
+  reasons: WatchdogUnitReason[];
+  /** New text for the unit file the target was found in (repoint and rewrite). */
+  content?: string;
+}
+
+/**
+ * What to do with an existing watchdog unit so that it serves THIS instance
+ * (#116): the unit must run this instance's launcher (not an install path,
+ * not another instance's launcher) with exactly this instance's OPENCLAW_*
+ * variables pinned. The launcher reads those variables, not its own location,
+ * so a unit that runs the right file with the wrong (or no) pin still scans
+ * the wrong instance.
+ *
+ * `repoint` keeps the operator's unit text and swaps the script path: enough
+ * when the pinned variables already match. `rewrite` renders the unit anew
+ * from `renderWatchdogUnit` when the variables must change, since editing
+ * `Environment=` lines or a plist dict in place is not worth the fragility.
+ */
+export function planWatchdogUnit(opts: {
+  platform: string;
+  unitText: string;
+  target: string;
+  launcher: string;
+  env: Record<string, string>;
+  nodePath: string;
+  exists: (p: string) => boolean;
+}): WatchdogUnitPlan {
+  const reasons: WatchdogUnitReason[] = [];
+  if (!opts.exists(opts.target)) reasons.push("orphaned");
+  else if (isFragileWatchdogTarget(opts.target)) reasons.push("fragile");
+  else if (opts.target !== opts.launcher) reasons.push("other-launcher");
+  const want = Object.entries(opts.env).filter(([, v]) => v !== "");
+  const have = extractWatchdogEnv(opts.unitText);
+  const envMatches =
+    want.length === Object.keys(have).length && want.every(([k, v]) => have[k] === v);
+  if (!envMatches) reasons.push("instance-env");
+  if (reasons.length === 0) return { action: "keep", reasons };
+  if (envMatches) {
+    return { action: "repoint", reasons, content: opts.unitText.split(opts.target).join(opts.launcher) };
+  }
+  const [unit] = renderWatchdogUnit({
+    platform: opts.platform,
+    nodePath: opts.nodePath,
+    scriptPath: opts.launcher,
+    env: opts.env,
+  });
+  if (!unit) {
+    // Unsupported platform renders nothing; the path swap is still better than
+    // a dead unit.
+    return { action: "repoint", reasons, content: opts.unitText.split(opts.target).join(opts.launcher) };
+  }
+  return { action: "rewrite", reasons, content: unit.content };
 }
 
 /**

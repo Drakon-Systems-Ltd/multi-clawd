@@ -19,7 +19,7 @@ import { readFileSync, existsSync as existsSyncEarly } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline/promises";
-import { describeOpenclawConfigError, multiClawdStateDir, openclawAgentsDir, openclawConfigPath, WATCHDOG_LAUNCHER } from "./_shared.mjs";
+import { describeOpenclawConfigError, multiClawdStateDir, openclawAgentsDir, openclawConfigPath } from "./_shared.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PKG = "@drakon-systems/multi-clawd";
@@ -633,66 +633,14 @@ async function offerCliSelfUpdate(uc) {
 }
 
 /**
- * Self-heal the scheduled watchdog after an update: the npm install dir is
- * regenerated on every update, so a unit pointing into it just orphaned.
- * Move any broken-or-fragile unit onto the stable launcher; refresh the
- * launcher's content when a unit already uses it. Never fatal.
+ * Self-heal the scheduled watchdog after an update: see _watchdog-heal.mjs.
+ * Never fatal.
  */
 async function healWatchdogUnit() {
   try {
     const wds = await import(resolve(__dirname, "..", "dist", "watchdog-schedule.js"));
-    const { existsSync, readdirSync, readFileSync: rf, writeFileSync, mkdirSync } = await import("node:fs");
-    const { homedir } = await import("node:os");
-    const { dirname: dn } = await import("node:path");
-    for (const d of [
-      join(homedir(), "Library", "LaunchAgents"),
-      join(homedir(), ".config", "systemd", "user"),
-    ]) {
-      let files = [];
-      try {
-        files = readdirSync(d);
-      } catch {
-        continue;
-      }
-      for (const f of files) {
-        if (!/\.(plist|service|timer)$/.test(f)) continue;
-        const file = join(d, f);
-        let text;
-        try {
-          text = rf(file, "utf8");
-        } catch {
-          continue;
-        }
-        const target = wds.extractWatchdogTarget(text);
-        if (!target) continue;
-        const refreshLauncher = () => {
-          mkdirSync(dn(WATCHDOG_LAUNCHER), { recursive: true });
-          writeFileSync(WATCHDOG_LAUNCHER, wds.renderWatchdogLauncher());
-        };
-        if (target === WATCHDOG_LAUNCHER) {
-          refreshLauncher();
-          continue;
-        }
-        if (!existsSync(target) || wds.isFragileWatchdogTarget(target)) {
-          refreshLauncher();
-          writeFileSync(file, text.split(target).join(WATCHDOG_LAUNCHER));
-          if (d.endsWith("LaunchAgents")) {
-            // Direct spawns, not a `sh -c` string: no quoting to get wrong and
-            // no shell for a path to break out of. Both calls are best-effort —
-            // unload fails harmlessly when nothing is loaded yet.
-            spawnSync("launchctl", ["unload", file], { stdio: "ignore" });
-            spawnSync("launchctl", ["load", file], { stdio: "ignore" });
-          } else {
-            try {
-              execFileSync("systemctl", ["--user", "daemon-reload"]);
-            } catch {
-              /* manual reload needed */
-            }
-          }
-          console.log(`  🔧 watchdog unit ${f} → stable launcher (survives future updates)`);
-        }
-      }
-    }
+    const { healWatchdogUnits } = await import("./_watchdog-heal.mjs");
+    healWatchdogUnits(wds);
   } catch {
     /* healing is best-effort; doctor still reports the truth */
   }
