@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-11-03
+
 ### Fixed
 - The CLI (`explain`, `chain`, `usage`, `direct`, `account`, `login`,
   `hermes`), `setup`, `doctor`, the eviction watchdog and the gateway plugin
@@ -28,6 +30,12 @@ versioning from v1.0.
   rendering refuses a path or value containing a line break and XML-escapes
   the launchd program arguments. Nothing changes when none of the variables
   is set. README gains a "Config and state location" section.
+- `doctor` now stops up front, exits 1 and prints the same one-line config
+  diagnostic as every other command when `openclaw.json` is missing,
+  unreadable or malformed (#117). It used to swallow the read error and
+  evaluate every check against an empty config, printing green lines derived
+  from a file it never read. File content is never echoed; a valid config
+  still runs the full checks.
 
 ## [2.6.2] - 2026-11-01
 
