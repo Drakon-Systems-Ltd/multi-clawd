@@ -15,7 +15,7 @@ import {
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describeOpenclawConfigError } from "./_shared.mjs";
+import { describeOpenclawConfigError, openclawConfigPath } from "./_shared.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = join(HERE, "hermes_bridge.py");
@@ -125,7 +125,7 @@ function parseOptions(command, args, core) {
     else result.config = safePath(value, "config");
   }
   result.profile = core.validateHermesProfileName(result.profile);
-  result.config ??= join(homedir(), ".openclaw", "openclaw.json");
+  result.config ??= openclawConfigPath();
   return result;
 }
 

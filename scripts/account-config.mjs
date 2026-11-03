@@ -1,6 +1,5 @@
 import { constants, copyFileSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { openclawConfigPath } from "./_shared.mjs";
 
 /** Locate JSON object properties without reserializing the operator's config. */
 export function jsonSpans(source, offset = 0) {
@@ -96,7 +95,7 @@ export function editAccountDisabled(source, id, disabled) {
   return { edited, changed: edited !== source };
 }
 
-export function changeAccount(id, disabled, dryRun = false, configFile = join(homedir(), ".openclaw", "openclaw.json")) {
+export function changeAccount(id, disabled, dryRun = false, configFile = openclawConfigPath()) {
   const source = readFileSync(configFile, "utf8");
   const { edited, changed } = editAccountDisabled(source, id, disabled);
   if (dryRun || !changed) return { changed, dryRun };

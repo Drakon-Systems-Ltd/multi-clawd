@@ -124,8 +124,10 @@ setup-token file changes** — nothing propagates a new token automatically.
 ### What sync does
 
 Accounts are read from `plugins.entries["multi-clawd"].config.accounts` in
-`~/.openclaw/openclaw.json` by default. Every account is validated and every
-token file read and parsed before Hermes is asked to write anything.
+the OpenClaw config (`~/.openclaw/openclaw.json` by default; see
+[Config and state location](#config-and-state-location)). Every account is
+validated and every token file read and parsed before Hermes is asked to
+write anything.
 
 - Only deterministic rows labelled `multi-clawd:<account-id>` are added or
   updated, and only those rows are sent to Hermes — it merges them into the
@@ -297,6 +299,45 @@ claude-cli/claude-fable-5        # main login
   activity across all agents + opt-in worker pidfiles), with a 15-min defer
   cap and 10-min restart cooldown — a restart can no longer eat a live
   reply.
+
+## Config and state location
+
+Every command, the gateway plugin, the shim and the scheduled watchdog
+operate on **one** OpenClaw instance: the one the environment points at, as
+OpenClaw itself does ([multiple gateways](https://docs.openclaw.ai/gateway/multiple-gateways)).
+
+| Variable | Effect | Default |
+|---|---|---|
+| `OPENCLAW_CONFIG_PATH` | The OpenClaw config file that is read and, by `setup` and `account`, written. | `<state dir>/openclaw.json` |
+| `OPENCLAW_STATE_DIR` | The OpenClaw state directory: plugin installs (`extensions/`, `npm/projects/`), agent session stores (`agents/`) and everything multi-clawd writes (`state/multi-clawd/`). | `<home>/.openclaw` |
+| `OPENCLAW_HOME` | The home directory the default state directory hangs off. | the OS home |
+
+Values are trimmed, a blank value counts as unset, a leading `~` expands
+against the effective home, and a relative path resolves against the working
+directory. `OPENCLAW_PROFILE` on its own is not interpreted: `openclaw
+--profile <name>` exports the two variables above to the processes it starts,
+and those are what multi-clawd reads. `hermes sync|doctor --config <path>`
+still overrides the config file for that one command.
+
+What this means in practice:
+
+- A command run with `OPENCLAW_CONFIG_PATH=~/.openclaw/b.json` reads **and
+  writes** `b.json`; the default `openclaw.json` is never touched. When the
+  file is missing, the error names that path and the variable that chose it.
+- `doctor` prints the config path it read (and the variable, when one is set)
+  under *install & config*, so a report always says which instance it is about.
+- `setup` run for a non-default instance writes the watchdog launcher into
+  that instance's state dir and pins `OPENCLAW_STATE_DIR` /
+  `OPENCLAW_CONFIG_PATH` / `OPENCLAW_HOME` into the scheduler unit, so the
+  scheduled run serves the same instance (the launcher reads those variables,
+  not its own location). There is one watchdog unit per user
+  (`multi-clawd-eviction-watchdog` / `com.multi-clawd.eviction-watchdog`), and
+  it follows whichever instance last ran `setup` or `update`: an existing unit
+  that runs another instance's launcher, or the right launcher without this
+  instance's variables, is reported as not serving this instance and rewritten
+  (after a yes in `setup`; automatically by `update`'s self-heal), with the
+  previous unit kept next to it as a `.bak-…` copy. The gateway plugin and shim
+  take the variables from the gateway process that loads them.
 
 ## Platform support
 
@@ -974,8 +1015,8 @@ callsite (the ones static scanners flag) and why each exists.
 |---|---|
 | Network | The gateway plugin polls `https://api.anthropic.com/api/oauth/usage` for eligible pooled accounts on an interval (default 120000 ms / 2 minutes); `pool.usagePoll.enabled: false` disables that poll. `multi-clawd usage` requests the same endpoint on demand. `doctor` runs `npm view` when its registry cache is stale; install and update commands contact the package registry. Claude Code subprocesses make their own provider requests. No plugin telemetry or analytics endpoint. |
 | Credentials | Reads declared setup-token files or gateway-resolved `oauthTokenRef` values for Claude child launches; reads each eligible account's `.credentials.json` access token for the usage poll; reads Claude login credentials from files or the macOS Keychain via the `security` CLI for login checks and runtime auth; reads account identity for file-backed logins from `.claude.json` (`~/.claude.json` for a native login, or the account config dir). Setup tokens are passed to Claude through the child environment. |
-| Files read | `~/.openclaw/openclaw.json`, declared account config dirs and token files, Claude `.credentials.json` and `.claude.json` files as described above, and local state files. |
-| Files written | Under `~/.openclaw/state/multi-clawd/` by default: `<id>.json`, `<id>.usage.json`, `history.jsonl` (bounded account activity), `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes `~/.openclaw/openclaw.json` and a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher. |
+| Files read | The OpenClaw config (`~/.openclaw/openclaw.json`, or the file `OPENCLAW_CONFIG_PATH` / `OPENCLAW_STATE_DIR` / `OPENCLAW_HOME` select; see [Config and state location](#config-and-state-location)), declared account config dirs and token files, Claude `.credentials.json` and `.claude.json` files as described above, and local state files. |
+| Files written | Under `<OpenClaw state dir>/state/multi-clawd/` (`~/.openclaw/state/multi-clawd/` by default; `OPENCLAW_STATE_DIR` relocates it): `<id>.json`, `<id>.usage.json`, `history.jsonl` (bounded account activity), `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes the selected OpenClaw config file (`~/.openclaw/openclaw.json` by default) and a dated backup; `account enable|disable` edits the same file with a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher and, for a non-default instance, carries that instance's `OPENCLAW_*` variables. |
 | Processes | Launches Claude Code and the node + shim transport; CLI, setup and doctor run npm, OpenClaw, Claude and OS scheduler commands; the optional watchdog checks OpenClaw logs and may restart the gateway; Hermes integration runs its Python bridge. See [SECURITY.md](SECURITY.md) for the process-call table. |
 | Consent | The wizard asks before every write, merges non-destructively, and never overwrites an existing account entry. `--dry-run` previews everything. |
 

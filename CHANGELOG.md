@@ -6,6 +6,29 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- The CLI (`explain`, `chain`, `usage`, `direct`, `account`, `login`,
+  `hermes`), `setup`, `doctor`, the eviction watchdog and the gateway plugin
+  now honour OpenClaw's `OPENCLAW_CONFIG_PATH`, `OPENCLAW_STATE_DIR` and
+  `OPENCLAW_HOME` instead of always using `~/.openclaw/openclaw.json` and
+  `~/.openclaw/state/multi-clawd` (#116). One resolver selects the instance
+  for every path (config, plugin state, agent session stores, plugin install
+  dirs), so a relocated or second OpenClaw instance is read, diagnosed and —
+  for `setup` and `account enable|disable` — written in place of the default
+  one, never alongside it. A missing config names the path read and the
+  variable that chose it; `doctor` reports the config path (and variable) at
+  the top of its report; `setup` writes the watchdog launcher into the
+  instance's state dir and pins the instance variables into the scheduler
+  unit, and the launcher itself resolves the install under the instance's
+  state dir. An existing unit that runs another instance's launcher, or the
+  right launcher without this instance's variables, is no longer reported as
+  healthy: `setup` offers to rewrite it for this instance and `update`'s
+  self-heal does so automatically, keeping the previous unit as a `.bak-…`
+  copy; a unit that only needs a new path is still repointed in place. Unit
+  rendering refuses a path or value containing a line break and XML-escapes
+  the launchd program arguments. Nothing changes when none of the variables
+  is set. README gains a "Config and state location" section.
+
 ## [2.6.2] - 2026-11-01
 
 ### Fixed

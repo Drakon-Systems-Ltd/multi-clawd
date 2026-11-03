@@ -64,6 +64,7 @@ that calls a child-process API is listed here so you can check it yourself.
 | `dist/openclaw-runner.js` | the `openclaw` CLI (or `directRoute.openclawCommand`) | Direct route only: reads and writes the `anthropic` auth profiles and order through OpenClaw subcommands. A setup token travels on the child's stdin. |
 | `scripts/cli.mjs` | `npm view` / `npm i -g`, `openclaw --version`, `openclaw` plugin install and gateway restart, `claude` login/status commands, `launchctl` / `systemctl`, and `node <bundled script>` | Checks and updates the CLI/plugin, handles account login, dispatches subcommands and repairs watchdog scheduling. |
 | `scripts/setup.mjs` | `claude --version`, `launchctl` / `systemctl` | Checks the Claude CLI and loads or repairs optional watchdog scheduling. |
+| `scripts/_watchdog-heal.mjs` | `launchctl` / `systemctl` | Reloads the optional watchdog unit after `update` repoints or rewrites it for the selected OpenClaw instance. |
 | `scripts/doctor.mjs` | `npm view`, `claude --version`, `openclaw models auth list` / `openclaw agent`, `launchctl` / `systemctl` | Checks registry version when its cache is stale, inspects auth and watchdog status, and optionally probes accounts. |
 | `scripts/eviction-watchdog.mjs` | `openclaw logs --plain` / `openclaw gateway restart` | Detects the eviction signature and restarts the gateway when the watchdog's conditions are met. |
 | `scripts/hermes.mjs` | Python interpreter with `-c` / bundled bridge | Checks Python availability and runs the Hermes bridge. |
@@ -77,9 +78,10 @@ uses the same form.
 - **The watchdog is persistence.** `setup` schedules a user-level systemd timer
   (or launchd agent) that can restart the OpenClaw gateway. It is optional —
   skip it if you don't want that.
-- **The setup wizard edits `~/.openclaw/openclaw.json`.** It backs the file up
-  first and merges rather than overwrites, and `--dry-run` shows you the
-  changes without writing. Use it.
+- **The setup wizard edits the OpenClaw config file** (`~/.openclaw/openclaw.json`,
+  or the file `OPENCLAW_CONFIG_PATH` / `OPENCLAW_STATE_DIR` select; the banner
+  names it). It backs the file up first and merges rather than overwrites, and
+  `--dry-run` shows you the changes without writing. Use it.
 - **The agent-install one-liner is pinned to a release tag,** not `master`, so
   what your assistant reads and executes is fixed at a version you chose.
   Inspect `SETUP-AGENT.md` before pointing an agent at it — that advice holds

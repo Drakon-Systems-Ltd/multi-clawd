@@ -39,6 +39,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 import type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 import { homedir } from "node:os";
+import { multiClawdStateDir, openclawConfigPath } from "./openclaw-paths.js";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -315,7 +316,7 @@ export function pendingOperatorAlerts(nowMs: number): string | undefined {
  * so they append alerts to a spool file; each heartbeat ingests and clears it.
  */
 function ingestAlertSpool(): void {
-  const spool = join(homedir(), ".openclaw", "state", "multi-clawd", "alerts-spool.jsonl");
+  const spool = join(multiClawdStateDir(), "alerts-spool.jsonl");
   let raw: string;
   try {
     raw = readFileSync(spool, "utf8");
@@ -727,7 +728,7 @@ function buildRuntimeModel(
  */
 const SHIM_RUNTIME = materialiseRuntime(
   dirname(fileURLToPath(import.meta.url)),
-  join(homedir(), ".openclaw", "state", "multi-clawd"),
+  multiClawdStateDir(),
 );
 if (!SHIM_RUNTIME.stable) {
   console.error(
@@ -873,7 +874,7 @@ function preparedForLaunch(
 
 /** Catalog ids observed on previous runs — the baseline for "this model is new". */
 function knownModelsFile(): string {
-  return join(homedir(), ".openclaw", "state", "multi-clawd", "known-models.json");
+  return join(multiClawdStateDir(), "known-models.json");
 }
 
 /**
@@ -884,7 +885,7 @@ function knownModelsFile(): string {
 function readChainRefs(): string[] {
   try {
     const cfg = JSON.parse(
-      readFileSync(join(homedir(), ".openclaw", "openclaw.json"), "utf8"),
+      readFileSync(openclawConfigPath(), "utf8"),
     ) as { agents?: { defaults?: { model?: { primary?: unknown; fallbacks?: unknown } } } };
     const m = cfg?.agents?.defaults?.model;
     const refs: string[] = [];
@@ -1462,7 +1463,7 @@ function mergeStoredHealth(
  * from it; a missing or unreadable journal reads as nobody served.
  */
 function poolHistoryFile(): string {
-  return join(homedir(), ".openclaw", "state", "multi-clawd", HISTORY_FILE);
+  return join(multiClawdStateDir(), HISTORY_FILE);
 }
 
 function readStickyEntry(file: string): StickyEntry | undefined {
@@ -1584,9 +1585,7 @@ export function registerPoolBackend(
       `[multi-clawd] pool "${poolId}": strategy "spread" keeps each session on the account that first served it — sessionAffinity: false is ignored`,
     );
   }
-  const stickyFile = join(
-    homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sticky.json`,
-  );
+  const stickyFile = join(multiClawdStateDir(), `pool-${poolId}.sticky.json`);
   const backend = buildBackend(poolAccount, execMode, deps?.launch);
   const { launch, transport } = launchTransports.get(backend)!;
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
@@ -1673,7 +1672,7 @@ export function registerPoolBackend(
     } else if (strategy !== "spread" && decision.account !== previousAccount) {
       // Under spread a launch landing off home is a placement, not a
       // rotation: nothing moved and nothing is coming back, so no alert.
-      recordHistory(join(homedir(), ".openclaw", "state", "multi-clawd", `${previousAccount}.json`),
+      recordHistory(join(multiClawdStateDir(), `${previousAccount}.json`),
         { at: new Date(now).toISOString(), kind: "rotation", accountId: previousAccount,
           toAccountId: decision.account, modelId: requestedModel, reason: "pool_selection" });
       const home = verdicts[0];
@@ -1831,7 +1830,7 @@ export function registerPoolBackend(
     env[SESSION_DIRS_ENV] = JSON.stringify([...new Set(configuredMembers.map(accountConfigDir))]);
     if (affinityOn) {
       env[SESSION_AFFINITY_ENV] = JSON.stringify({
-        file: join(homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sessions.json`),
+        file: join(multiClawdStateDir(), `pool-${poolId}.sessions.json`),
         ttlMs: typeof pool.sessionAffinityTtlMs === "number" &&
           Number.isFinite(pool.sessionAffinityTtlMs) && pool.sessionAffinityTtlMs > 0
           ? pool.sessionAffinityTtlMs : DEFAULT_SESSION_AFFINITY_TTL_MS,
@@ -1888,7 +1887,7 @@ export function registerPoolBackend(
         ? async function* (execution) {
             const id = launchSessionId(execution.args);
             const pin = id ? readSessionPin(
-              join(homedir(), ".openclaw", "state", "multi-clawd", `pool-${poolId}.sessions.json`),
+              join(multiClawdStateDir(), `pool-${poolId}.sessions.json`),
               id, Date.now(),
               typeof pool.sessionAffinityTtlMs === "number" && pool.sessionAffinityTtlMs > 0
                 ? pool.sessionAffinityTtlMs : DEFAULT_SESSION_AFFINITY_TTL_MS,
@@ -2040,7 +2039,7 @@ export function startDirectOrderSync(params: {
     return { active: true, members: members.map((m) => m.accountId) };
   }
   stopDirectOrderSync();
-  const stickyFile = join(homedir(), ".openclaw", "state", "multi-clawd", "direct-order.sticky.json");
+  const stickyFile = join(multiClawdStateDir(), "direct-order.sticky.json");
   const controller = createDirectOrderController({
     members,
     agents,
