@@ -20,8 +20,14 @@ versioning from v1.0.
   the top of its report; `setup` writes the watchdog launcher into the
   instance's state dir and pins the instance variables into the scheduler
   unit, and the launcher itself resolves the install under the instance's
-  state dir. Nothing changes when none of the variables is set. README gains a
-  "Config and state location" section.
+  state dir. An existing unit that runs another instance's launcher, or the
+  right launcher without this instance's variables, is no longer reported as
+  healthy: `setup` offers to rewrite it for this instance and `update`'s
+  self-heal does so automatically, keeping the previous unit as a `.bak-…`
+  copy; a unit that only needs a new path is still repointed in place. Unit
+  rendering refuses a path or value containing a line break and XML-escapes
+  the launchd program arguments. Nothing changes when none of the variables
+  is set. README gains a "Config and state location" section.
 
 ## [2.6.2] - 2026-11-01
 
