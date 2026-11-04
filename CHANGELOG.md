@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-11-04
+
 ### Fixed
 - Every CLI command now rejects a flag its `--help` does not list, the way
   `explain` already did (#121). One shared check in the CLI runs before
