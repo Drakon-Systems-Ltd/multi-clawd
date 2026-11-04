@@ -994,6 +994,14 @@ async function login() {
   const target = rest[0];
   const acc = accounts.find((a) => a.id === target);
   if (!acc) {
+    if (target) {
+      // #122: a supplied-but-unknown id must be named before the list, or a
+      // typo looks like the argument was ignored.
+      console.error(`login: no account named '${target}' in ${openclawConfigPath()}`);
+      const squash = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, "");
+      const near = accounts.find((a) => squash(a.id) !== "" && squash(a.id) === squash(target));
+      if (near) console.error(`  did you mean '${near.id}'?`);
+    }
     console.log(`\n${BOLD}Which account?${RESET}  multi-clawd login <id>\n`);
     for (const a of accounts) {
       console.log(`  ${BOLD}${a.id}${RESET}${a.label ? `  "${a.label}"` : ""}`);
