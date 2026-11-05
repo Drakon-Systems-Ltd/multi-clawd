@@ -36,7 +36,7 @@ const FIXTURE = JSON.stringify({
   },
 }, null, 2);
 
-function run(args: string[]) {
+function run(args: string[], fixture: string = FIXTURE) {
   const root = mkdtempSync(join(tmpdir(), "mc-flags-121-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -45,7 +45,7 @@ function run(args: string[]) {
   mkdirSync(bin);
   mkdirSync(confDir);
   const config = join(confDir, "openclaw.json");
-  writeFileSync(config, FIXTURE);
+  writeFileSync(config, fixture);
   const r = spawnSync(process.execPath, [CLI, ...args], {
     encoding: "utf8",
     timeout: 20000,
@@ -155,5 +155,92 @@ describe("unknown flags are rejected before anything runs (#121)", () => {
     const { r } = run(["setup", "--dryrun", "--help"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("multi-clawd setup");
+  });
+});
+
+// Operands are not flags: an account id is any non-empty string (#109 panel
+// review). The baseline accepted these ids, so the validator must too.
+const HYPHEN_FIXTURE = JSON.stringify({
+  plugins: {
+    entries: {
+      "multi-clawd": {
+        config: {
+          accounts: [
+            { id: "-1", claudeDir: "~/.claude-neg" },
+            { id: "--odd", claudeDir: "~/.claude-odd" },
+            { id: "claw1", claudeDir: "~/.claude-claw1" },
+          ],
+          pool: { id: "clawd", accounts: ["claw1"] },
+        },
+      },
+    },
+  },
+}, null, 2);
+
+describe("operands that start with a hyphen are not flags (#109)", () => {
+  test("account disable -1 --dry-run: the id reaches the handler, config untouched", () => {
+    const { r, configAfter } = run(["account", "disable", "-1", "--dry-run"], HYPHEN_FIXTURE);
+    expect(r.stderr).toBe("");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("dry run: -1: disabled");
+    expect(configAfter).toBe(HYPHEN_FIXTURE);
+  });
+
+  test("account enable --odd --dry-run: even a --prefixed id is an operand in the id slot", () => {
+    const { r } = run(["account", "enable", "--odd", "--dry-run"], HYPHEN_FIXTURE);
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain("dry run: --odd: enabled");
+  });
+
+  test("account disable -1 --bogus: a real unknown flag after the id is still rejected", () => {
+    const { r, configAfter } = run(["account", "disable", "-1", "--bogus"], HYPHEN_FIXTURE);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("account: unknown flag '--bogus'");
+    expect(configAfter).toBe(HYPHEN_FIXTURE);
+  });
+
+  test("account --bogus disable claw1: a flag in the action slot is still rejected", () => {
+    const { r } = run(["account", "--bogus", "disable", "claw1"], HYPHEN_FIXTURE);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("account: unknown flag '--bogus'");
+  });
+
+  test.each(["-1", "--odd"])("login %s: a configured id is not called an unknown flag", (id) => {
+    const { r } = run(["login", id], HYPHEN_FIXTURE);
+    expect(r.stderr).not.toContain("unknown flag");
+  });
+
+  test("login --bogus is still an unknown flag when no account has that id", () => {
+    const { r } = run(["login", "--bogus"], HYPHEN_FIXTURE);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("login: unknown flag '--bogus'");
+  });
+
+  test("login -1 --bogus: a flag after a valid id is rejected", () => {
+    const { r } = run(["login", "-1", "--bogus"], HYPHEN_FIXTURE);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("login: unknown flag '--bogus'");
+  });
+});
+
+describe("version aliases are checked like `version` (#109)", () => {
+  test.each(["--version", "-v", "-V"])("%s --bogus: rejected before the version report", (alias) => {
+    const { r } = run([alias, "--bogus"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("version: unknown flag '--bogus'");
+    expect(r.stderr).toContain("usage: multi-clawd version");
+    expect(r.stdout).toBe("");
+  });
+
+  test.each(["--version", "-v", "-V"])("%s alone still prints versions", (alias) => {
+    const { r } = run([alias]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^cli: v\d/);
+  });
+
+  test("a trailing --help after an alias is still ignored, as before", () => {
+    const { r } = run(["--version", "--help"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/^cli: v\d/);
   });
 });

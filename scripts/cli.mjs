@@ -122,12 +122,52 @@ if (Object.hasOwn(COMMAND_HELP, cmd) && rest.some((a) => a === "--help" || a ===
 // in `flags` pass: `--dry-run=yes` is as unknown as `--dryrun`. A flag's value
 // (`--since 24h`) is not a flag and is left to the command. `hermes` is not in
 // the table and keeps handling its own flags.
+//
+// Positional operands are not flags. `account <enable|disable> <id>` takes a
+// required id and `login [<id>]` an optional one, and an account id is any
+// non-empty string, so `-1` or `-x` is a valid id and must reach the handler
+// exactly as it did before #121. The account id slot is always an operand. The
+// optional login slot cannot be told from a mistyped flag without the config,
+// so it is passed through here and `loginTargetIsFlag` decides once the
+// configured ids are known (an exact id match always wins). The version
+// aliases `--version`, `-v` and `-V` are the `version` command and are checked
+// as such; a stray `--help`/`-h` after an alias is still ignored, as before.
+const VERSION_ALIASES = ["--version", "-v", "-V"];
+
+function operandIndex(command, args) {
+  if (command === "account" && ["enable", "disable"].includes(args[0])) return 1;
+  if (command === "login") return 0;
+  return -1;
+}
+
+function loginTargetIsFlag(args) {
+  const target = args[0];
+  if (target === undefined || !target.startsWith("-") || target.length < 2) return false;
+  let accounts = [];
+  try {
+    const cfg = JSON.parse(readFileSync(openclawConfigPath(), "utf8"));
+    const list = cfg?.plugins?.entries?.["multi-clawd"]?.config?.accounts;
+    if (Array.isArray(list)) accounts = list;
+  } catch {
+    // Unreadable config: `login` reports that itself; treat as a flag below.
+  }
+  return !accounts.some((a) => a && a.id === target);
+}
+
 function rejectUnknownFlags(command, args) {
-  if (!Object.hasOwn(COMMAND_HELP, command)) return;
-  const { usage, flags } = COMMAND_HELP[command];
-  const unknown = args.find((a) => a.startsWith("-") && a.length > 1 && !flags.includes(a));
+  const isAlias = VERSION_ALIASES.includes(command);
+  const name = isAlias ? "version" : command;
+  if (!Object.hasOwn(COMMAND_HELP, name)) return;
+  const { usage, flags } = COMMAND_HELP[name];
+  const skip = operandIndex(name, args);
+  const unknown = args.find((a, i) => {
+    if (!a.startsWith("-") || a.length < 2 || flags.includes(a)) return false;
+    if (isAlias && (a === "--help" || a === "-h")) return false;
+    if (i === skip) return name === "login" ? loginTargetIsFlag(args) : false;
+    return true;
+  });
   if (unknown === undefined) return;
-  console.error(`${command}: unknown flag '${unknown}'`);
+  console.error(`${name}: unknown flag '${unknown}'`);
   console.error(`usage: ${usage}`);
   process.exit(1);
 }
