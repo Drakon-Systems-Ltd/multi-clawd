@@ -20,6 +20,24 @@ versioning from v1.0.
   unknown), a flag's value such as `--since 24h` is not treated as a flag,
   and `hermes` keeps handling its own flags. `doctor --help` now lists
   `--preflight`, which the health check already accepted.
+- The unknown-flag check treats positional ids as operands, not flags (#109).
+  `account <enable|disable> <id>` and `login [<id>]` accept any non-empty id,
+  so an id such as `-1` reaches the command exactly as it did before #121; for
+  `login`, a leading-hyphen argument is rejected as an unknown flag only when
+  it matches no configured account id (`login --bogus` stays rejected). The
+  version aliases `--version`, `-v` and `-V` are checked as the `version`
+  command, so `--version --bogus` is rejected like the other commands.
+- `login <unknown-id>` now names the id it could not find, with the config
+  path read (`login: no account named '<id>' in <config path>`), before the
+  existing list of configured accounts, and adds a `did you mean '<id>'?` hint
+  for a case or punctuation near-miss such as `claw-2` for `claw2` (#122).
+  The exit code and the bare `login` output are unchanged, and no
+  authentication behaviour changes.
+
+### Repository
+- Added the 2026-11-04 class-radar research report under
+  `reports/multi-clawd-class-radar/` (#127). Repository-only: it is not part
+  of the published package and changes no runtime behaviour.
 
 ## [2.6.3] - 2026-11-03
 
