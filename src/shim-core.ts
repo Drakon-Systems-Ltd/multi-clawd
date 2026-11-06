@@ -105,11 +105,30 @@ export interface CredentialHealth {
   seenAt: number;
 }
 
+/**
+ * Billing health (#126): whether the provider last refused this account for
+ * billing — the CLI's typed `error: "billing_error"` kind, produced for the
+ * API's "credit balance is too low" refusal. A third dimension beside quota
+ * and credential because the fix is a third thing: the account authenticates
+ * (not a login problem) and no window reset will help (not a quota problem);
+ * someone has to pay. Same explicit-"ok" rule as CredentialHealth, for the
+ * same read-merge-write reason.
+ */
+export interface BillingHealth {
+  status: "refused" | "ok";
+  /** The CLI's typed error kind that produced the record. */
+  kind?: string;
+  /** Short diagnostic (the kind plus the CLI's text), capped. */
+  reason?: string;
+  seenAt: number;
+}
+
 export interface AccountHealthState {
   accountId: string;
   updatedAt?: number;
   windows: Record<string, WindowHealth>;
   credential?: CredentialHealth;
+  billing?: BillingHealth;
 }
 
 export interface LineScanner {
@@ -207,6 +226,7 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
     updatedAt?: unknown;
     windows?: unknown;
     credential?: unknown;
+    billing?: unknown;
   };
   if (typeof p.windows !== "object" || p.windows === null) return undefined;
   const windows: Record<string, WindowHealth> = {};
@@ -239,11 +259,25 @@ export function parseStoredState(raw: string): AccountHealthState | undefined {
       };
     }
   }
+  // Same tolerance for the billing record (#126).
+  let billing: BillingHealth | undefined;
+  if (typeof p.billing === "object" && p.billing !== null) {
+    const b = p.billing as Record<string, unknown>;
+    if ((b.status === "refused" || b.status === "ok") && typeof b.seenAt === "number") {
+      billing = {
+        status: b.status,
+        kind: typeof b.kind === "string" ? b.kind : undefined,
+        reason: typeof b.reason === "string" ? b.reason : undefined,
+        seenAt: b.seenAt,
+      };
+    }
+  }
   return {
     accountId: typeof p.accountId === "string" ? p.accountId : "unknown",
     updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
     windows,
     credential,
+    billing,
   };
 }
 
@@ -313,12 +347,24 @@ export function mergeHealthStates(
   ) {
     credential = undefined;
   }
+  // Billing record (#126): newer `seenAt` wins, like the credential record.
+  // Unlike a failed credential, a refusal IS pruned by the retention horizon:
+  // the reader stops honouring it after BILLING_REFUSED_TTL_MS, so a 14-day-old
+  // one is dead evidence whichever way it reads.
+  let billing = disk.billing;
+  if (live.billing && (!billing || live.billing.seenAt >= billing.seenAt)) {
+    billing = live.billing;
+  }
+  if (now !== undefined && billing && now - billing.seenAt > pruneAfterMs) {
+    billing = undefined;
+  }
   const updatedAt = Math.max(disk.updatedAt ?? 0, live.updatedAt ?? 0);
   return {
     accountId: live.accountId,
     updatedAt: updatedAt > 0 ? updatedAt : undefined,
     windows,
     credential,
+    billing,
   };
 }
 
@@ -422,6 +468,8 @@ const LIMIT_TEXT_RE = /reached your (.{1,40}?) limit/i;
 const USAGE_LIMIT_API_ERROR = "usage_limit_reached";
 /** The CLI's typed `error` kind for a dead login. */
 const AUTH_FAILED_ERROR_KIND = "authentication_failed";
+/** The CLI's typed `error` kind for a billing refusal (#126; 2.1.316+ writer). */
+export const BILLING_REFUSAL_ERROR_KIND = "billing_error";
 
 /** The fields of a stream record that the three error parsers read. */
 interface ErrorRecordShape {
@@ -562,11 +610,12 @@ export function parseTransientApiError(line: string): TransientApiError | undefi
   const r = parseRecord(line);
   if (!r || !isErrorRecord(r)) return undefined;
 
-  // A spent window or a dead login is never a transient, whatever else the
-  // record says. Mutual exclusion is BY CONSTRUCTION: the same two parsers
-  // that classify (and record) those outcomes decide here, over the same
-  // record and the same fields, so nothing they recognise can also hop.
-  if (parseModelLimitError(line) || parseAuthFailure(line)) return undefined;
+  // A spent window, a dead login or a billing refusal (#126) is never a
+  // transient, whatever else the record says. Mutual exclusion is BY
+  // CONSTRUCTION: the same parsers that classify (and record) those outcomes
+  // decide here, over the same record and the same fields, so nothing they
+  // recognise can also be treated as transient.
+  if (parseModelLimitError(line) || parseAuthFailure(line) || parseBillingRefusal(line)) return undefined;
 
   // The joined text is diagnostic only from here; the exclusions above have
   // already been decided over every field.
@@ -929,6 +978,10 @@ export function parseAuthFailure(line: string): { reason: string } | undefined {
   }
   const r = parseRecord(line);
   if (!r || !isErrorRecord(r)) return undefined;
+  // #126: a record the CLI typed as a billing refusal is not a dead login,
+  // whatever its text says — recording it here would send the operator to
+  // re-authenticate an account that only needs paying.
+  if (r.error === BILLING_REFUSAL_ERROR_KIND) return undefined;
   for (const text of errorRecordTexts(r)) {
     if (AUTH_FAILURE_PATTERNS.some((p) => p.test(text))) {
       return { reason: text.trim().slice(0, AUTH_REASON_MAX_CHARS) };
@@ -937,6 +990,104 @@ export function parseAuthFailure(line: string): { reason: string } | undefined {
   // #68: the CLI's TYPED error kind for a dead login, whatever the wording.
   if (r.error === AUTH_FAILED_ERROR_KIND) return { reason: AUTH_FAILED_ERROR_KIND };
   return undefined;
+}
+
+// ── billing refusals (#126) ─────────────────────────────────────────────────
+//
+// Evidence basis, same source as the #68 shapes: the public
+// @anthropic-ai/claude-code package, 2.1.316–2.1.318 builds. The stream-json
+// `assistant` record's top-level `error` is a typed kind from the enum
+// authentication_failed | oauth_org_not_allowed | account_on_hold |
+// verification_required | billing_error | rate_limit | overloaded |
+// invalid_request | model_not_found | server_error | unknown |
+// max_output_tokens | cloud_credential_error — the same values the CLI's
+// StopFailure hook exposes to matchers. `billing_error` has exactly one
+// producer in that source: the API's HTTP 400 invalid_request_error "Your
+// credit balance is too low to access the Anthropic API. Please go to Plans &
+// Billing to upgrade or purchase credits.", which the CLI reports as "Credit
+// balance too low · Add funds: https://platform.claude.com/settings/billing".
+// The 2.1.76 build has no such kind, so the marker is version-scoped like
+// `usage_limit_reached`.
+//
+// Only the kind is matched. The wording is the CLI's fallback text and has
+// changed between builds; every error without the kind is forwarded as before.
+//
+// Not recognised here, deliberately (same source):
+//   - `account_on_hold` is emitted only behind a remote feature flag in those
+//     builds, so it cannot be relied on to appear.
+//   - a past-due SUBSCRIPTION ("Claude Code can't use your Claude
+//     subscription, usually because a payment is past due …") is reported
+//     under the kind `oauth_org_not_allowed`, which the CLI also uses for an
+//     organisation that disabled OAuth; the two differ only by wording.
+//   - `api_error: "model_requires_usage_credits"` (kind `rate_limit`, 429):
+//     the model runs on usage credits for this account and they are off or
+//     used up. Model-scoped and reset-bearing — a limit, not an account
+//     fault; it stays on the existing limit/transient paths.
+
+export interface BillingRefusal {
+  kind: typeof BILLING_REFUSAL_ERROR_KIND;
+  /** HTTP status when the record carried one. */
+  status?: number;
+  /** `<kind>: <text>`, capped — persisted as the record's reason. */
+  reason: string;
+}
+
+/** Longest billing-refusal reason persisted to the state file. */
+const BILLING_REASON_MAX_CHARS = 200;
+
+/**
+ * Recognise the CLI's typed billing refusal in the stream. Only genuine error
+ * records count (same definition as every other parser here); a successful
+ * result or model output quoting the kind or the wording is not a refusal.
+ */
+export function parseBillingRefusal(line: string): BillingRefusal | undefined {
+  // Cheap pre-filter, performance only: the kind must be present verbatim.
+  if (!line.includes(BILLING_REFUSAL_ERROR_KIND)) return undefined;
+  const r = parseRecord(line);
+  if (!r || !isErrorRecord(r)) return undefined;
+  if (r.error !== BILLING_REFUSAL_ERROR_KIND) return undefined;
+  const status = typeof r.api_error_status === "number" ? r.api_error_status : undefined;
+  const text = errorRecordTexts(r)
+    .filter((t) => t !== BILLING_REFUSAL_ERROR_KIND)
+    .join(" ")
+    .trim();
+  const reason = `${BILLING_REFUSAL_ERROR_KIND}${text ? `: ${text}` : ""}`.slice(0, BILLING_REASON_MAX_CHARS);
+  return { kind: BILLING_REFUSAL_ERROR_KIND, status, reason };
+}
+
+/**
+ * Record a billing refusal against this account, so the NEXT pooled launch
+ * skips it for the cooldown (health.ts BILLING_REFUSED_TTL_MS) instead of
+ * re-electing the account that cannot pay.
+ */
+export function recordBillingRefusal(
+  state: AccountHealthState,
+  refusal: Pick<BillingRefusal, "kind" | "reason">,
+  now: number,
+): AccountHealthState {
+  return {
+    ...state,
+    updatedAt: now,
+    billing: {
+      status: "refused",
+      kind: refusal.kind,
+      reason: refusal.reason.slice(0, BILLING_REASON_MAX_CHARS),
+      seenAt: now,
+    },
+  };
+}
+
+/**
+ * End a recorded billing refusal (a successful turn through the shim). An
+ * explicit "ok" record rather than a deletion, so the read-merge-write
+ * persistence cannot resurrect the stale "refused" record from disk.
+ */
+export function clearBillingRefusal(state: AccountHealthState, now: number): AccountHealthState {
+  return {
+    ...state,
+    updatedAt: now,
+    billing: { status: "ok", seenAt: now },
+  };
 }
 
 /**

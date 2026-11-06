@@ -6,6 +6,26 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Added
+- A billing refusal is now an account-level cooldown with the same in-turn hop
+  a model limit gets (#126). When the Claude CLI reports its typed
+  `billing_error` kind (the API's "credit balance is too low" refusal; public
+  CLI builds 2.1.316–2.1.318), the shim records a `billing` record against
+  that account only, retries the turn once on a healthy sibling at the child's
+  natural close exactly as it does for a limit — never killing the running
+  process, never forwarding a partial turn — and the pool skips the account
+  for fifteen minutes (`billing_refused`: never chosen; as a last resort it
+  ranks behind an exhausted member and ahead of a dead login). The cooldown
+  expires on its own or ends early on a successful turn. `explain` says
+  "BILLING REFUSED" with the CLI's reason, a `billing:<pool>:<account>` alert
+  holds while the verdict does, and `explain --history` records the retry
+  with reason `billing`. Only the typed kind is matched: the same wording
+  without it, a 402, and every other error are forwarded unchanged, as
+  before. Measured and deliberately left alone: `account_on_hold` (emitted
+  only behind a remote feature flag), a past-due subscription (reported under
+  `oauth_org_not_allowed`, which the CLI shares with an organisation that
+  disabled OAuth) and `model_requires_usage_credits` (model-scoped, a limit).
+
 ## [2.6.4] - 2026-11-04
 
 ### Fixed

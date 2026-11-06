@@ -1759,6 +1759,24 @@ export function registerPoolBackend(
         alertState = clearAlert(alertState, key);
       }
     }
+    // A member benched for a billing refusal (#126) is invisible otherwise,
+    // exactly as a rejected login was. Its own key, because the fix is a third
+    // thing (pay); it ends with the cooldown or on an observed success, i.e.
+    // exactly when the verdict does.
+    for (const v of verdicts) {
+      const key = `billing:${poolId}:${v.id}`;
+      if (v.health.verdict === "billing_refused") {
+        raiseAlert({
+          key,
+          severity: "error",
+          text: `pool ${poolId}: account "${v.id}" is excluded — ${
+            v.health.reason ?? "the provider refused it for billing"
+          }`,
+        });
+      } else {
+        alertState = clearAlert(alertState, key);
+      }
+    }
     // Reaching here at all means at least one login still works, so the
     // pool-wide auth outage (if one was raised) is over.
     alertState = clearAlert(alertState, `pool-credentials:${poolId}`);

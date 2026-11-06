@@ -7,7 +7,7 @@ import { acquireShimLock } from "./shim-lock.js";
 export const HISTORY_FILE = "history.jsonl";
 export const HISTORY_MAX_BYTES = 64 * 1024;
 export const HISTORY_MAX_EVENTS = 500;
-export type HistoryReason = "model_limit" | "auth_failure" | "transient" | "pool_selection";
+export type HistoryReason = "model_limit" | "auth_failure" | "transient" | "billing" | "pool_selection";
 export type HistoryEvent = {
   at: string;
   kind: "served" | "retry" | "rotation";
@@ -32,7 +32,7 @@ function valid(raw: unknown): HistoryEvent | undefined {
   if (typeof e.at !== "string" || !Number.isFinite(Date.parse(e.at)) ||
       !["served", "retry", "rotation"].includes(String(e.kind)) || !safeAccount(e.accountId) ||
       (e.toAccountId !== undefined && !safeAccount(e.toAccountId)) ||
-      (e.reason !== undefined && !["model_limit", "auth_failure", "transient", "pool_selection"].includes(String(e.reason)))) return undefined;
+      (e.reason !== undefined && !["model_limit", "auth_failure", "transient", "billing", "pool_selection"].includes(String(e.reason)))) return undefined;
   // Rebuild from an allowlist, so unknown fields can never enter the journal.
   return { at: e.at, kind: e.kind as HistoryEvent["kind"], accountId: e.accountId,
     ...(e.toAccountId ? { toAccountId: e.toAccountId as string } : {}),

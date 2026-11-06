@@ -28,6 +28,7 @@ export type HealthVerdict =
   | "exhausted"
   | "credential_failed"
   | "credential_unverified"
+  | "billing_refused"
   | "no_data";
 
 export interface AccountHealth {
@@ -102,6 +103,23 @@ export const MODEL_REJECTED_TTL_MS = 60 * 60 * 1000;
  * is still found again, but never by assuming it was.
  */
 export const CREDENTIAL_FAILED_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * How long a billing refusal (#126 — the CLI's typed `billing_error`: the
+ * account's credit balance is too low) keeps an account out of pool
+ * selection (`billing_refused`). Account-level, not model-scoped: no model can
+ * be served and no window reset ends it.
+ *
+ * Bounded and self-expiring, unlike a dead login. The remedy (a payment)
+ * happens entirely out of band and nothing here can observe it, so the launch
+ * after the cooldown is the probe — the shim hops to a sibling in-turn if the
+ * account is refused again and the record is simply re-stamped. Fifteen
+ * minutes matches the credential hard exclusion: long enough that one unpaid
+ * account cannot absorb every fallback rung of a run, short enough that a
+ * top-up is noticed within the quarter hour. A successful turn through the
+ * shim ends it early.
+ */
+export const BILLING_REFUSED_TTL_MS = 15 * 60 * 1000;
 
 /**
  * How long a REJECTION is honoured on the strength of one observation, even
@@ -350,6 +368,30 @@ export function credentialFailureFor(
 }
 
 /**
+ * The billing verdict for an account, or undefined when it is not inside a
+ * billing cooldown (never refused, refused longer than BILLING_REFUSED_TTL_MS
+ * ago, or explicitly cleared by observed success) (#126).
+ */
+export function billingRefusalFor(
+  state: AccountHealthState | undefined,
+  nowMs: number,
+): AccountHealth | undefined {
+  const billing = state?.billing;
+  if (!billing || billing.status !== "refused") return undefined;
+  const age = Math.max(0, nowMs - billing.seenAt);
+  if (age > BILLING_REFUSED_TTL_MS) return undefined;
+  const detail = billing.reason ? ` (${billing.reason})` : "";
+  return {
+    verdict: "billing_refused",
+    resumeAt: billing.seenAt + BILLING_REFUSED_TTL_MS,
+    observedAt: billing.seenAt,
+    reason:
+      `billing refused by the provider ${Math.round(age / 60000)}m ago${detail} — ` +
+      `top up or fix billing for this account; it is retried automatically after the cooldown`,
+  };
+}
+
+/**
  * Key prefix of the usage poll's windows. Mirrors usage-poll.ts's
  * USAGE_WINDOW_PREFIX (that module imports this one, so it is not imported
  * back); a test pins the two together.
@@ -399,6 +441,13 @@ export function classifyAccountHealth(
   // (successful launch, live probe, re-auth) writes an "ok" record and ends it.
   const credentialFailure = credentialFailureFor(state, nowMs);
   if (credentialFailure) return credentialFailure;
+
+  // A billing refusal (#126) also outranks every quota rule: the provider will
+  // not bill this account for ANY model, so a healthy window proves nothing.
+  // Behind the credential check because a dead login cannot even be billed,
+  // and the two send the operator to different fixes.
+  const billingRefusal = billingRefusalFor(state, nowMs);
+  if (billingRefusal) return billingRefusal;
 
   // Canonicalised so a window written under `clawd/claude-fable-5` still gates
   // a read requested as `anthropic/claude-fable-5` or bare `claude-fable-5`.
@@ -725,9 +774,9 @@ export function sevenDayReset(state: AccountHealthState | undefined, options: He
  * first on a tie, pool order on a full tie — and without any usable member
  * answers exactly as ordered does. With no usable member in any mode, the
  * near-limit member with the most headroom serves (#93, see
- * `nearLimitWithMostHeadroom`). No mode chooses exhausted or
- * credential-broken members. Undefined when nothing is usable — the caller
- * must not override anything then.
+ * `nearLimitWithMostHeadroom`). No mode chooses exhausted, billing-refused
+ * (#126) or credential-broken members. Undefined when nothing is usable — the
+ * caller must not override anything then.
  *
  * `credential_failed` is unusable in the strongest sense: an exhausted account
  * would at least authenticate, so it stays behind near-limit as a last resort,
@@ -861,7 +910,15 @@ export function fallbackPoolAccount(pool: PoolVerdict[], nowMs?: number): string
   if (probe) return probe;
   const retest = pool.find((a) => a.verdict === "credential_unverified");
   if (retest) return retest.id;
-  return (pool.find((a) => a.verdict !== "credential_failed") ?? pool[0]).id;
+  // A billing-refused member (#126) authenticates, so it beats a dead login as
+  // the last resort — the host classifies the billing error it produces and
+  // fails the turn over — but it sits behind an exhausted member, whose block
+  // may have lifted early; a refusal inside its cooldown will not have.
+  return (
+    pool.find((a) => a.verdict !== "credential_failed" && a.verdict !== "billing_refused") ??
+    pool.find((a) => a.verdict !== "credential_failed") ??
+    pool[0]
+  ).id;
 }
 
 /**
