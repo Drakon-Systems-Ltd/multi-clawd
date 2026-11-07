@@ -600,7 +600,9 @@ the in-turn retry never fired.
   credential verdict, because a dead login cannot even be billed and the fixes
   differ. `billing_refused` lasts BILLING_REFUSED_TTL_MS (15 minutes): the
   remedy is a payment nothing here can observe, so the launch after the
-  cooldown is the probe, and a successful turn ends it early. Never chosen by
+  cooldown is the probe, and a successful turn — a real non-error result in
+  the stream, not merely a clean exit, since the CLI can exit 0 on a refusal
+  — ends it early. Never chosen by
   any strategy; as a last resort it ranks behind an exhausted member (whose
   block may have lifted) and ahead of a dead login (it can authenticate, and
   the host classifies the billing error it produces and fails the turn over).
@@ -612,7 +614,10 @@ the in-turn retry never fired.
   output is forwarded, and a resumed session travels with its transcript or
   the retry is refused. The journal records the retry with reason `billing`;
   `explain` says BILLING REFUSED; a `billing:<pool>:<account>` alert holds
-  exactly while the verdict does.
+  exactly while the verdict does: its TTL is the cooldown's remainder and
+  every heartbeat re-derives it from the account's current state, so expiry
+  and an early recovery both reach the operator without a pooled launch in
+  between.
 - **Measured and left alone (same CLI source).** `account_on_hold` is emitted
   only behind a remote feature flag, so it is not relied on. A past-due
   subscription is reported under `oauth_org_not_allowed`, a kind the CLI also

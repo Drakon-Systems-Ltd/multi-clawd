@@ -16,10 +16,13 @@ versioning from v1.0.
   process, never forwarding a partial turn — and the pool skips the account
   for fifteen minutes (`billing_refused`: never chosen; as a last resort it
   ranks behind an exhausted member and ahead of a dead login). The cooldown
-  expires on its own or ends early on a successful turn. `explain` says
-  "BILLING REFUSED" with the CLI's reason, a `billing:<pool>:<account>` alert
-  holds while the verdict does, and `explain --history` records the retry
-  with reason `billing`. Only the typed kind is matched: the same wording
+  expires on its own or ends early on a successful turn — a real non-error
+  result, not merely a clean exit, so a refusal the CLI exits 0 on keeps the
+  cooldown. `explain` says "BILLING REFUSED" with the CLI's reason, a
+  `billing:<pool>:<account>` alert is re-derived from the live verdict on
+  every heartbeat (it ends with the cooldown or on recovery even when no
+  pooled launch happens in between), and `explain --history` records the
+  retry with reason `billing`. Only the typed kind is matched: the same wording
   without it, a 402, and every other error are forwarded unchanged, as
   before. Measured and deliberately left alone: `account_on_hold` (emitted
   only behind a remote feature flag), a past-due subscription (reported under

@@ -337,6 +337,8 @@ function scenario(opts: {
   shape?: "typed" | "untyped";
   claw1State?: AccountHealthState;
   claw2State?: AccountHealthState;
+  /** Extra fixture controls (limit / other-kind modes, exit codes, status overrides). */
+  extraEnv?: Record<string, string>;
 }) {
   const dir = mkdtempSync(join(tmpdir(), "mc-126-"));
   const claw1State = join(dir, "claw1.json");
@@ -353,6 +355,7 @@ function scenario(opts: {
   if (opts.billingFor !== undefined) env.FAKE_CLAUDE_BILLING_FOR_ACCOUNT = opts.billingFor;
   if (opts.shape === "untyped") env.FAKE_CLAUDE_BILLING_SHAPE = "untyped";
   if (opts.roster) env[RETRY_ROSTER_ENV] = JSON.stringify(opts.roster);
+  Object.assign(env, opts.extraEnv ?? {});
   const res = spawnSync(process.execPath, [SHIM, ...STREAM_ARGS], { input: "the prompt\n", encoding: "utf8", env });
   return { res, claw1State, claw2State, env, dir };
 }
@@ -450,6 +453,69 @@ describe("in-turn hop and account cooldown on a billing refusal (#126)", () => {
     expect(res.stderr).toContain("billing recovered for claw1");
     expect(readState(claw1State).billing?.status).toBe("ok");
     expect(classifyAccountHealth(readState(claw1State), {}, Date.now(), MODEL).verdict).not.toBe("billing_refused");
+  });
+
+  test("a refusal that exits 0 is not a success: a model limit with exit code 0 keeps the billing cooldown", () => {
+    // Review finding: the CLI can exit 0 having delivered a refusal as its
+    // result. The clear used to key on the exit code and the absence of a
+    // billing refusal in the stream, so a model-limit turn that exited 0
+    // overwrote a live cooldown with `ok` and logged a recovery that never
+    // happened. Only a real (non-error) result ends the cooldown early.
+    const refused = recordBillingRefusal({ accountId: "claw1", windows: {} }, { kind: "billing_error", reason: "r" }, Date.now() - 60_000);
+    const { res, claw1State, env } = scenario({
+      claw1State: refused,
+      extraEnv: { FAKE_CLAUDE_LIMIT_FOR_ACCOUNT: "claw1", FAKE_CLAUDE_LIMIT_EXIT: "0" },
+    });
+    void env;
+    expect(res.status).toBe(0);
+    // The limit is forwarded as the limit (its status tag is the #97 marker,
+    // not a hop): no sibling served this turn and no success result exists.
+    const result = records(res.stdout).find((r) => r.type === "result");
+    expect(result?.is_error).toBe(true);
+    expect(result?.served_by).toBeUndefined();
+    expect(res.stderr).not.toContain("billing recovered");
+    expect(res.stderr).toContain("model limit hit recorded");
+    const state = readState(claw1State);
+    expect(state.billing).toMatchObject({ status: "refused", kind: "billing_error" });
+    expect(classifyAccountHealth(state, {}, Date.now(), MODEL).verdict).toBe("billing_refused");
+  });
+
+  test("a plain 402 without the typed kind passes through the whole shim unchanged: nothing recorded, no hop", () => {
+    const { res, claw1State, env } = scenario({
+      billingFor: "claw1",
+      shape: "untyped",
+      extraEnv: { FAKE_CLAUDE_BILLING_STATUS: "402" },
+      roster: rosterFor(join(mkdtempSync(join(tmpdir(), "mc-126s-")), "claw2.json")),
+    });
+    expect(res.stdout).toBe(directFixtureStdout(env));
+    expect(res.stdout).toContain('"api_error_status":402');
+    expect(res.status).toBe(1);
+    expect(res.stderr).not.toContain("retrying this turn");
+    expect(res.stderr).not.toContain("billing refusal recorded");
+    if (existsSync(claw1State)) {
+      const state = readState(claw1State);
+      expect(state.billing).toBeUndefined();
+      expect(state.credential).toBeUndefined();
+      expect(state.windows[`model:${MODEL}`]).toBeUndefined();
+    }
+  });
+
+  test("another typed kind (invalid_request) passes through the whole shim unchanged: nothing recorded, no hop", () => {
+    const { res, claw1State, env } = scenario({
+      extraEnv: { FAKE_CLAUDE_ERROR_KIND_FOR_ACCOUNT: "claw1" },
+      roster: rosterFor(join(mkdtempSync(join(tmpdir(), "mc-126s-")), "claw2.json")),
+    });
+    expect(res.stdout).toBe(directFixtureStdout(env));
+    expect(res.stdout).toContain('"error":"invalid_request"');
+    expect(res.status).toBe(1);
+    expect(res.stderr).not.toContain("retrying this turn");
+    expect(res.stderr).not.toContain("recorded");
+    if (existsSync(claw1State)) {
+      const state = readState(claw1State);
+      expect(state.billing).toBeUndefined();
+      expect(state.credential).toBeUndefined();
+      expect(state.windows[`model:${MODEL}`]).toBeUndefined();
+    }
   });
 
   test("a spent window on the sibling is still a candidate for the hop, as it is after a model limit", () => {

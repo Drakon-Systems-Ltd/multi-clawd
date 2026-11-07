@@ -780,13 +780,18 @@ function clearRecordedAuthFailureOnSuccess(): void {
 }
 
 /**
- * A clean exit with no billing refusal in the stream proves the provider is
- * billing this account again (#126), so a recorded refusal is stale: clear it
- * rather than wait out the cooldown. Conditional on a refusal being on disk,
- * so the common path adds no write.
+ * A turn that ended in a real result proves the provider is billing this
+ * account again (#126), so a recorded refusal is stale: clear it rather than
+ * wait out the cooldown. A clean exit alone is NOT that proof — the CLI can
+ * exit 0 having delivered a refusal (a model limit, say) as its result, and
+ * clearing on that would end a live cooldown and report a recovery that never
+ * happened. Three conditions, as for a model rejection: a clean exit, a
+ * non-error result actually seen in the stream, and no billing refusal in the
+ * same launch. Conditional on a refusal being on disk, so the common path
+ * adds no write.
  */
 function clearRecordedBillingRefusalOnSuccess(): void {
-  if (!stateFile || sawBillingRefusal) return;
+  if (!stateFile || !sawSuccessResult || sawBillingRefusal) return;
   try {
     if (readPersistedState()?.billing?.status !== "refused") return;
     state = clearBillingRefusal(state, Date.now());
