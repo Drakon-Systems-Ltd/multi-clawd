@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.6.5] - 2026-11-07
+
 ### Added
 - A billing refusal is now an account-level cooldown with the same in-turn hop
   a model limit gets (#126). When the Claude CLI reports its typed
