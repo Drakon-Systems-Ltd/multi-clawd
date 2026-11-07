@@ -251,6 +251,10 @@ const VERDICT_WORDS: Record<string, string> = {
   // credential_failed is "go and log this account back in". Same-looking
   // wording would send the operator to the wrong fix.
   credential_failed: "LOGIN REJECTED — excluded from the pool until it is re-authenticated",
+  // A third fix again (#126): not "wait for the window", not "log back in",
+  // but "pay". Bounded: the pool retries the account after the cooldown.
+  billing_refused:
+    "BILLING REFUSED — the provider will not bill this account (credit balance / payment); benched for a short cooldown, then retried",
   // Not healthy: the rejection is still the latest evidence. Only a turn that
   // succeeds (or a re-login) ends it.
   credential_unverified:

@@ -45,17 +45,21 @@ import { persistHealthState, readHealthStateFile } from "./health-journal.js";
 import { acquireShimLock } from "./shim-lock.js";
 import { recordHistory, type HistoryReason } from "./history.js";
 import {
+  clearBillingRefusal,
   clearCredentialFailure,
   clearModelRejection,
   createForwardWriter,
   createLineScanner,
   limitFamilyFor,
   parseAuthFailure,
+  parseBillingRefusal,
   parseRateLimitEvent,
   parseSuccessResult,
+  recordBillingRefusal,
   recordCredentialFailure,
   updateHealthState,
   type AccountHealthState,
+  type BillingRefusal,
 } from "./shim-core.js";
 import { rewriteModelArg } from "./degrade.js";
 import {
@@ -336,6 +340,12 @@ function guessLimitResetsAt(): number | undefined {
 let sawAuthFailure = false;
 
 /**
+ * Whether this launch was refused for billing (#126). Drives the recorded
+ * cooldown, the in-turn hop, and the decision NOT to write a success-clear.
+ */
+let sawBillingRefusal = false;
+
+/**
  * Whether this launch was refused on a model limit, and whether it ended in a
  * result that was not an error (#26). Together they decide if the turn counts
  * as evidence that the model is being served: a refusal never does, and
@@ -391,6 +401,19 @@ function observeLine(line: string): void {
       persistState();
       process.stderr.write(
         `[multi-clawd shim] auth failure recorded for ${accountId}: ${authFailure.reason}\n`,
+      );
+    }
+    // #126: a billing refusal is a third kind of telemetry — the account
+    // authenticates and has quota, but the provider will not bill it. Recorded
+    // on its own dimension, account-wide, so the next pooled launch skips it
+    // for the cooldown instead of re-electing the account that cannot pay.
+    const billing = parseBillingRefusal(line);
+    if (billing && !sawBillingRefusal) {
+      sawBillingRefusal = true;
+      state = recordBillingRefusal(state, billing, Date.now());
+      persistState();
+      process.stderr.write(
+        `[multi-clawd shim] billing refusal recorded for ${accountId}: ${billing.reason}\n`,
       );
     }
   } catch {
@@ -494,11 +517,17 @@ function readSiblingState(file: string) {
  * close handler. Returns true when the completed attempt has been replaced;
  * its held failure must then not be forwarded downstream.
  */
-/** Why the shim is retrying: a spent window, or a provider-side transient (#68). */
-type RetryCause = { kind: "model_limit" } | { kind: "transient"; detail: TransientApiError };
+/** Why the shim is retrying: a spent window, a provider-side transient (#68), or a billing refusal (#126). */
+type RetryCause =
+  | { kind: "model_limit" }
+  | { kind: "transient"; detail: TransientApiError }
+  | { kind: "billing"; detail: BillingRefusal };
 
 function describeCause(cause: RetryCause): string {
   if (cause.kind === "model_limit") return "model limit";
+  if (cause.kind === "billing") {
+    return `billing refusal (${cause.detail.kind}${cause.detail.status !== undefined ? ` ${cause.detail.status}` : ""})`;
+  }
   const d = cause.detail;
   return `transient provider error (${d.kind}${d.status !== undefined ? ` ${d.status}` : ""})`;
 }
@@ -512,7 +541,9 @@ function attemptRetry(cause: RetryCause): boolean {
     modelId: model,
     nowMs: Date.now(),
     // A transient leaves THIS account unspent, so a sibling the pool believes
-    // is spent is not worth a launch; only an idle sibling takes the hop.
+    // is spent is not worth a launch; only an idle sibling takes the hop. A
+    // limit or a billing refusal (#126) means this account is OUT, so a
+    // sibling overdue a re-probe is the same trade either way (#26).
     allowOverdueProbe: cause.kind !== "transient",
     // A token-file sibling's token is read here, at the moment of the retry,
     // and goes only into the retried child's env (retry-plan.ts #2).
@@ -550,7 +581,8 @@ function attemptRetry(cause: RetryCause): boolean {
   }
   retryUsed = true;
   retryArmed = false;
-  const reason: HistoryReason = cause.kind === "model_limit" ? "model_limit" : "transient";
+  const reason: HistoryReason =
+    cause.kind === "model_limit" ? "model_limit" : cause.kind === "billing" ? "billing" : "transient";
   recordHistory(stateFile, { at: new Date().toISOString(), kind: "retry", accountId,
     toAccountId: target.id, modelId: model, reason });
   // A rotation is a confirmed hop to a different account. Retry selection is
@@ -574,6 +606,7 @@ function attemptRetry(cause: RetryCause): boolean {
   stateFile = target.stateFile;
   state = { accountId, windows: {} };
   sawAuthFailure = false;
+  sawBillingRefusal = false;
   // The refusal belonged to the account that was left; what the sibling does
   // from here is judged on its own.
   sawModelLimit = false;
@@ -605,7 +638,8 @@ function onArmedChunk(chunk: Buffer): void {
     // its own decision window at natural close; never hold a lock while waiting.
     // No state file means nothing is persisted to coordinate on. The lock
     // helper rejects relative paths before creating anything.
-    const releaseDecision = stateFile && (parseModelLimitError(line) || parseTransientApiError(line))
+    const releaseDecision = stateFile &&
+      (parseModelLimitError(line) || parseBillingRefusal(line) || parseTransientApiError(line))
       ? acquireShimLock(`${stateFile}.retry`)
       : undefined;
     try {
@@ -614,11 +648,20 @@ function onArmedChunk(chunk: Buffer): void {
       if (parseModelLimitError(line)) {
         cause = { kind: "model_limit" };
       } else if (!sawModelLimit && !sawAuthFailure) {
-        // #68: a provider error that survived the CLI's own retries gets the
-        // same single hop, but records nothing against this account. A spent
-        // window or dead login earlier in the stream keeps it off this path.
-        const transient = parseTransientApiError(line);
-        if (transient) cause = { kind: "transient", detail: transient };
+        // #126: a billing refusal takes the same single hop as a limit — the
+        // account is out, for every model — and observeLine has already
+        // recorded the cooldown against it.
+        const billing = parseBillingRefusal(line);
+        if (billing) {
+          cause = { kind: "billing", detail: billing };
+        } else if (!sawBillingRefusal) {
+          // #68: a provider error that survived the CLI's own retries gets the
+          // same single hop, but records nothing against this account. A spent
+          // window, dead login or billing refusal earlier in the stream keeps
+          // it off this path.
+          const transient = parseTransientApiError(line);
+          if (transient) cause = { kind: "transient", detail: transient };
+        }
       }
       // Notices are not terminal: preserve the original until natural close.
       if (cause && (!pendingRetryCause || cause.kind === "model_limit")) {
@@ -737,6 +780,31 @@ function clearRecordedAuthFailureOnSuccess(): void {
 }
 
 /**
+ * A turn that ended in a real result proves the provider is billing this
+ * account again (#126), so a recorded refusal is stale: clear it rather than
+ * wait out the cooldown. A clean exit alone is NOT that proof — the CLI can
+ * exit 0 having delivered a refusal (a model limit, say) as its result, and
+ * clearing on that would end a live cooldown and report a recovery that never
+ * happened. Three conditions, as for a model rejection: a clean exit, a
+ * non-error result actually seen in the stream, and no billing refusal in the
+ * same launch. Conditional on a refusal being on disk, so the common path
+ * adds no write.
+ */
+function clearRecordedBillingRefusalOnSuccess(): void {
+  if (!stateFile || !sawSuccessResult || sawBillingRefusal) return;
+  try {
+    if (readPersistedState()?.billing?.status !== "refused") return;
+    state = clearBillingRefusal(state, Date.now());
+    persistState();
+    process.stderr.write(
+      `[multi-clawd shim] billing recovered for ${accountId} — billing cooldown cleared\n`,
+    );
+  } catch {
+    // Best-effort: the cooldown's own TTL is the backstop.
+  }
+}
+
+/**
  * A turn that ended in a real result proves this account is serving this model
  * right now, so any rejection recorded against the model is stale (#26). Until
  * this existed nothing a successful launch wrote could displace a model
@@ -796,8 +864,9 @@ function onChildClose(code: number | null, signal: NodeJS.Signals | null): void 
   // the state write, which must happen before we hand over the exit code.
   if ((code ?? 0) === 0) {
     clearRecordedAuthFailureOnSuccess();
+    clearRecordedBillingRefusalOnSuccess();
     clearRecordedModelRejectionOnSuccess();
-    if (affinity && sessionId && sawSuccessResult && !sawAuthFailure && !sawModelLimit) {
+    if (affinity && sessionId && sawSuccessResult && !sawAuthFailure && !sawModelLimit && !sawBillingRefusal) {
       recordSessionPin(affinity.file, sessionId, accountId, Date.now(), affinity.ttlMs);
     }
   }

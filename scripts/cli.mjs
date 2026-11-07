@@ -811,6 +811,9 @@ async function explain(args = []) {
     let detail = h.reason;
     if (h.verdict === "exhausted" && h.resumeAt) {
       detail = `${h.reason ?? "limit hit"} — back in ${rel(h.resumeAt)}`;
+    } else if (h.verdict === "billing_refused" && h.resumeAt) {
+      // #126: the cooldown is bounded, so say when it ends.
+      detail = `${h.reason ?? "billing refused"} — back in ${rel(h.resumeAt)}`;
     }
     const usage = health.summarizeWindowUsage(state, {
       utilizationThreshold: pool?.utilizationThreshold,

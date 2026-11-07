@@ -13,7 +13,9 @@ if (sibling) {
 } else {
   log('original-start');
   const limit = mode === 'limit';
-  emit({ type: 'assistant', is_api_error_message: true, error: limit ? 'rate_limit' : 'server_error', api_error_status: limit ? 429 : 529, api_error: limit ? 'usage_limit_reached' : undefined, message: { model: '<synthetic>', content: [{ type: 'text', text: limit ? "You've reached your Fable 5 limit." : 'API Error: Repeated 529 Overloaded errors' }] } });
+  // #126: a billing refusal is the CLI's typed `error: "billing_error"` kind on the synthetic notice (HTTP 400).
+  const billing = mode === 'billing';
+  emit({ type: 'assistant', is_api_error_message: true, error: limit ? 'rate_limit' : billing ? 'billing_error' : 'server_error', api_error_status: limit ? 429 : billing ? 400 : 529, api_error: limit ? 'usage_limit_reached' : undefined, message: { model: '<synthetic>', content: [{ type: 'text', text: limit ? "You've reached your Fable 5 limit." : billing ? 'Credit balance too low · Add funds: https://platform.claude.com/settings/billing' : 'API Error: Repeated 529 Overloaded errors' }] } });
   if (mode === 'cap') process.stdout.write('x'.repeat(270000));
   setTimeout(() => {
     if (mode !== 'notice-only' && mode !== 'cap') emit({ type: 'result', is_error: mode !== 'success', result: mode === 'auth' ? 'Failed to authenticate' : mode === 'success' ? 'original success' : 'terminal failure' });

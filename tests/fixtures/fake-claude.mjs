@@ -215,6 +215,81 @@ if (transientForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
   process.exit(1);
 }
 
+// #126 billing refusal: the provider refused the request because the
+// account's credit balance is too low. Shape assembled from the public
+// @anthropic-ai/claude-code stream-json writer (2.1.316–2.1.318 builds): the
+// `<synthetic>` assistant notice carries the TYPED kind `error:
+// "billing_error"` (a member of the writer's error-kind enum) with HTTP
+// status 400 and the text "Credit balance too low · Add funds: …"; the
+// `is_error` result that ends the turn carries the status and the text only.
+// Not captured from a live refusal — see tests/issue-126-billing-refusal.test.ts.
+// FAKE_CLAUDE_BILLING_SHAPE=untyped drops the typed kind and keeps the
+// wording, so a test can prove the shim acts on the marker, not the words.
+// FAKE_CLAUDE_BILLING_STATUS overrides the HTTP status (a plain 402, say).
+const billingForAccounts = (process.env.FAKE_CLAUDE_BILLING_FOR_ACCOUNT ?? "")
+  .split(",")
+  .filter(Boolean);
+if (billingForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
+  const text = "Credit balance too low · Add funds: https://platform.claude.com/settings/billing";
+  const typed = process.env.FAKE_CLAUDE_BILLING_SHAPE !== "untyped";
+  const status = Number(process.env.FAKE_CLAUDE_BILLING_STATUS ?? "400");
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text }] },
+      ...(typed ? { error: "billing_error" } : {}),
+      is_api_error_message: true,
+      api_error_status: status,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      api_error_status: status,
+      result: text,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.exit(1);
+}
+
+// #126 review: ANOTHER typed error kind from the same enum — one the shim has
+// no rule for (default `invalid_request`, HTTP 400). Same two-record shape as
+// the billing refusal; the shim must forward it unchanged, record nothing and
+// hop nowhere. FAKE_CLAUDE_ERROR_KIND / FAKE_CLAUDE_ERROR_STATUS override.
+const otherKindForAccounts = (process.env.FAKE_CLAUDE_ERROR_KIND_FOR_ACCOUNT ?? "")
+  .split(",")
+  .filter(Boolean);
+if (otherKindForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
+  const kind = process.env.FAKE_CLAUDE_ERROR_KIND ?? "invalid_request";
+  const status = Number(process.env.FAKE_CLAUDE_ERROR_STATUS ?? "400");
+  const text = `API Error: ${status} {"type":"error","error":{"type":"invalid_request_error","message":"messages: text content blocks must be non-empty"}}`;
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text }] },
+      error: kind,
+      is_api_error_message: true,
+      api_error_status: status,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.stdout.write(
+    JSON.stringify({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      api_error_status: status,
+      result: text,
+      session_id: "s1",
+    }) + "\n",
+  );
+  process.exit(1);
+}
+
 // Tests may override the emitted rate-limit payload to simulate turns that
 // carry a different window type (e.g. seven_day with utilization).
 const rateLimitInfo = process.env.FAKE_CLAUDE_RATE_LIMIT_INFO

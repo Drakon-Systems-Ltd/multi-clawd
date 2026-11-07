@@ -680,7 +680,7 @@ are near their limit, the launch goes to the near-limit account with the most
 headroom: the lowest fresh utilization, taking the newer of the stream and
 usage-poll records for each window. Equal figures keep pool order, an account
 with a figure outranks one without, and two without keep pool order.
-Exhausted and credential-failed accounts are never chosen. `explain` says
+Exhausted, billing-refused and credential-failed accounts are never chosen. `explain` says
 "all near limit, picked X at N%" and the direct Anthropic route orders its
 near-limit profiles the same way. Set it to `"reset-aware"` to use healthy weekly quota before its
 `seven_day` window resets: among `ok` accounts with live seven-day reset data,
@@ -697,7 +697,7 @@ account's concurrency ceiling. Each **new** session starts on the healthy
 `spreadWindowMs` (default one hour; clamped between one minute and seven
 days), counted from the served-launch journal `explain --history` reads. On a
 tie the account served least recently wins, then pool order, so equally idle
-accounts are used in turn. Near-limit, exhausted and credential-failed
+accounts are used in turn. Near-limit, exhausted, billing-refused and credential-failed
 accounts are never chosen; when no healthy account is left the pool answers
 exactly as `ordered` does. Spread keeps every session on the account that
 first served it: it switches `sessionAffinity` on for the pool (an explicit
@@ -738,6 +738,7 @@ How it decides, per launch (all data from each account's live
 | no data / stale data | used — never rotate on missing evidence |
 | every usable account near its limit | the near-limit account with the most headroom (lowest fresh utilization) serves; equal figures and accounts without a number keep pool order |
 | whole pool exhausted | home account anyway → real limit error → your chain drops provider |
+| billing refusal — the CLI's typed `billing_error` (credit balance too low) | account benched 15 min (`billing_refused`), the turn hops to a sibling in-turn, `explain` says BILLING REFUSED; the same words without the typed kind, or any other error, are forwarded unchanged |
 
 **Why the short-window rule exists (v1.7.2).** (v1.10's live usage poll now
 supplies the missing number — see below — so this rule is the fallback for

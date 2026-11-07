@@ -230,11 +230,15 @@ const VERDICT_RANK: Record<HealthVerdict, number> = {
   no_data: 0,
   near_limit: 1,
   exhausted: 2,
-  // After exhausted: its latest evidence is a rejection, and a direct turn
+  // After exhausted (#126): a billing refusal inside its cooldown will not
+  // have lifted, where an exhausted account's block may have; before the
+  // credential verdicts, because the account can at least authenticate.
+  billing_refused: 3,
+  // After that: its latest evidence is a rejection, and a direct turn
   // does not run through the shim, so trying it here could not clear the
   // record even if it worked.
-  credential_unverified: 3,
-  credential_failed: 4,
+  credential_unverified: 4,
+  credential_failed: 5,
 };
 
 export interface DirectOrderPlan {

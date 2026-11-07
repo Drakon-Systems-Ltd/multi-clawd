@@ -55,6 +55,7 @@ import { resolveExecMode, permissionModeArgs } from "./exec-policy.js";
 import { resolveBaseModelIds } from "./catalog-source.js";
 import {
   allCredentialFailed,
+  billingRefusalFor,
   classifyAccountHealth,
   credentialFailureFor,
   lastAuthSuccessAt,
@@ -295,6 +296,66 @@ let activeTokenResolver: TokenRefResolver | undefined;
  */
 let alertState: AlertState = { alerts: [] };
 let loginProbeTimer: ReturnType<typeof setInterval> | undefined;
+/**
+ * Which pool member each live `billing:<pool>:<account>` alert is about, so a
+ * heartbeat can re-check the key against the account's current state (#126).
+ * Keyed by alert key; module-level for the same reason alertState is.
+ */
+const billingAlertSources = new Map<string, { poolId: string; accountId: string }>();
+const BILLING_ALERT_PREFIX = "billing:";
+
+function billingAlertText(poolId: string, accountId: string, reason: string | undefined): string {
+  return `pool ${poolId}: account "${accountId}" is excluded — ${reason ?? "the provider refused it for billing"}`;
+}
+
+/**
+ * Raise (or refresh) the billing alert for one member from its CURRENT verdict.
+ * The TTL is the remainder of the cooldown, so even a heartbeat that never
+ * re-derives it cannot show the alert past the moment the verdict ends.
+ */
+function raiseBillingAlert(
+  poolId: string,
+  accountId: string,
+  health: { reason?: string; resumeAt?: number },
+  nowMs: number,
+): void {
+  const key = `${BILLING_ALERT_PREFIX}${poolId}:${accountId}`;
+  billingAlertSources.set(key, { poolId, accountId });
+  raiseAlert({
+    key,
+    severity: "error",
+    text: billingAlertText(poolId, accountId, health.reason),
+    ttlMs: health.resumeAt !== undefined ? Math.max(0, health.resumeAt - nowMs) : undefined,
+  });
+}
+
+function clearBillingAlert(key: string): void {
+  billingAlertSources.delete(key);
+  alertState = clearAlert(alertState, key);
+}
+
+/**
+ * A billing alert must say what is true NOW, not what was true at the last
+ * pooled launch (#126 review). The verdict ends on its own after the cooldown
+ * and early on a successful turn — and a successful turn can come from a
+ * direct launch, a login or a probe, none of which pass through the pool's
+ * prepareExecution. So every surfacing re-reads the account's state: expired
+ * or recovered means cleared; still refused means refreshed wording.
+ */
+function reconcileBillingAlerts(nowMs: number): void {
+  for (const key of alertKeysWithPrefix(alertState, BILLING_ALERT_PREFIX)) {
+    const source = billingAlertSources.get(key);
+    if (!source) {
+      // Raised by an older build, or the map was lost: nothing to re-check it
+      // against, so do not let it outlive a verdict it cannot see.
+      alertState = clearAlert(alertState, key);
+      continue;
+    }
+    const health = billingRefusalFor(readHealthState(source.accountId), nowMs);
+    if (health) raiseBillingAlert(source.poolId, source.accountId, health, nowMs);
+    else clearBillingAlert(key);
+  }
+}
 
 function raiseAlert(alert: Parameters<typeof addAlert>[1]): void {
   alertState = addAlert(alertState, alert, Date.now());
@@ -308,6 +369,7 @@ function raiseAlert(alert: Parameters<typeof addAlert>[1]): void {
  */
 export function pendingOperatorAlerts(nowMs: number): string | undefined {
   ingestAlertSpool();
+  reconcileBillingAlerts(nowMs);
   return pendingAlertText(alertState, nowMs);
 }
 
@@ -1757,6 +1819,20 @@ export function registerPoolBackend(
         });
       } else {
         alertState = clearAlert(alertState, key);
+      }
+    }
+    // A member benched for a billing refusal (#126) is invisible otherwise,
+    // exactly as a rejected login was. Its own key, because the fix is a third
+    // thing (pay); it ends with the cooldown or on an observed success, i.e.
+    // exactly when the verdict does — the TTL is the cooldown's remainder and
+    // every heartbeat re-derives it (reconcileBillingAlerts), so neither
+    // expiry nor an early recovery waits for the next pooled launch.
+    for (const v of verdicts) {
+      const key = `${BILLING_ALERT_PREFIX}${poolId}:${v.id}`;
+      if (v.health.verdict === "billing_refused") {
+        raiseBillingAlert(poolId, v.id, v.health, now);
+      } else {
+        clearBillingAlert(key);
       }
     }
     // Reaching here at all means at least one login still works, so the

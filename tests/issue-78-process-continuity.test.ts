@@ -22,7 +22,7 @@ function run(mode: string) {
   return { res, events: readFileSync(log, 'utf8').trim().split('\n') };
 }
 
-test.each(['transient', 'limit', 'exhaustion'])('%s waits for terminal failure and natural close before replay', (mode) => {
+test.each(['transient', 'limit', 'exhaustion', 'billing'])('%s waits for terminal failure and natural close before replay', (mode) => {
   const { res, events } = run(mode);
   expect(events).toEqual(['original-start', 'terminal', 'cleanup', 'original-exit', 'sibling-start', 'sibling-exit']);
   expect(res.status).toBe(mode === 'exhaustion' ? 1 : 0);

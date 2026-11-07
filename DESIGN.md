@@ -576,6 +576,57 @@ dimension:
   session per rung. Quota exhaustion and credential failure stay separate
   alerts throughout, because the operator's action differs: wait vs log back in.
 
+## Billing refusals: an account-level cooldown (#126)
+
+A third failure class joins quota and credential. When the provider refuses a
+request because the account's credit balance is too low, every quota window
+still reads `allowed` and the login is fine, so nothing recorded it: the error
+was forwarded, the pool re-elected the same account on the next launch, and
+the in-turn retry never fired.
+
+- **Evidence first, marker only.** The public Claude CLI (2.1.316–2.1.318
+  builds) types the top-level `error` of its stream-json `assistant` record
+  from a fixed enum — the same values its StopFailure hook exposes to
+  matchers — and emits `billing_error` for exactly one condition: the API's
+  HTTP 400 "Your credit balance is too low to access the Anthropic API". The
+  shim matches that kind and nothing else. The wording ("Credit balance too
+  low · Add funds: …") is the CLI's fallback text and is never matched; a
+  record with the words but no kind, a 402, and every other error are
+  forwarded unchanged. The 2.1.76 build has no such kind, so an older CLI
+  keeps the previous behaviour.
+- **Account-level, bounded, self-expiring.** A `billing` record beside the
+  windows and the credential record (same newer-`seenAt` merge, same explicit
+  "ok" on clear). It outranks quota for every model and sits behind the
+  credential verdict, because a dead login cannot even be billed and the fixes
+  differ. `billing_refused` lasts BILLING_REFUSED_TTL_MS (15 minutes): the
+  remedy is a payment nothing here can observe, so the launch after the
+  cooldown is the probe, and a successful turn — a real non-error result in
+  the stream, not merely a clean exit, since the CLI can exit 0 on a refusal
+  — ends it early. Never chosen by
+  any strategy; as a last resort it ranks behind an exhausted member (whose
+  block may have lifted) and ahead of a dead login (it can authenticate, and
+  the host classifies the billing error it produces and fails the turn over).
+  It does not count toward the all-logins-dead hard error.
+- **Same hop, same invariants.** The shim treats the refusal as a retry cause
+  like a model limit: one hop, to a healthy sibling (or one overdue a
+  re-probe), decided only at the child's natural close after a terminal error
+  result, with the prompt replayed in full; nothing is killed, no partial
+  output is forwarded, and a resumed session travels with its transcript or
+  the retry is refused. The journal records the retry with reason `billing`;
+  `explain` says BILLING REFUSED; a `billing:<pool>:<account>` alert holds
+  exactly while the verdict does: its TTL is the cooldown's remainder and
+  every heartbeat re-derives it from the account's current state, so expiry
+  and an early recovery both reach the operator without a pooled launch in
+  between.
+- **Measured and left alone (same CLI source).** `account_on_hold` is emitted
+  only behind a remote feature flag, so it is not relied on. A past-due
+  subscription is reported under `oauth_org_not_allowed`, a kind the CLI also
+  uses for an organisation that disabled OAuth — the two differ only by
+  wording, so neither is classified. `api_error: "model_requires_usage_credits"`
+  (a 429 carrying `rate_limit_info`) is a model-scoped, reset-bearing
+  refusal — a limit, not an account fault — and stays on the limit/transient
+  paths.
+
 ## v1.9: one pool, both Claude transports
 
 OpenClaw reaches Claude two ways, and until v1.9 the pool governed only one:
