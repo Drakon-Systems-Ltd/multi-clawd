@@ -936,6 +936,20 @@ Three moves, all through the official plugin SDK (details in
    (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`) into the child process
    env, after the host's ambient Claude credentials are stripped.
 
+**Which path shell commands take.** On OpenClaw 2026.10.10 and later the
+bundled `claude-cli` backend declares `exec` and `process` as *host-owned*:
+a normal chat turn runs shell commands through OpenClaw's own `exec` tool,
+under OpenClaw's approval and allowlist policy, and Claude Code's native
+`Bash` is disabled for that turn. The pool declares the same set (v2.6.6+),
+so a turn on `clawd/*` or `claw<N>/*` takes the same path as one on
+`claude-cli/*`. Before v2.6.6 the pool left native `Bash` enabled on those
+gateways, governed only by the permission mode derived from
+`tools.exec.mode`, so OpenClaw's exec approvals did not apply to it. On
+OpenClaw 2026.8.x there is no host-owned contract on either backend:
+commands run through Claude Code's native `Bash` under that permission mode,
+unchanged. Exact-cap runs (cron tool policies, `disableTools`) and side
+questions are unaffected either way.
+
 ## Legacy issue: idle backend eviction on OpenClaw ≤ 2026.7.1
 
 On OpenClaw ≤ 2026.7.1, core's *scoped* harness activation can silently drop

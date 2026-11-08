@@ -7,6 +7,20 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Fixed
+- **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
+  bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
+  declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal
+  chat turn's shell commands through OpenClaw's own `exec` tool (approvals,
+  allowlist) and the bundled argv resolver adds `Bash` to `--disallowedTools`.
+  The pool declared no such set, so the same turn on `clawd/*` or `claw<N>/*`
+  kept Claude Code's native `Bash` under the permission mode alone — a silent
+  policy divergence from the bundled backend it mirrors. The pool now declares
+  the same set and its `resolveExecutionArgs` ports the bundled step
+  byte-for-byte: when the gateway marks `exec` host-owned for the run, every
+  operator denial is kept in order and `Bash` is appended once; nothing else
+  in the argv moves. Exact-cap runs, side questions and 2026.8.x gateways
+  (which have no such field and never pass it) are unchanged. Verified
+  against the 2026.10.10 and 2026.11.1 sources; not observed live. (#136)
 - **OpenClaw >= 2026.9 (incl. 2026.10.10 and 2026.11.1): the bundled Claude
   catalog mirror silently used the static list.** Those releases removed
   `dist/extensions/anthropic/cli-catalog.js`, the module the mirror imported,
