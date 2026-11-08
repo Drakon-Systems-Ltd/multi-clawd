@@ -1,7 +1,7 @@
 /** Small, private account activity journal shared by concurrent shims. */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { acquireShimLock } from "./shim-lock.js";
 
 export const HISTORY_FILE = "history.jsonl";
@@ -40,7 +40,7 @@ function valid(raw: unknown): HistoryEvent | undefined {
     ...(e.reason ? { reason: e.reason as HistoryReason } : {}) };
 }
 
-export function readHistory(file: string): HistoryEvent[] {
+function parseLines(file: string): HistoryEvent[] {
   let raw: string;
   try { raw = readFileSync(file, "utf8"); } catch { return []; }
   return raw.split("\n").flatMap((line) => {
@@ -49,35 +49,71 @@ export function readHistory(file: string): HistoryEvent[] {
   });
 }
 
+/** Events parked by writers that could not take the lock in time (#145). */
+function pendingFiles(file: string): string[] {
+  const prefix = `${basename(file)}.pending-`;
+  try {
+    return readdirSync(dirname(file))
+      .filter((name) => name.startsWith(prefix) && /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name.slice(prefix.length)))
+      .sort()
+      .map((name) => join(dirname(file), name));
+  } catch { return []; }
+}
+
+/** Atomic publish: readers and the folding lock holder see a whole file or none. */
+function publish(target: string, content: string): void {
+  mkdirSync(dirname(target), { recursive: true });
+  const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(tmp, content, { mode: 0o600 });
+    renameSync(tmp, target);
+  } finally {
+    try { unlinkSync(tmp); } catch { /* already renamed */ }
+  }
+}
+
+/**
+ * The journal plus any parked events not yet folded, so a reader never misses
+ * an event only because its writer lost a lock race. A read that overlaps a
+ * fold can see a parked event twice for the moment between the holder's
+ * replace and its unlink; the journal itself is never duplicated.
+ */
+export function readHistory(file: string): HistoryEvent[] {
+  return [...parseLines(file), ...pendingFiles(file).flatMap(parseLines)];
+}
+
 /**
  * Serialize read/trim/replace under the same advisory lock as health state.
- * A timed-out writer drops its event: unlike health observations, history is
- * diagnostic and a lock-free replacement could erase another writer's events
- * or exceed the cap. Recording is always best effort and never blocks a turn.
+ * A writer that cannot take the lock within its budget never replaces the
+ * journal (that could erase another writer's events or exceed the cap) and
+ * never drops its event either (#145): it parks the event in a pending file
+ * that the next lock holder folds in. Recording never blocks a turn for
+ * longer than the lock budget.
  */
 export function recordHistory(stateFile: string | undefined, event: HistoryEvent): void {
   if (!stateFile) return;
   let release: (() => void) | undefined;
-  let tmp: string | undefined;
   try {
     const checked = valid(event);
     if (!checked) return;
     const file = historyFile(stateFile);
+    const line = JSON.stringify(checked) + "\n";
     release = acquireShimLock(file);
-    if (!release) return;
-    const events = [...readHistory(file), checked].slice(-HISTORY_MAX_EVENTS);
+    if (!release) {
+      publish(`${file}.pending-${process.pid}-${randomUUID()}`, line);
+      return;
+    }
+    const parked = pendingFiles(file);
+    const events = [...parseLines(file), ...parked.flatMap(parseLines), checked].slice(-HISTORY_MAX_EVENTS);
     let lines = events.map((e) => JSON.stringify(e) + "\n");
     let bytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line), 0);
     while (bytes > HISTORY_MAX_BYTES && lines.length) bytes -= Buffer.byteLength(lines.shift()!);
-    mkdirSync(dirname(file), { recursive: true });
-    tmp = `${file}.tmp-${process.pid}-${randomUUID()}`;
-    writeFileSync(tmp, lines.join(""), { mode: 0o600 });
-    renameSync(tmp, file);
+    publish(file, lines.join(""));
+    // Only after the replace landed: a crash before this point leaves the
+    // parked events for the next fold instead of losing them.
+    for (const pending of parked) try { unlinkSync(pending); } catch { /* next fold sees it again */ }
   } catch { /* history cannot affect the launch */ }
-  finally {
-    if (tmp) try { unlinkSync(tmp); } catch { /* already renamed */ }
-    release?.();
-  }
+  finally { release?.(); }
 }
 
 export function parseHistorySince(value: string): number {
