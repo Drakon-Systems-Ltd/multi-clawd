@@ -940,7 +940,7 @@ Three moves, all through the official plugin SDK (details in
 bundled `claude-cli` backend declares `exec` and `process` as *host-owned*:
 a normal chat turn runs shell commands through OpenClaw's own `exec` tool,
 under OpenClaw's approval and allowlist policy, and Claude Code's native
-`Bash` is disabled for that turn. The pool declares the same set (v2.6.6+),
+`Bash` is disabled for that turn. The unreleased pool fix declares the same set,
 so a turn on `clawd/*` or `claw<N>/*` takes the same path as one on
 `claude-cli/*`. Before v2.6.6 the pool left native `Bash` enabled on those
 gateways, governed only by the permission mode derived from
@@ -948,7 +948,9 @@ gateways, governed only by the permission mode derived from
 OpenClaw 2026.8.x there is no host-owned contract on either backend:
 commands run through Claude Code's native `Bash` under that permission mode,
 unchanged. Exact-cap runs (cron tool policies, `disableTools`) and side
-questions are unaffected either way.
+questions without the host-owned field remain unchanged. A side question
+that receives host-owned `exec` also gains the native `Bash` denial; the
+separate side-question tool-free projection is tracked in #142.
 
 ## Legacy issue: idle backend eviction on OpenClaw ≤ 2026.7.1
 

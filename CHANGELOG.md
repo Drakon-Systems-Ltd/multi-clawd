@@ -18,8 +18,10 @@ versioning from v1.0.
   the same set and its `resolveExecutionArgs` ports the bundled step
   byte-for-byte: when the gateway marks `exec` host-owned for the run, every
   operator denial is kept in order and `Bash` is appended once; nothing else
-  in the argv moves. Exact-cap runs, side questions and 2026.8.x gateways
-  (which have no such field and never pass it) are unchanged. Verified
+  in the argv moves. Exact-cap runs and side questions without the field,
+  and 2026.8.x gateways (which never pass it), are unchanged. A side
+  question carrying host-owned `exec` also gains the native `Bash` denial;
+  the separate tool-free side-question projection is tracked in #142. Verified
   against the 2026.10.10 and 2026.11.1 sources; not observed live. (#136)
 - **OpenClaw >= 2026.9 (incl. 2026.10.10 and 2026.11.1): the bundled Claude
   catalog mirror silently used the static list.** Those releases removed

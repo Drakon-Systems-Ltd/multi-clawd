@@ -142,6 +142,16 @@ describe("paths core never hands hostOwnedTools to stay as they were", () => {
     expect(backend.resolveExecutionArgs!(ctx(baseArgs, { executionMode: "side-question" }))).toEqual(baseArgs);
   });
 
+  it("a side question receiving host-owned exec also denies Bash", () => {
+    const backend = buildBackend(account);
+    const out = backend.resolveExecutionArgs!(ctx(baseArgs, {
+      executionMode: "side-question",
+      hostOwnedTools: ["exec", "process"],
+    })) as string[];
+    expect(disallowed(out)).toEqual(["Monitor", "Bash"]);
+    expect(out).toContain("bypassPermissions"); // Full tool-free projection remains #142.
+  });
+
   it("if both an exact cap and the field ever arrive together, the result matches the bundled order (Bash lands in the sorted cap denials)", () => {
     const out = resolvePoolExecutionArgs({
       baseArgs,
