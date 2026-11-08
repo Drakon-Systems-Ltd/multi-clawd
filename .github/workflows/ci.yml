@@ -40,3 +40,36 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - run: npm test
+
+  # SDK drift guard (#135): the job above only sees the pinned devDependency
+  # (2026.8.1). This one overlays real newer OpenClaw releases with --no-save
+  # (package.json and the lockfile are untouched) and runs ONLY the contract
+  # suite, so a moved or removed semi-internal file fails CI instead of
+  # surfacing in production. MULTI_CLAWD_EXPECT_OPENCLAW makes the suite fail
+  # if the overlay silently did not take. `latest` has no expectation: it is the
+  # early-warning lane for the next release.
+  sdk-contract-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - openclaw: "2026.10.10"
+            expect: "2026.10.10"
+          - openclaw: "2026.11.1"
+            expect: "2026.11.1"
+          - openclaw: "latest"
+            expect: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-audit --no-fund
+      - run: npm install --no-save --no-audit --no-fund openclaw@${{ matrix.openclaw }}
+      - run: npm run build
+      - run: npx vitest run tests/openclaw-sdk-contract.test.ts
+        env:
+          MULTI_CLAWD_EXPECT_OPENCLAW: ${{ matrix.expect }}
