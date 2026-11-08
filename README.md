@@ -244,7 +244,7 @@ claude-cli/claude-fable-5        # main login
   subprocess: native tools, skills, MCP bridge, and native compaction all
   stay intact when failover steps across accounts.
 - 🔮 **Future-proof models (v0.2)** — model ids are not hardcoded: the
-  catalog mirrors the bundled claude-cli list live (with a built-in
+  catalog mirrors the bundled Claude model list live (with a built-in
   fallback), and *any* modern `claude-*` id resolves on demand. When the
   flagship subscription model changes (Fable 5 → Opus 5), `clawd/claude-opus-5`
   just works — no plugin update.

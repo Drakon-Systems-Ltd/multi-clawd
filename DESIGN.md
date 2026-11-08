@@ -261,11 +261,18 @@ is expected to change, e.g. Fable 5 → Opus 5):
 - `resolveDynamicModel` accepts **any** modern lowercase `claude-*` id
   (mirroring core's own Anthropic forward-compat resolver); known ids get
   real specs, unknown ones conservative defaults (200k ctx / 64k out).
-- `augmentModelCatalog` mirrors the bundled claude-cli catalog **live** at
-  catalog-build time (`dist/extensions/anthropic/cli-catalog.js`, resolved
-  by file path since the exports map hides it), falling back to a built-in
-  list when unavailable. New models OpenClaw ships appear on our backends
-  automatically.
+- `augmentModelCatalog` mirrors the bundled Claude catalog **live** at
+  catalog-build time from the installed OpenClaw's public artifacts, resolved
+  by file path since the exports map hides them: the legacy builder
+  (`dist/extensions/anthropic/cli-catalog.js`, OpenClaw <= 2026.8) where it
+  still ships, otherwise the bundled Anthropic extension manifest
+  (`dist/extensions/anthropic/openclaw.plugin.json`, `modelCatalog`; the
+  `claude-cli` list when non-empty, else the `anthropic` list, since OpenClaw
+  >= 2026.9 discovers the CLI menu at runtime and the manifest is the only
+  static declaration). Falls back to a built-in list when neither is
+  readable; the built-in list is kept a superset of the manifest's ids. No
+  CLI is spawned and no credential is read. New models OpenClaw ships appear
+  on our backends automatically.
 - Per-account `models` / `defaultModel` config provides operator overrides.
 
 ### Eviction (openclaw#107408): why there is no in-process fix
