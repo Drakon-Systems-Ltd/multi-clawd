@@ -46,6 +46,7 @@ export const MODEL_ALIASES: Record<string, string> = {
   "sonnet-5.5": "claude-sonnet-5-5",
   "sonnet-4.6": "claude-sonnet-4-6",
   haiku: "haiku",
+  "haiku-5.5": "claude-haiku-5-5",
 };
 
 /** Known specs — used when available; unknown modern ids fall back to defaults. */
@@ -63,6 +64,10 @@ const KNOWN_SPECS: Record<string, Omit<ModelSpec, "imageMaxSidePx">> = {
   "claude-sonnet-5": { name: "Claude Sonnet 5", contextWindow: 1000000, maxTokens: 64000 },
   "claude-fable-5-1": { name: "Claude Fable 5.1", contextWindow: 1000000, maxTokens: 128000 },
   "claude-fable-5": { name: "Claude Fable 5", contextWindow: 1000000, maxTokens: 128000 },
+  // Mythos 5: declared by OpenClaw's bundled Anthropic manifest (1M context, 128k output).
+  "claude-mythos-5": { name: "Claude Mythos 5", contextWindow: 1000000, maxTokens: 128000 },
+  // Haiku 5.5: OpenClaw's default utility model since 2026.10 (1M context, 128k output).
+  "claude-haiku-5-5": { name: "Claude Haiku 5.5", contextWindow: 1000000, maxTokens: 128000 },
   // Haiku 4.5 is natively 200k — advertising more would overrun the model.
   "claude-haiku-4-5": { name: "Claude Haiku 4.5", contextWindow: 200000, maxTokens: 64000 },
 };

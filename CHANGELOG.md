@@ -6,6 +6,23 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw >= 2026.9 (incl. 2026.10.10 and 2026.11.1): the bundled Claude
+  catalog mirror silently used the static list.** Those releases removed
+  `dist/extensions/anthropic/cli-catalog.js`, the module the mirror imported,
+  so `loadBundledCatalogIds()` returned null and the catalog rows, the
+  "models" output and the new-model courtesy notice all ran on the built-in
+  fallback, which lacked `claude-haiku-5-5`. The mirror now reads the bundled
+  Anthropic extension manifest (`openclaw.plugin.json`, `modelCatalog`: the
+  `claude-cli` list when non-empty, else the `anthropic` list) when the legacy
+  builder is absent, and still prefers the builder where it ships (OpenClaw
+  2026.8.x), so earlier hosts are unchanged. Nothing new is executed: the
+  manifest is JSON, the Claude CLI is never spawned and no credential is
+  read. The built-in fallback gains `claude-haiku-5-5` and `claude-mythos-5`
+  (and the `haiku-5.5` alias) so it covers every id the bundled manifests
+  declare; a test holds that superset against the 2026.8.1, 2026.10.10 and
+  2026.11.1 manifests. (#134)
+
 ## [2.6.5] - 2026-11-07
 
 ### Added
