@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -226,6 +226,12 @@ if (transientForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
 // FAKE_CLAUDE_BILLING_SHAPE=untyped drops the typed kind and keeps the
 // wording, so a test can prove the shim acts on the marker, not the words.
 // FAKE_CLAUDE_BILLING_STATUS overrides the HTTP status (a plain 402, say).
+// FAKE_CLAUDE_CLOSE_STDIN_EARLY=1 (#147): give up the read end of stdin BEFORE
+// the notice is written and linger FAKE_CLAUDE_CLOSE_STDIN_LINGER_MS (default
+// 1500) after it, so a test can hand the shim its prompt while this stand-in
+// is alive but no longer reading — the shape of a CLI that refused before
+// consuming stdin. The shim's forward then meets a closed pipe for certain,
+// instead of only when the scheduler lets the child finish first.
 const billingForAccounts = (process.env.FAKE_CLAUDE_BILLING_FOR_ACCOUNT ?? "")
   .split(",")
   .filter(Boolean);
@@ -233,6 +239,8 @@ if (billingForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
   const text = "Credit balance too low · Add funds: https://platform.claude.com/settings/billing";
   const typed = process.env.FAKE_CLAUDE_BILLING_SHAPE !== "untyped";
   const status = Number(process.env.FAKE_CLAUDE_BILLING_STATUS ?? "400");
+  const closeStdinEarly = process.env.FAKE_CLAUDE_CLOSE_STDIN_EARLY === "1";
+  if (closeStdinEarly) closeSync(0);
   process.stdout.write(
     JSON.stringify({
       type: "assistant",
@@ -243,6 +251,11 @@ if (billingForAccounts.includes(process.env.MULTI_CLAWD_ACCOUNT_ID ?? "")) {
       session_id: "s1",
     }) + "\n",
   );
+  if (closeStdinEarly) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, Number(process.env.FAKE_CLAUDE_CLOSE_STDIN_LINGER_MS ?? "1500")),
+    );
+  }
   process.stdout.write(
     JSON.stringify({
       type: "result",
