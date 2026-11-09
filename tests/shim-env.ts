@@ -23,3 +23,22 @@ export function cleanShimEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessE
   }
   return { ...env, ...overrides };
 }
+
+/**
+ * Assertion context for a spawned shim: its exit status, signal, stderr and
+ * stdout, so a wrong exit code in CI says WHY instead of only "1 vs 0".
+ */
+export function childOutput(result: {
+  status?: number | null;
+  code?: number | null;
+  signal?: NodeJS.Signals | null;
+  stdout?: string | Buffer | null;
+  stderr?: string | Buffer | null;
+}): string {
+  const status = result.status ?? result.code;
+  return [
+    `child exited status=${status ?? "null"} signal=${result.signal ?? "null"}`,
+    `--- stderr ---\n${String(result.stderr ?? "")}`,
+    `--- stdout ---\n${String(result.stdout ?? "")}`,
+  ].join("\n");
+}

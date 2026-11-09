@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { readSessionPin, recordSessionPin, SESSION_AFFINITY_ENV } from "../src/session-affinity.js";
-import { cleanShimEnv } from "./shim-env.js";
+import { childOutput, cleanShimEnv } from "./shim-env.js";
 
 const ROOT = join(__dirname, "..");
 const SHIM = join(ROOT, "dist", "shim.js");
@@ -50,7 +50,12 @@ function launch(opts: {
   const args = [SHIM, "-p", "--output-format", "stream-json", "--model", "claude-fable-5-1"];
   if (opts.session) args.push(opts.resume ? "--resume" : "--session-id", opts.session);
   const result = spawnSync(process.execPath, args, { env, input: "hello\n", encoding: "utf8" });
-  const records = result.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  let records: Array<{ type?: string; served_by?: string }>;
+  try {
+    records = result.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  } catch (err) {
+    throw new Error(`shim stdout is not stream-json (${String(err)})\n${childOutput(result)}`);
+  }
   return { result, servedBy: records.find((r) => r.type === "result")?.served_by };
 }
 
@@ -71,8 +76,8 @@ describe("CLI session affinity (#56)", () => {
   test("in-turn retry records the actual serving account", () => {
     recordSessionPin(pinFile, "retryA", "claw2", Date.now(), ttlMs);
     const { result, servedBy } = launch({ session: "retryA", affinity: true, limitFor: "claw2" });
-    expect(result.status).toBe(0);
-    expect(servedBy).toBe("claw1");
+    expect(result.status, childOutput(result)).toBe(0);
+    expect(servedBy, childOutput(result)).toBe("claw1");
     expect(readSessionPin(pinFile, "retryA", Date.now(), ttlMs)?.account).toBe("claw1");
   });
 

@@ -734,6 +734,15 @@ function onPassthroughChunk(chunk: Buffer): void {
 
 function attachChildHandlers(): void {
   const armedForThisChild = retryArmed;
+  // A CLI may exit before reading its prompt — a pre-flight refusal does. A
+  // prompt write that lands after that exit but before its close is processed
+  // fails with EPIPE; unhandled, that error crashed the shim (exit 1) and lost
+  // the in-turn retry. The bytes are still in stdinReplay for a retry, and the
+  // close handler reports the real outcome, so a dead pipe is not an error here.
+  child.stdin.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE" || err.code === "ECONNRESET") return;
+    process.stderr.write(`[multi-clawd shim] claude stdin error: ${String(err)}\n`);
+  });
   child.stdout.on("data", (chunk: Buffer) => {
     if (armedForThisChild && retryArmed) onArmedChunk(chunk);
     else onPassthroughChunk(chunk);
