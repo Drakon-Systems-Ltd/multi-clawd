@@ -20,6 +20,10 @@
  *   is what makes `claw2/claude-fable-5` resolvable without any
  *   `baseUrl`/API key. `augmentModelCatalog` additionally feeds the model
  *   catalog list (`openclaw models list`).
+ * - `hostOwnedTools: ["exec", "process"]` mirrors the bundled backend on
+ *   OpenClaw >= 2026.10.10: core routes shell commands through its own `exec`
+ *   tool for normal turns and `resolveExecutionArgs` disables native Bash
+ *   (tool-cap.ts, #136); older gateways ignore the field.
  * - `prepareExecution(ctx)` injects the account's own login into the child
  *   process env (`CLAUDE_CONFIG_DIR` + `CLAUDE_CODE_OAUTH_TOKEN`). The runner
  *   applies `clearEnv` to the host env first and merges prepared env after,
@@ -83,7 +87,7 @@ import {
   type TokenRefResolver,
 } from "./token-resolution.js";
 import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
-import { resolvePoolExecutionArgs } from "./tool-cap.js";
+import { POOL_HOST_OWNED_TOOLS, resolvePoolExecutionArgs } from "./tool-cap.js";
 import { RETRY_ROSTER_ENV } from "./retry-plan.js";
 import { SESSION_DIRS_ENV } from "./session-handover.js";
 import {
@@ -147,6 +151,13 @@ import { createShimExecute } from "./shim-transport.js";
 // declaration files. Derive the backend contract from the stable registration
 // API instead; this remains valid on the declared 2026.8.1+ compatibility range.
 type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
+/**
+ * The SDK pinned for the build (2026.8.1) predates `hostOwnedTools`; OpenClaw
+ * 2026.10.10+ reads it and older gateways ignore the unknown field. Widening
+ * the literal's type keeps the declaration next to the contract it belongs to
+ * instead of bolting it on afterwards.
+ */
+export type PoolCliBackend = CliBackendPlugin & { hostOwnedTools?: readonly string[] };
 type CliBackendPrepareExecution = NonNullable<CliBackendPlugin["prepareExecution"]>;
 type CliBackendPrepareExecutionContext = Parameters<CliBackendPrepareExecution>[0];
 type CliBackendPreparedExecution = Awaited<ReturnType<CliBackendPrepareExecution>>;
@@ -1017,7 +1028,7 @@ export function buildBackend(
         ...(launch.log ? { log: launch.log } : {}),
       }) satisfies CliBackendExecuteFn)
     : undefined;
-  const backend: CliBackendPlugin = {
+  const backend: PoolCliBackend = {
     id: account.id,
     liveTest: {
       defaultModelRef: `${account.id}/${account.defaultModel ?? "claude-fable-5"}`,
@@ -1040,6 +1051,13 @@ export function buildBackend(
     nativeToolMode: "selectable",
     toolAvailabilityEnforcement: "execution-args",
     resolveExecutionArgs: resolvePoolExecutionArgs,
+    // OpenClaw 2026.10.10+: the bundled claude-cli backend declares exec and
+    // process as host-owned, so a normal chat turn runs shell commands through
+    // OpenClaw's exec tool (its approval/allowlist policy) and the resolver
+    // above disables Claude Code's native Bash. Without this the pool silently
+    // kept native Bash under the permission mode alone (#136). 2026.8.x
+    // gateways ignore the field and never pass it to the resolver.
+    hostOwnedTools: POOL_HOST_OWNED_TOOLS,
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     config: {
