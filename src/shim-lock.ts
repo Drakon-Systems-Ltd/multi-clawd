@@ -17,22 +17,36 @@ interface ShimLockTestHooks {
 }
 
 /**
- * Field 22 (starttime) of a Linux /proc/<pid>/stat line, as a decimal string.
+ * Fields 3 (state) and 22 (starttime) of a Linux /proc/<pid>/stat line.
  * comm (field 2) may hold spaces and parentheses, so fields are counted from
  * the last ")" in the line; the kernel prints nothing after comm that holds one.
  */
-export function parseProcStatStartTime(stat: string): string | undefined {
+function parseProcStat(stat: string): { state?: string; start?: string } {
   const close = stat.lastIndexOf(")");
-  if (close < 0) return undefined;
+  if (close < 0) return {};
   const fields = stat.slice(close + 1).trim().split(/\s+/);
+  const state = fields[0];
   const start = fields[19];
-  return start !== undefined && /^\d+$/.test(start) ? start : undefined;
+  return {
+    state: state !== undefined && /^[A-Za-z]$/.test(state) ? state : undefined,
+    start: start !== undefined && /^\d+$/.test(start) ? start : undefined,
+  };
+}
+
+/** Field 22 (starttime) of a Linux /proc/<pid>/stat line, as a decimal string. */
+export function parseProcStatStartTime(stat: string): string | undefined {
+  return parseProcStat(stat).start;
+}
+
+/** State and start time of pid as procfs reports them; fields are undefined when unknowable. */
+function readProcStat(procRoot: string | undefined, pid: number | "self"): { state?: string; start?: string } {
+  if (procRoot === undefined) return {};
+  try { return parseProcStat(readFileSync(join(procRoot, String(pid), "stat"), "utf8")); } catch { return {}; }
 }
 
 /** The start time of pid as procfs reports it, or undefined when unknowable. */
 function readGeneration(procRoot: string | undefined, pid: number | "self"): string | undefined {
-  if (procRoot === undefined) return undefined;
-  try { return parseProcStatStartTime(readFileSync(join(procRoot, String(pid), "stat"), "utf8")); } catch { return undefined; }
+  return readProcStat(procRoot, pid).start;
 }
 
 /**
@@ -99,7 +113,8 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
       const before = fstatSync(staleFd);
       hooks.beforeStaleSnapshot?.();
       const observed = readFileSync(staleFd);
-      const [pidText, timeText, , storedGeneration] = observed.toString("utf8").trim().split(" ");
+      const text = observed.toString("utf8");
+      const [pidText, timeText, , storedGeneration] = text.trim().split(" ");
       const pid = Number(pidText);
       const age = Date.now() - Number(timeText);
       // A live holder is never reclaimed, however old its lock: a holder
@@ -109,7 +124,12 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
       // A live pid whose start time differs from the recorded generation is a
       // reused pid: the recorded holder is gone, since no two processes share
       // a pid at once. An unreadable generation, or a legacy lock without one,
-      // keeps the live-pid protection.
+      // keeps the live-pid protection, and the generation is compared only
+      // in a complete record (newline-terminated): a waiter can read the lock
+      // mid-write and see a truncated fourth field. A live pid whose procfs
+      // state is Z or X has exited: an unreaped zombie still passes kill(0)
+      // but can never commit, so it holds nothing, generation or not. A
+      // missing or unparseable state keeps the protection.
       let dead = false;
       let live = false;
       if (/^\d+$/.test(pidText ?? "") && Number.isSafeInteger(pid) && pid > 0) {
@@ -118,9 +138,11 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
           dead = code === "ESRCH";
           live = code === "EPERM";
         }
-        if (live && storedGeneration !== undefined && /^\d+$/.test(storedGeneration)) {
-          const current = readGeneration(procRoot, pid);
-          if (current !== undefined && BigInt(current) !== BigInt(storedGeneration)) {
+        if (live) {
+          const { state, start } = readProcStat(procRoot, pid);
+          const reused = text.endsWith("\n") && storedGeneration !== undefined && /^\d+$/.test(storedGeneration)
+            && start !== undefined && BigInt(start) !== BigInt(storedGeneration);
+          if (state === "Z" || state === "X" || reused) {
             live = false;
             dead = true;
           }
