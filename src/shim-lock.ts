@@ -63,11 +63,21 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
       const [pidText, timeText] = observed.toString("utf8").trim().split(" ");
       const pid = Number(pidText);
       const age = Date.now() - Number(timeText);
+      // A live holder is never reclaimed, however old its lock: a holder
+      // paused past the lease would still commit the snapshot it read, over
+      // whatever its replacement wrote (#151). Age only recovers a lock whose
+      // holder cannot be checked: empty, malformed, or an inconclusive probe.
       let dead = false;
-      if (Number.isSafeInteger(pid) && pid > 0) {
-        try { process.kill(pid, 0); } catch (err) { dead = (err as NodeJS.ErrnoException).code === "ESRCH"; }
+      let live = false;
+      if (/^\d+$/.test(pidText ?? "") && Number.isSafeInteger(pid) && pid > 0) {
+        try { process.kill(pid, 0); live = true; } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          dead = code === "ESRCH";
+          live = code === "EPERM";
+        }
       }
-      if (dead || (Number.isFinite(age) && age > LEASE_MS) || Date.now() - before.mtimeMs > LEASE_MS) {
+      const expired = (Number.isFinite(age) && age > LEASE_MS) || Date.now() - before.mtimeMs > LEASE_MS;
+      if (!live && (dead || expired)) {
         hooks.beforeStaleUnlink?.();
         // Recheck the bytes as well as the inode; old pid/timestamp locks can
         // still be recovered. The final read and unlinkSync are not atomic on

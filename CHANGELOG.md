@@ -7,6 +7,15 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Fixed
+- **A shim paused past the 5 s state-lock lease could erase another shim's
+  writes.** The lock was reclaimed by age even while its holder was still
+  running; the paused holder then resumed and published the snapshot it had
+  read before the pause over whatever its replacement wrote, silently losing
+  health observations or history events. A lock whose holder is alive is now
+  never reclaimed, however old: a waiter times out and fails open as before
+  (health deltas are published for the next holder to fold; a history event
+  is dropped). A dead holder's lock is still recovered at once, and an empty
+  or malformed lock still after the lease. (#151)
 - **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
   bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
   declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal
