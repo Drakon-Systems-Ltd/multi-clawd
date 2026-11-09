@@ -40,6 +40,11 @@ credit you (unless you'd rather we didn't), and note it in the CHANGELOG.
 - **`history.jsonl` is a bounded `0600` account activity file** in the same
   state directory. It contains timestamps, account/model IDs and short reason
   codes, with no prompt, transcript, token, cost, credential, or environment values.
+  A launch that cannot take the file's short lock in time writes its one event
+  to a `0600` `history.jsonl.pending-*` file beside it instead of dropping it;
+  the next write folds that event into the journal and removes the file. Such
+  an event carries one extra field, a random ID, so that it is folded exactly
+  once. Readers count pending events and apply the same bound to the result.
 
 ## Permissions
 

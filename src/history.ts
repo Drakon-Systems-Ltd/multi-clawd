@@ -26,6 +26,14 @@ const safeAccount = (value: unknown): value is string => typeof value === "strin
 const safeModel = (value: unknown): value is string => typeof value === "string" &&
   value.length > 0 && value.length <= 100 && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/.test(value);
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * A line on disk: the event plus, for an event that was parked, the random id
+ * its writer gave it. The id is what lets a fold apply a parked event exactly
+ * once (#145); readers never see it.
+ */
+type Stored = HistoryEvent & { id?: string };
+
 function valid(raw: unknown): HistoryEvent | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const e = raw as Record<string, unknown>;
@@ -40,24 +48,83 @@ function valid(raw: unknown): HistoryEvent | undefined {
     ...(e.reason ? { reason: e.reason as HistoryReason } : {}) };
 }
 
-function parseLines(file: string): HistoryEvent[] {
+/** A line read back from disk keeps a well-formed parked-event id and nothing else. */
+function stored(raw: unknown): Stored | undefined {
+  const event = valid(raw);
+  const id = (raw as { id?: unknown } | null)?.id;
+  return event && typeof id === "string" && UUID.test(id) ? { ...event, id } : event;
+}
+
+const line = (event: Stored): string => JSON.stringify(event) + "\n";
+const byEventTime = (a: HistoryEvent, b: HistoryEvent): number => Date.parse(a.at) - Date.parse(b.at);
+
+function parseLines(file: string): Stored[] {
   let raw: string;
   try { raw = readFileSync(file, "utf8"); } catch { return []; }
-  return raw.split("\n").flatMap((line) => {
-    try { const event = valid(JSON.parse(line)); return event ? [event] : []; }
+  return raw.split("\n").flatMap((text) => {
+    try { const event = stored(JSON.parse(text)); return event ? [event] : []; }
     catch { return []; }
   });
 }
 
-/** Events parked by writers that could not take the lock in time (#145). */
+/**
+ * Events parked by writers that could not take the lock in time (#145).
+ * A name is `<park time>-<pid>-<per-process sequence>-<event id>`, fixed
+ * width where it matters, so the sorted list is park order: oldest first
+ * across writers, and call order within one writer even inside one
+ * millisecond.
+ */
+const PENDING = /^\d{13}-\d+-\d{9}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+let parkSequence = 0;
+
+function pendingName(file: string, id: string): string {
+  const sequence = String(parkSequence++ % 1_000_000_000).padStart(9, "0");
+  return `${file}.pending-${String(Date.now()).padStart(13, "0")}-${process.pid}-${sequence}-${id}`;
+}
+
 function pendingFiles(file: string): string[] {
   const prefix = `${basename(file)}.pending-`;
   try {
     return readdirSync(dirname(file))
-      .filter((name) => name.startsWith(prefix) && /^\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name.slice(prefix.length)))
+      .filter((name) => name.startsWith(prefix) && PENDING.test(name.slice(prefix.length)))
       .sort()
       .map((name) => join(dirname(file), name));
   } catch { return []; }
+}
+
+/**
+ * The newest parked events in event order. At most HISTORY_MAX_EVENTS files
+ * are opened: the journal can never hold more than that, so anything parked
+ * before them is already outside its bound. The sort is stable, so events
+ * with the same timestamp keep park order.
+ */
+function parkedEvents(files: string[]): Stored[] {
+  return files.slice(-HISTORY_MAX_EVENTS).flatMap(parseLines).sort(byEventTime);
+}
+
+/**
+ * Journal lines followed by the parked events the journal does not hold yet.
+ * A parked event whose id is already in the journal was folded by a writer
+ * that stopped before it could remove the pending file; it is not applied a
+ * second time.
+ */
+function withParked(journal: Stored[], parked: Stored[]): Stored[] {
+  const seen = new Set(journal.map((event) => event.id));
+  const fresh = parked.filter((event) => {
+    if (!event.id) return true;
+    if (seen.has(event.id)) return false;
+    seen.add(event.id);
+    return true;
+  });
+  return [...journal, ...fresh];
+}
+
+/** The journal's bound: the newest HISTORY_MAX_EVENTS lines within HISTORY_MAX_BYTES. */
+function capped(events: Stored[]): Stored[] {
+  const kept = events.slice(-HISTORY_MAX_EVENTS);
+  let bytes = kept.reduce((sum, event) => sum + Buffer.byteLength(line(event)), 0);
+  while (bytes > HISTORY_MAX_BYTES && kept.length) bytes -= Buffer.byteLength(line(kept.shift()!));
+  return kept;
 }
 
 /** Atomic publish: readers and the folding lock holder see a whole file or none. */
@@ -73,22 +140,43 @@ function publish(target: string, content: string): void {
 }
 
 /**
- * The journal plus any parked events not yet folded, so a reader never misses
- * an event only because its writer lost a lock race. A read that overlaps a
- * fold can see a parked event twice for the moment between the holder's
- * replace and its unlink; the journal itself is never duplicated.
+ * What the journal will hold after the next locked write, less that writer's
+ * own event: the journal plus the parked events it does not hold yet, under
+ * the same 500-event / 64 KiB bound, oldest first by event time. A reader
+ * therefore never misses an event only because its writer lost a lock race,
+ * and never sees more than the documented bound however many are parked.
+ *
+ * Parked files are read before the journal. A fold replaces the journal
+ * before it removes a pending file, so an event that leaves the parked set
+ * between the two reads is in the journal read that follows, and one that is
+ * in both is matched by id: each event is returned once.
  */
 export function readHistory(file: string): HistoryEvent[] {
-  return [...parseLines(file), ...pendingFiles(file).flatMap(parseLines)];
+  const parked = parkedEvents(pendingFiles(file));
+  return capped(withParked(parseLines(file), parked))
+    .sort(byEventTime)
+    .map(({ id, ...event }) => event);
 }
 
 /**
  * Serialize read/trim/replace under the same advisory lock as health state.
  * A writer that cannot take the lock within its budget never replaces the
  * journal (that could erase another writer's events or exceed the cap) and
- * never drops its event either (#145): it parks the event in a pending file
- * that the next lock holder folds in. Recording never blocks a turn for
- * longer than the lock budget.
+ * never drops its event either (#145): it parks the event, under a fresh id,
+ * in a pending file that the next lock holder folds in. Recording never
+ * blocks a turn for longer than the lock budget.
+ *
+ * The fold is safe to repeat. The journal replace is its commit point: a
+ * folded line carries the parked event's id, so a holder that stops between
+ * the replace and the removal of the pending file leaves a file the next
+ * holder recognises and removes without applying it again. A holder that
+ * stops before the replace leaves the pending file untouched.
+ *
+ * Only a lock holder removes pending files, and only after its replace has
+ * landed. While no writer can take the lock they accumulate on disk beyond
+ * the journal bound; the lock's stale-holder recovery ends that, and the
+ * first locked write folds the newest and removes them all. Lines keep
+ * commit order on disk, each folded batch in event order.
  */
 export function recordHistory(stateFile: string | undefined, event: HistoryEvent): void {
   if (!stateFile) return;
@@ -97,21 +185,16 @@ export function recordHistory(stateFile: string | undefined, event: HistoryEvent
     const checked = valid(event);
     if (!checked) return;
     const file = historyFile(stateFile);
-    const line = JSON.stringify(checked) + "\n";
     release = acquireShimLock(file);
     if (!release) {
-      publish(`${file}.pending-${process.pid}-${randomUUID()}`, line);
+      const id = randomUUID();
+      publish(pendingName(file, id), line({ ...checked, id }));
       return;
     }
-    const parked = pendingFiles(file);
-    const events = [...parseLines(file), ...parked.flatMap(parseLines), checked].slice(-HISTORY_MAX_EVENTS);
-    let lines = events.map((e) => JSON.stringify(e) + "\n");
-    let bytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line), 0);
-    while (bytes > HISTORY_MAX_BYTES && lines.length) bytes -= Buffer.byteLength(lines.shift()!);
-    publish(file, lines.join(""));
-    // Only after the replace landed: a crash before this point leaves the
-    // parked events for the next fold instead of losing them.
-    for (const pending of parked) try { unlinkSync(pending); } catch { /* next fold sees it again */ }
+    const pending = pendingFiles(file);
+    const events = capped([...withParked(parseLines(file), parkedEvents(pending)), checked]);
+    publish(file, events.map(line).join(""));
+    for (const parked of pending) try { unlinkSync(parked); } catch { /* the next fold recognises it by id */ }
   } catch { /* history cannot affect the launch */ }
   finally { release?.(); }
 }

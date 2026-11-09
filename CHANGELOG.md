@@ -7,6 +7,19 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Fixed
+- **Account history could silently lose an event when two launches wrote at
+  once.** A shim that could not take the `history.jsonl` lock within its
+  150 ms budget returned without recording, so `explain --history` and the
+  `spread` strategy's served-launch count could be one short while every
+  process exited 0. Such a writer now parks its event in a `0600`
+  `history.jsonl.pending-*` file and the next writer folds it into the
+  journal; readers include parked events. The fold is safe to repeat: a
+  parked event carries a random ID, so a writer that stops between replacing
+  the journal and removing the pending file cannot cause the event to be
+  counted twice. Parked events are ordered by their own timestamps, and what a
+  reader gets back stays inside the same 500-event / 64 KiB bound as the
+  journal however many are parked. Launches are never delayed beyond the
+  existing lock budget and never fail because of history. (#145)
 - **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
   bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
   declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal
