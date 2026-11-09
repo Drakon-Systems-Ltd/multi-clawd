@@ -1058,6 +1058,9 @@ export function buildBackend(
     // kept native Bash under the permission mode alone (#136). 2026.8.x
     // gateways ignore the field and never pass it to the resolver.
     hostOwnedTools: POOL_HOST_OWNED_TOOLS,
+    // Core trusts this and injects no empty cap for side-questions; the
+    // resolver above makes it true by projecting side-question argv to the
+    // bundled tool-free, single-turn tail (#142).
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     config: {
