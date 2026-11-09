@@ -15,7 +15,23 @@
  * Keep it in lockstep with the installed gateway's copy — same strip sets, same
  * appended flags, same denial merge — so a capped run behaves identically
  * whether it lands on the bundled backend or on this pool.
+ *
+ * OpenClaw 2026.10.10 and 2026.11.1 add a second contract on the same hook:
+ * host-owned tools (#136). The bundled backend declares
+ * `hostOwnedTools: ["exec", "process"]`; on a normal chat turn core routes
+ * those through OpenClaw's own `exec`/`process` tools (approval and allowlist
+ * policy included), passes the list to `resolveExecutionArgs`, and the bundled
+ * resolver (`resolveClaudeCliExecutionArgs`) appends `Bash` to
+ * `--disallowedTools` so Claude Code cannot run shell commands natively; core's
+ * native-tool hook denies the equivalent as a backstop. Core only sets the field
+ * when the backend is `selectable` + `execution-args` with a resolver, the exec
+ * host is not `node` and the run carries no exact cap, so exact caps and older
+ * gateways (2026.8.x has no such field) never see it. Same port discipline:
+ * the denial step below mirrors the bundled one byte-for-byte.
  */
+
+/** The bundled backend's host-owned set on OpenClaw 2026.10.10 and 2026.11.1 (`extensions/anthropic/cli-backend.ts`). */
+export const POOL_HOST_OWNED_TOOLS: readonly string[] = Object.freeze(["exec", "process"]);
 
 export type ToolAvailability = {
   native: readonly string[];
@@ -116,8 +132,8 @@ export function stripClaudeArgs(args: readonly string[], policy: StripPolicy): s
   return normalized;
 }
 
-/** Denials the operator authored in the base argv survive the rewrite (core preserves them too). */
-function collectPreservedDenials(baseArgs: readonly string[]): string[] {
+/** Port of core `readClaudeToolDenials`: every value of every `--disallowedTools` flag, in argv order, untrimmed. */
+function readToolDenials(baseArgs: readonly string[]): string[] {
   const preserved: string[] = [];
   for (let i = 0; i < baseArgs.length; i += 1) {
     const arg = baseArgs[i] ?? "";
@@ -145,7 +161,7 @@ export function resolveRestrictedExecutionArgs(
   baseArgs: readonly string[],
   availability: ToolAvailability,
 ): string[] {
-  const preservedDenials = collectPreservedDenials(baseArgs);
+  const preservedDenials = readToolDenials(baseArgs);
   const normalized = stripClaudeArgs(baseArgs, {
     bare: RESTRICTED_BARE_ARGS,
     variadicValue: RESTRICTED_VARIADIC_VALUE_ARGS,
@@ -178,16 +194,47 @@ export function resolveRestrictedExecutionArgs(
   return normalized;
 }
 
+/** Denial flags only; the host-owned step replaces them and nothing else. */
+const DISALLOWED_TOOLS_ARGS = new Set([DISALLOWED_TOOLS_ARG, "--disallowed-tools"]);
+
 /**
- * Backend hook body. Uncapped runs keep their argv untouched — the pool's
- * full-harness behaviour is unchanged for chat. Only runs that arrive with an
- * exact `toolAvailability` (cron tool policies, `disableTools`) are rewritten.
+ * Port of the host-owned step at the top of core's `resolveClaudeCliExecutionArgs`
+ * (OpenClaw 2026.10.10 / 2026.11.1). When the gateway says `exec` is host-owned
+ * for this run, Claude Code's native `Bash` is added to the denial list: every
+ * operator denial is kept, in order, `Bash` is appended once, and the rest of
+ * the argv is untouched. Any other ownership set (or none) returns `baseArgs`
+ * as-is — the bundled resolver keys on `exec` alone, `process` has no native
+ * equivalent to disable.
+ */
+export function resolveHostOwnedExecutionArgs(
+  baseArgs: readonly string[],
+  hostOwnedTools: readonly string[] | undefined,
+): readonly string[] {
+  if (!hostOwnedTools?.includes("exec")) return baseArgs;
+  return [
+    ...stripClaudeArgs(baseArgs, { variadicValue: DISALLOWED_TOOLS_ARGS }),
+    DISALLOWED_TOOLS_ARG,
+    [...new Set([...readToolDenials(baseArgs), "Bash"])].join(","),
+  ];
+}
+
+/**
+ * Backend hook body, in the bundled order: host-owned denial first, exact cap
+ * second. A chat turn on a gateway that routes `exec` through OpenClaw
+ * (2026.10+) loses native Bash and keeps everything else; a chat turn on an
+ * older gateway arrives without `hostOwnedTools` and keeps its argv untouched.
+ * Runs with an exact `toolAvailability` (cron tool policies, `disableTools`)
+ * are rewritten as before; core never pairs them with `hostOwnedTools`, and if
+ * it ever did the cap's preserved-denial merge would carry `Bash` exactly as
+ * the bundled resolver's does.
  */
 export function resolvePoolExecutionArgs(ctx: {
   baseArgs: readonly string[];
+  hostOwnedTools?: readonly string[];
   toolAvailability?: ToolAvailability;
 }): readonly string[] {
+  const baseArgs = resolveHostOwnedExecutionArgs(ctx.baseArgs, ctx.hostOwnedTools);
   return ctx.toolAvailability
-    ? resolveRestrictedExecutionArgs(ctx.baseArgs, ctx.toolAvailability)
-    : ctx.baseArgs;
+    ? resolveRestrictedExecutionArgs(baseArgs, ctx.toolAvailability)
+    : baseArgs;
 }
