@@ -1,10 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HISTORY_MAX_BYTES, historyFile, parseHistorySince, readHistory, recordHistory, renderHistory } from "../src/history.js";
+import { acquireShimLock } from "../src/shim-lock.js";
 import { cleanShimEnv } from "./shim-env.js";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
@@ -92,6 +93,62 @@ describe("issue #70 account history", () => {
     expect(rows.filter((e) => e.accountId === "claw2")).toHaveLength(20);
     expect(statSync(historyFile(state)).size).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
   });
+
+  // #145: CI (Node 24, run 42518656819) saw 19 of 20 events from one of two
+  // writers that both exited 0. A writer that cannot take the advisory lock
+  // within its 150 ms budget used to drop the event silently; a sibling in a
+  // tight record loop re-takes the lock within microseconds while the waiter
+  // polls every 10 ms, so a slow runner starves the waiter past the budget.
+  test("parks an event it cannot lock in time, reads it back, and folds it on the next locked write", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-parked-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    const pending = () => readdirSync(dir).filter((name) => name.startsWith("history.jsonl.pending-"));
+    recordHistory(state, event("claw1"));
+    const release = acquireShimLock(file);
+    expect(release).toBeDefined();
+    try {
+      recordHistory(state, event("claw2"));
+    } finally { release?.(); }
+    // The journal itself was never replaced under a foreign lock...
+    expect(readHistory(file).filter((e) => e.accountId === "claw2")).toHaveLength(1);
+    expect(readFileSync(file, "utf8")).not.toContain("claw2");
+    expect(pending()).toHaveLength(1);
+    expect(readFileSync(join(dir, pending()[0]), "utf8")).not.toMatch(/prompt|token|env/i);
+    // ...and the next lock holder folds the parked event into it.
+    recordHistory(state, event("claw1"));
+    expect(pending()).toEqual([]);
+    expect(readFileSync(file, "utf8")).toContain("claw2");
+    expect(readHistory(file).map((e) => e.accountId)).toEqual(["claw1", "claw2", "claw1"]);
+    expect(statSync(file).size).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
+  });
+
+  test("a child writer starved of the lock for its whole run loses no events once the holder releases", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-starved-"));
+    const script = join(dir, "writer.mjs");
+    writeFileSync(script, `import { recordHistory } from ${JSON.stringify(new URL("../dist/history.js", import.meta.url).href)};\nfor (let i = 0; i < 5; i++) recordHistory(process.argv[2], { at: new Date().toISOString(), kind: "served", accountId: process.argv[3] });\n`);
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    recordHistory(state, event("claw1"));
+    const release = acquireShimLock(file);
+    expect(release).toBeDefined();
+    let code: number | null;
+    try {
+      code = await new Promise<number | null>((resolve, reject) => {
+        const child = spawn(process.execPath, [script, state, "claw2"]);
+        child.on("error", reject);
+        child.on("close", resolve);
+      });
+    } finally { release?.(); }
+    expect(code).toBe(0);
+    expect(readFileSync(file, "utf8")).not.toContain("claw2");
+    expect(readHistory(file).filter((e) => e.accountId === "claw2")).toHaveLength(5);
+    recordHistory(state, event("claw1"));
+    expect(readdirSync(dir).filter((name) => name.includes(".pending-"))).toEqual([]);
+    expect(readHistory(file).filter((e) => e.accountId === "claw2")).toHaveLength(5);
+    expect(readHistory(file).filter((e) => e.accountId === "claw1")).toHaveLength(2);
+    expect(statSync(file).size).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
+  }, 15_000);
 
   test("parses since and renders per-account counts and last served", () => {
     expect(parseHistorySince("7d")).toBe(604800000);
