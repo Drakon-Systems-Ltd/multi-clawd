@@ -6,7 +6,7 @@ Issue #137 (finding 4 of the #133 compat audit). Read-only architecture and sour
 
 - **Audited:** `@drakon-systems/multi-clawd` at 61c1f79 (v2.6.5 plus #134 and #133 merges) against OpenClaw **v2026.11.1** (installed on this box, `dist` read in place, plus the tagged GitHub sources), **v2026.10.10** (tagged GitHub sources) and the pinned devDependency **v2026.8.1** (`node_modules/openclaw`, read only).
 - **Executed checks** ran only inside the worktree with the committed fixtures and a scratch `HOME`; the bundled Claude resolver was run in a child process with `HOME` pointed at the scratch dir. No gateway was installed, updated or restarted. No credential was read or printed. No live provider call was made. No release was cut.
-- **Not changed here:** `src/index.ts`, `src/tool-cap.ts` (owned by #136), `tests/openclaw-sdk-contract.test.ts` and CI (owned by #135), `CHANGELOG.md`, `README.md`, dependencies.
+- **Not changed here:** `src/index.ts`, `src/tool-cap.ts` (at the time owned by #136; see "Refresh 2026-11-09"), `tests/openclaw-sdk-contract.test.ts` and CI (owned by #135), `CHANGELOG.md`, `README.md`, dependencies.
 - **Confidence labels:** CONFIRMED = read from source or observed in a test run this session; LIKELY = inferred from source with one unverified link; UNKNOWN = not established.
 
 ## Summary
@@ -110,6 +110,8 @@ No runtime change. The honest implementation touches exactly the two files #136 
 
 ## Next implementation scope (after #136 merges, same files)
 
+Status 2026-11-09: #136 has merged (PR #141, master 77a706f) and the #147 shim EPIPE fix has merged (PR #149, master f5534e1). The side-question argv projection (step 1 below) is the subject of open PR #150 for #142, still pending review and unreleased; this PR does not depend on it and does not claim it. Step 2 (the flag) remains unimplemented and blocked on step 1 landing.
+
 1. **`src/tool-cap.ts`:** add a port of `resolveClaudeCliSideQuestionExecutionArgs` and apply it in `resolvePoolExecutionArgs` when `ctx.executionMode === "side-question"`, before the restricted projection, in the same order as the bundled resolver (host-owned Bash denial, side-question projection, restricted projection). Byte-parity target: the two `missing` arrays in the new test become empty. Also port the bundled denial handling so the merged list matches (`mcp__*` only, operator denials dropped once `--tools ""` is in force) or document the delta.
 2. **`src/index.ts` `preparedForLaunch`:** when the context carries `isolatedCompletionPrompt !== undefined` (read through a local `PoolPrepareContext = CliBackendPrepareExecutionContext & { isolatedCompletionPrompt?: string; ... }`, exactly as the bundled backends do), return `{ env, isolatedCompletionEnforced: true as const }` typed through a local `PoolPreparedExecution = CliBackendPreparedExecution & { isolatedCompletionEnforced?: true }`. Only together with step 1, never alone. Keep `execute` undefined (core runs the process itself for side-questions; `resolveCliExecutionTarget` returns `process`).
 3. **Legacy launch (shim via `process.execPath`):** the shim forwards unknown flags, but confirm `--no-session-persistence` and `--max-turns 1` pass through unchanged and that the shim's sibling retry (`RETRY_ROSTER_ENV`) stays correct for a prompt-only run with no session id. Add a shim-integration case.
@@ -145,3 +147,11 @@ Until then the #137 issue carries `blocked:upstream` for the clean fix and stays
 ## Issues filed
 
 - #142 pool: side-questions ignore the declared `sideQuestionToolMode: "disabled"` projection (finding 4). Prerequisite for the #137 implementation; linked from #137.
+
+## Refresh 2026-11-09
+
+Branch refreshed by merging `origin/master` f5534e1 (no rewrite). Merged since the original run: #139 (#134), #140 (#135 SDK contract suite), #141 (#136 host-owned tools: `hostOwnedTools` exec/process, native Bash disabled on host-owned turns), #149 (#147 shim stdin EPIPE fix). Pending, not merged, not released: PR #150 (#142 side-question tool-free projection).
+
+- #141 only adds the host-owned Bash denial; it does not port the side-question projection. The two argv-gap tests in this PR (findings 3 and 4) therefore still hold unchanged; they were re-run on the merged tree (8/8). When #150 merges, the ordinary side-question `missing` expectation in finding 4 is expected to flip and the test should be updated in that PR or a follow-up.
+- The Node 22 CI failure on the earlier head was the pre-existing shim EPIPE crash (#147), fixed by #149, not this PR's tests.
+- No runtime change; no upstream fix is claimed; #137 stays `blocked:upstream`.
