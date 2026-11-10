@@ -6,10 +6,10 @@ versioning from v1.0.
 
 ## [Unreleased]
 
-### Fixed
-- **Fable 5.2 advertised with its real limits.** `claude-fable-5-2` (released 9 Nov 2026) was not in the known-model table, so the pool exposed it with the conservative unknown-id default (200k context, 64k output) and OpenClaw compacted far too early. The table now carries its 1M context and 128k output, matching the bundled Anthropic catalog.
+## [2.6.6] - 2026-11-10
 
 ### Fixed
+- **Fable 5.2 listed with source-derived limits.** `claude-fable-5-2` (released 9 Nov 2026) was not in the known-model table, so the pool exposed it with the conservative unknown-id default (200k context, 64k output) and OpenClaw compacted far too early. The known-spec table now carries 1,000,000 context and 128,000 output for that id. Those values are the table entries in source; they are not fixture-proven (the committed manifests do not contain this id) and were not checked by a live model call.
 - **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
   bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
   declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal
@@ -52,6 +52,22 @@ versioning from v1.0.
   (and the `haiku-5.5` alias) so it covers every id the bundled manifests
   declare; a test holds that superset against the 2026.8.1, 2026.10.10 and
   2026.11.1 manifests. (#134)
+- **A Claude child that stops reading stdin no longer kills the shim.**
+  Forwarding the prompt into a CLI that had already closed its read end (a
+  refusal, a failed `--resume`, a startup crash) raised `EPIPE` as an
+  unhandled `error` event, so the shim exited before `onChildClose` could hop
+  an armed turn to a sibling or hand the child's exit code downstream. Every
+  spawned child, the first launch and a retry, now has a stdin `error`
+  listener. `EPIPE`, `ERR_STREAM_DESTROYED` and `ERR_STREAM_WRITE_AFTER_END`
+  are ordinary lifecycle and are not fatal; any other stdin error is written
+  to stderr once and is still not fatal. Writes and ends into the current
+  child's stdin skip a sink that is already destroyed or ended, so an armed
+  retry can still replay the saved prompt. The unarmed path still pipes
+  stdin; the listener makes a broken child pipe end the pump rather than the
+  shim. The child's own close still owns the exit code. No routing,
+  selection, history or lock change. Covered by a synthetic child that closes
+  stdin before the prompt; not a live provider run, and not an exhaustive
+  error-code matrix. (#147)
 
 ## [2.6.5] - 2026-11-07
 
