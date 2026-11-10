@@ -218,6 +218,10 @@ claude-cli/claude-fable-5        # main login
       → anthropic/claude-opus-4-8   # only NOW drop a tier
 ```
 
+## Automation compatibility
+
+> OpenClaw 2026.11.2 automation compatibility: the multi-clawd pool does not provide a stored inference account. An automation already bound to a stored account cannot use `clawd/*` as its primary or fallback; changing only the model does not change the recorded account. Creating a pool-based automation can also be refused by upstream account admission. Interactive model availability does not establish automation compatibility. Do not create placeholder credentials to bypass this check. Native-runtime and configured-auth paths have different admission rules; this is not a claim that every automation is interactive-only.
+
 ## What you get
 
 - 🦞 **Extra claws** — every account registers as a real CLI backend
@@ -457,7 +461,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.6.5/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.6.6/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -940,17 +944,27 @@ Three moves, all through the official plugin SDK (details in
 bundled `claude-cli` backend declares `exec` and `process` as *host-owned*:
 a normal chat turn runs shell commands through OpenClaw's own `exec` tool,
 under OpenClaw's approval and allowlist policy, and Claude Code's native
-`Bash` is disabled for that turn. The unreleased pool fix declares the same set,
+`Bash` is disabled for that turn. From v2.6.6 the pool declares the same set,
 so a turn on `clawd/*` or `claw<N>/*` takes the same path as one on
 `claude-cli/*`. Before v2.6.6 the pool left native `Bash` enabled on those
 gateways, governed only by the permission mode derived from
 `tools.exec.mode`, so OpenClaw's exec approvals did not apply to it. On
 OpenClaw 2026.8.x there is no host-owned contract on either backend:
 commands run through Claude Code's native `Bash` under that permission mode,
-unchanged. Exact-cap runs (cron tool policies, `disableTools`) and side
-questions without the host-owned field remain unchanged. A side question
-that receives host-owned `exec` also gains the native `Bash` denial; the
-separate side-question tool-free projection is tracked in #142.
+unchanged. Exact-cap runs (cron tool policies, `disableTools`) are unchanged.
+
+**Side questions are tool-free.** A side question (`/btw`, setup probes) runs
+on the pool exactly as on `claude-cli/*`: the argv is rewritten to
+`--safe-mode --tools "" --disallowedTools mcp__* --strict-mcp-config
+--no-session-persistence --max-turns 1 --permission-mode default`, with any
+session, resume, fork, effort, tool and MCP-config flags dropped first. No
+native tool (Bash, Edit, Write, ...) and no MCP tool is selectable, except
+that an explicit native-tool cap supplied by OpenClaw is applied last and is
+honoured as named (a side question capped to `Read` gets `--tools Read`), and
+`bypassPermissions` from `tools.exec.mode: full` does not carry over. This
+holds on every supported gateway, with or without host-owned `exec`. Before
+the unreleased fix the pool ignored the side-question mode, so a side question
+kept Claude Code's native tools under the operator's permission mode (#142).
 
 ## Legacy issue: idle backend eviction on OpenClaw ≤ 2026.7.1
 
@@ -1033,7 +1047,7 @@ callsite (the ones static scanners flag) and why each exists.
 | Network | The gateway plugin polls `https://api.anthropic.com/api/oauth/usage` for eligible pooled accounts on an interval (default 120000 ms / 2 minutes); `pool.usagePoll.enabled: false` disables that poll. `multi-clawd usage` requests the same endpoint on demand. `doctor` runs `npm view` when its registry cache is stale; install and update commands contact the package registry. Claude Code subprocesses make their own provider requests. No plugin telemetry or analytics endpoint. |
 | Credentials | Reads declared setup-token files or gateway-resolved `oauthTokenRef` values for Claude child launches; reads each eligible account's `.credentials.json` access token for the usage poll; reads Claude login credentials from files or the macOS Keychain via the `security` CLI for login checks and runtime auth; reads account identity for file-backed logins from `.claude.json` (`~/.claude.json` for a native login, or the account config dir). Setup tokens are passed to Claude through the child environment. |
 | Files read | The OpenClaw config (`~/.openclaw/openclaw.json`, or the file `OPENCLAW_CONFIG_PATH` / `OPENCLAW_STATE_DIR` / `OPENCLAW_HOME` select; see [Config and state location](#config-and-state-location)), declared account config dirs and token files, Claude `.credentials.json` and `.claude.json` files as described above, and local state files. |
-| Files written | Under `<OpenClaw state dir>/state/multi-clawd/` (`~/.openclaw/state/multi-clawd/` by default; `OPENCLAW_STATE_DIR` relocates it): `<id>.json`, `<id>.usage.json`, `history.jsonl` (bounded account activity), `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes the selected OpenClaw config file (`~/.openclaw/openclaw.json` by default) and a dated backup; `account enable|disable` edits the same file with a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher and, for a non-default instance, carries that instance's `OPENCLAW_*` variables. |
+| Files written | Under `<OpenClaw state dir>/state/multi-clawd/` (`~/.openclaw/state/multi-clawd/` by default; `OPENCLAW_STATE_DIR` relocates it): `<id>.json`, `<id>.usage.json`, `history.jsonl` (bounded account activity, plus `history.jsonl.pending-*` event files written while its lock is contended and removed by a later launch that takes the lock), `pool-<id>.sticky.json`, `pool-<id>.sessions.json` (when affinity is enabled), `direct-order.sticky.json`, `known-models.json`, `alerts-spool.jsonl`, `watchdog.json`, `registry-check.json`, `auth-profiles-<agent>.json`, `runtime/<hash>/` (copied runtime files), and `watchdog-launcher.mjs`. The watchdog state file can be redirected with `MULTI_CLAWD_WATCHDOG_STATE`. Setup writes the selected OpenClaw config file (`~/.openclaw/openclaw.json` by default) and a dated backup; `account enable|disable` edits the same file with a dated backup. On session handover, transcript `.jsonl` files are copied between account config dirs. The optional watchdog installs `~/.config/systemd/user/multi-clawd-eviction-watchdog.service` and `.timer` on Linux, or `~/Library/LaunchAgents/com.multi-clawd.eviction-watchdog.plist` on macOS; the unit points at the state-dir launcher and, for a non-default instance, carries that instance's `OPENCLAW_*` variables. |
 | Processes | Launches Claude Code and the node + shim transport; CLI, setup and doctor run npm, OpenClaw, Claude and OS scheduler commands; the optional watchdog checks OpenClaw logs and may restart the gateway; Hermes integration runs its Python bridge. See [SECURITY.md](SECURITY.md) for the process-call table. |
 | Consent | The wizard asks before every write, merges non-destructively, and never overwrites an existing account entry. `--dry-run` previews everything. |
 

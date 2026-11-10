@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, existsSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, existsSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { acquireShimLock } from "../src/shim-lock";
 import { persistHealthState, readHealthStateFile } from "../src/health-journal";
@@ -54,10 +54,13 @@ describe("#151 a live lock holder is never reclaimed by age", () => {
     const target = join(box(), "home.json");
     const release = acquireShimLock(target);
     expect(release).toBeTypeOf("function");
+    expect(release?.held()).toBe(true);
     const held = lockBytes(target);
     expect(later(() => acquireShimLock(target, 20))).toBeUndefined();
     expect(lockBytes(target)).toEqual(held);
+    expect(release?.held()).toBe(true);
     release?.();
+    expect(release?.held()).toBe(false);
     expect(existsSync(`${target}.lock`)).toBe(false);
   });
 
@@ -153,6 +156,8 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
     let journalAtPause: string | undefined;
     let journalAfterSecond: string | undefined;
     let visibleDuringPause: string[] = [];
+    let parkedDuringPause: string[] = [];
+    const pending = () => readdirSync(dirname(file)).filter((name) => name.startsWith("history.jsonl.pending-"));
     seam.path = file;
     seam.run = () => {
       // The first writer has read the journal and is now paused well past
@@ -161,6 +166,7 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
       heldAtPause = lockBytes(file);
       journalAtPause = readFileSync(file, "utf8");
       later(() => recordHistory(stateFile, ev("claw2")));
+      parkedDuringPause = pending();
       heldAfterSecond = lockBytes(file);
       journalAfterSecond = readFileSync(file, "utf8");
       visibleDuringPause = readHistory(file).map((e) => e.accountId);
@@ -171,15 +177,15 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
     expect(heldAtPause).toBeDefined();
     expect(heldAfterSecond).toEqual(heldAtPause);
     expect(journalAfterSecond).toBe(journalAtPause);
+    expect(parkedDuringPause).toHaveLength(1);
+    expect(readFileSync(join(dirname(file), parkedDuringPause[0]), "utf8")).toContain('"accountId":"claw2"');
     const final = readHistory(file).map((e) => e.accountId);
-    expect(final).toEqual(expect.arrayContaining(["claw0", "claw1"]));
-    // Whatever a reader saw during the pause is still there afterwards. On
-    // this branch a writer that times out drops its event (#145 parks it
-    // instead); either way, nothing visible is erased by a stale commit.
-    expect(final).toEqual(expect.arrayContaining(visibleDuringPause));
+    expect(final).toEqual(["claw0", "claw1", "claw2"]);
+    expect(visibleDuringPause).toEqual(["claw0", "claw2"]);
     expect(existsSync(`${file}.lock`)).toBe(false);
 
     recordHistory(stateFile, ev("claw3"));
-    expect(readHistory(file).map((e) => e.accountId)).toEqual(expect.arrayContaining(["claw0", "claw1", "claw3", ...visibleDuringPause]));
+    expect(pending()).toEqual([]);
+    expect(readHistory(file).map((e) => e.accountId)).toEqual(["claw0", "claw1", "claw2", "claw3"]);
   });
 });

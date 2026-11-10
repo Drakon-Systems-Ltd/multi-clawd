@@ -14,8 +14,8 @@ versioning from v1.0.
   health observations or history events. A lock whose holder is alive is now
   never reclaimed, however old: a waiter times out and fails open as before
   (health deltas are published for the next holder to fold; a history event
-  is dropped). A dead holder's lock is still recovered at once, and an empty
-  or malformed lock still after the lease. (#151)
+  is parked for a later writer). A dead holder's lock is still recovered at
+  once, and an empty or malformed lock still after the lease. (#151)
 - **A reused pid could pin a dead shim's state lock.** The live-holder rule
   above trusted the pid alone, so a lock left by a crashed shim whose pid was
   later reused by an unrelated process stayed held until that process exited.
@@ -23,7 +23,46 @@ versioning from v1.0.
   field 22); a live pid whose start time differs from the recorded one is
   treated as dead and its lock is recovered at once. A matching start time is
   never reclaimed by age, and when procfs is unavailable or unreadable, or the
-  lock predates this change, a live pid keeps its lock as before. (#151)
+  lock predates this change, a live pid keeps its lock as before. An exited
+  but unreaped zombie is recovered too, despite `kill(pid, 0)` succeeding. (#151)
+- **Account history could silently lose an event when two launches wrote at
+  once.** A shim that could not take the `history.jsonl` lock within its
+  150 ms wait returned without recording, so `explain --history` and the
+  `spread` strategy's served-launch count could be one short while every
+  process exited 0. Such a writer now parks its event in a `0600`
+  `history.jsonl.pending-*` file, and a later writer that takes the lock folds
+  parked events into the journal (up to 100 files per write, oldest first)
+  and removes the files it folded. The journal replace carries a receipt of
+  the files it folded, so a writer that stops before removing them, at any
+  point, does not cause an event to be counted twice or brought back after
+  the cap has trimmed it. Readers include parked events, with one exception:
+  if the journal is replaced during all three of a reader's attempts, it returns
+  the last journal alone, which can omit events that are still parked.
+  Readers order what they return by event timestamp and stay inside the
+  journal's 500-event / 64 KiB bound however many are parked. A journal that
+  cannot be read is never replaced,
+  and a pending file that cannot be read is not folded; a pending file is
+  removed only by a writer that took the lock and found it still its own
+  after its write, and only once a committed write names the file as folded:
+  the writer that first named it had read it, and a later writer removes such
+  a leftover without reading it again. A writer that finds its lock was taken
+  over before its write parks its event instead; after its write, it leaves
+  removals to a later writer. Live holders are never reclaimed by age (#151);
+  the ownership check still protects a holder whose lock is replaced for
+  another reason, but cannot make the check-and-write atomic. Pending files
+  are not bounded on their own: they accumulate until a writer takes the lock.
+  History still never fails a launch; the wait for the lock is still at most
+  150 ms, and the file work after it is synchronous. (#145)
+- History validation no longer coerces values. An event whose `kind` or
+  `reason` is not exactly one of the allowed strings is rejected, and the
+  timestamp is stored in canonical ISO form, so a value that merely prints
+  as an allowed one, or a date string carrying free text, cannot reach
+  `history.jsonl`. (#145)
+
+## [2.6.6] - 2026-11-10
+
+### Fixed
+- **Fable 5.2 listed with source-derived limits.** `claude-fable-5-2` (released 9 Nov 2026) was not in the known-model table, so the pool exposed it with the conservative unknown-id default (200k context, 64k output) and OpenClaw compacted far too early. The known-spec table now carries 1,000,000 context and 128,000 output for that id. Those values are the table entries in source; they are not fixture-proven (the committed manifests do not contain this id) and were not checked by a live model call.
 - **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
   bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
   declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal
@@ -35,11 +74,22 @@ versioning from v1.0.
   the same set and its `resolveExecutionArgs` ports the bundled step
   byte-for-byte: when the gateway marks `exec` host-owned for the run, every
   operator denial is kept in order and `Bash` is appended once; nothing else
-  in the argv moves. Exact-cap runs and side questions without the field,
-  and 2026.8.x gateways (which never pass it), are unchanged. A side
-  question carrying host-owned `exec` also gains the native `Bash` denial;
-  the separate tool-free side-question projection is tracked in #142. Verified
-  against the 2026.10.10 and 2026.11.1 sources; not observed live. (#136)
+  in the argv moves. Exact-cap runs and 2026.8.x gateways (which never pass
+  it) are unchanged. Verified against the 2026.10.10 and 2026.11.1 sources;
+  not observed live. (#136)
+- **Side questions on the pool kept Claude Code's native tools.** The pool
+  declares `sideQuestionToolMode: "disabled"`, which core trusts (no empty
+  tool cap is injected for side questions), but its argv resolver ignored the
+  execution mode, so `/btw` and setup probes ran with native Bash/Edit/Write
+  selectable — under `bypassPermissions` when `tools.exec.mode` is `full`.
+  `resolveExecutionArgs` now ports the bundled side-question projection:
+  session/resume/fork/effort/tool/MCP-config flags are dropped and
+  `--safe-mode --tools "" --disallowedTools mcp__* --strict-mcp-config
+  --no-session-persistence --max-turns 1 --permission-mode default` is
+  appended, in the bundled order (host-owned denial, side-question
+  projection, exact cap). Non-side-question runs are unchanged. Verified
+  against the 2026.8.1 and 2026.11.1 sources and through the shim on a
+  fixture; not observed live. (#142)
 - **OpenClaw >= 2026.9 (incl. 2026.10.10 and 2026.11.1): the bundled Claude
   catalog mirror silently used the static list.** Those releases removed
   `dist/extensions/anthropic/cli-catalog.js`, the module the mirror imported,
@@ -55,6 +105,22 @@ versioning from v1.0.
   (and the `haiku-5.5` alias) so it covers every id the bundled manifests
   declare; a test holds that superset against the 2026.8.1, 2026.10.10 and
   2026.11.1 manifests. (#134)
+- **A Claude child that stops reading stdin no longer kills the shim.**
+  Forwarding the prompt into a CLI that had already closed its read end (a
+  refusal, a failed `--resume`, a startup crash) raised `EPIPE` as an
+  unhandled `error` event, so the shim exited before `onChildClose` could hop
+  an armed turn to a sibling or hand the child's exit code downstream. Every
+  spawned child, the first launch and a retry, now has a stdin `error`
+  listener. `EPIPE`, `ERR_STREAM_DESTROYED` and `ERR_STREAM_WRITE_AFTER_END`
+  are ordinary lifecycle and are not fatal; any other stdin error is written
+  to stderr once and is still not fatal. Writes and ends into the current
+  child's stdin skip a sink that is already destroyed or ended, so an armed
+  retry can still replay the saved prompt. The unarmed path still pipes
+  stdin; the listener makes a broken child pipe end the pump rather than the
+  shim. The child's own close still owns the exit code. No routing,
+  selection, history or lock change. Covered by a synthetic child that closes
+  stdin before the prompt; not a live provider run, and not an exhaustive
+  error-code matrix. (#147)
 
 ## [2.6.5] - 2026-11-07
 

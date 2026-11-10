@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { acquireShimLock } from "../src/shim-lock";
 import { RETRY_ROSTER_ENV } from "../src/retry-plan";
-import { cleanShimEnv } from "./shim-env";
+import { childOutput, cleanShimEnv } from "./shim-env";
 
 const SHIM = join(__dirname, "..", "dist", "shim.js");
 const FAKE = join(__dirname, "fixtures", "fake-claude.mjs");
@@ -28,14 +28,18 @@ function box() {
   return { dir, file, env };
 }
 
-function run(env: NodeJS.ProcessEnv, args = ARGS): Promise<{ code: number | null; stdout: string }> {
+function run(
+  env: NodeJS.ProcessEnv,
+  args = ARGS,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { env });
     let stdout = "";
+    let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr.resume();
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout }));
+    child.on("close", (code, signal) => resolve({ code, signal, stdout, stderr }));
     child.stdin.end("question\n");
   });
 }
@@ -50,7 +54,7 @@ describe("#69 cross-process shim guards", () => {
       FAKE_CLAUDE_LIMIT_FOR_ACCOUNT: "",
       FAKE_CLAUDE_RATE_LIMIT_INFO: JSON.stringify({ status: "allowed", rateLimitType: name, utilization: 0.1 }),
     })));
-    expect(results.map((r) => r.code)).toEqual(names.map(() => 0));
+    expect(results.map((r) => r.code), results.map(childOutput).join("\n")).toEqual(names.map(() => 0));
     const state = JSON.parse(readFileSync(b.file("home"), "utf8"));
     expect(Object.keys(state.windows).sort()).toEqual(names.sort());
     expect(existsSync(`${b.file("home")}.lock`)).toBe(false);
@@ -63,7 +67,7 @@ describe("#69 cross-process shim guards", () => {
       { ...b.env, [RETRY_ROSTER_ENV]: "" },
       [...ARGS.slice(0, -1), model],
     )));
-    expect(results.map((r) => r.code)).toEqual(models.map(() => 1));
+    expect(results.map((r) => r.code), results.map(childOutput).join("\n")).toEqual(models.map(() => 1));
     const windows = JSON.parse(readFileSync(b.file("home"), "utf8")).windows;
     for (const model of models) expect(windows[`model:${model}`]?.status).toBe("rejected");
     expect(existsSync(`${b.file("home")}.lock`)).toBe(false);
@@ -75,11 +79,11 @@ describe("#69 cross-process shim guards", () => {
       env: { ...b.env, FAKE_CLAUDE_LIMIT_FOR_ACCOUNT: "home,first" },
       input: "question\n", encoding: "utf8",
     });
-    expect(first.status).toBe(1);
+    expect(first.status, childOutput(first)).toBe(1);
     expect(JSON.parse(readFileSync(b.file("first"), "utf8")).windows["model:claude-fable-5-1"].status).toBe("rejected");
     const later = spawnSync(process.execPath, ARGS, { env: b.env, input: "question\n", encoding: "utf8" });
-    expect(later.status).toBe(0);
-    expect(later.stdout).toContain('"served_by":"second"');
+    expect(later.status, childOutput(later)).toBe(0);
+    expect(later.stdout, childOutput(later)).toContain('"served_by":"second"');
     for (const id of ["home", "first", "second"]) {
       expect(existsSync(`${b.file(id)}.lock`)).toBe(false);
     }
@@ -213,8 +217,8 @@ describe("#69 cross-process shim guards", () => {
         env: { ...b.env, FAKE_CLAUDE_LIMIT_FOR_ACCOUNT: "", [RETRY_ROSTER_ENV]: "" },
         input: "question\n", encoding: "utf8",
       });
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain('"served_by":"home"');
+      expect(result.status, childOutput(result)).toBe(0);
+      expect(result.stdout, childOutput(result)).toContain('"served_by":"home"');
     } finally {
       release?.();
     }

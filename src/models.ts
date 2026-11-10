@@ -62,6 +62,8 @@ const KNOWN_SPECS: Record<string, Omit<ModelSpec, "imageMaxSidePx">> = {
   "claude-sonnet-5-5": { name: "Claude Sonnet 5.5", contextWindow: 1000000, maxTokens: 128000 },
   // Sonnet 5 ships a 1M window (OpenClaw's bundled anthropic catalog: 1000000).
   "claude-sonnet-5": { name: "Claude Sonnet 5", contextWindow: 1000000, maxTokens: 64000 },
+  // Fable 5.2 (released 9 Nov 2026): 1M context, 128k output per the models overview.
+  "claude-fable-5-2": { name: "Claude Fable 5.2", contextWindow: 1000000, maxTokens: 128000 },
   "claude-fable-5-1": { name: "Claude Fable 5.1", contextWindow: 1000000, maxTokens: 128000 },
   "claude-fable-5": { name: "Claude Fable 5", contextWindow: 1000000, maxTokens: 128000 },
   // Mythos 5: declared by OpenClaw's bundled Anthropic manifest (1M context, 128k output).
