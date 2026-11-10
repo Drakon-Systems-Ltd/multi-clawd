@@ -66,25 +66,35 @@ nothing and Claude keeps its default prompt-honouring behaviour.
 
 Automated scans flag multi-clawd for `dangerous_exec`. That is expected and
 correct: starting Claude Code processes *is* the product. Every source file
-that calls a child-process API is listed here so you can check it yourself.
+that imports Node's `child_process` module (verified by searching the source
+tree) is listed here so you can check it yourself. Some of these processes read
+credentials or reach the network, so each row says what it runs and what it can
+touch. Where a command is a third-party tool, the network traffic it makes is
+that tool's own.
 
-| Location | What it runs | Why |
+| Location | What it runs | Credential and network boundary |
 | --- | --- | --- |
-| `dist/shim.js` | selected `claude` executable | Launches Claude Code for the selected account and, when an in-turn retry is armed, relaunches it for a sibling account. |
-| `dist/shim-transport.js` | `node <shim>` | Runs the shim for an execute-transport turn. |
-| `dist/credential-store.js` | `security find-generic-password` / `security dump-keychain` | Reads a macOS Keychain login or inventories Keychain item attributes for credential checks. |
-| `dist/watchdog-schedule.js` | generated `watchdog-launcher.mjs` runs `node <bundled eviction-watchdog.mjs>` | Renders the state-dir launcher that a systemd user timer or launchd agent runs. The launcher resolves the current install before spawning its bundled watchdog script. |
-| `dist/openclaw-runner.js` | the `openclaw` CLI (or `directRoute.openclawCommand`) | Direct route only: reads and writes the `anthropic` auth profiles and order through OpenClaw subcommands. A setup token travels on the child's stdin. |
-| `scripts/cli.mjs` | `npm view` / `npm i -g`, `openclaw --version`, `openclaw` plugin install and gateway restart, `claude` login/status commands, `launchctl` / `systemctl`, and `node <bundled script>` | Checks and updates the CLI/plugin, handles account login, dispatches subcommands and repairs watchdog scheduling. |
-| `scripts/setup.mjs` | `claude --version`, `launchctl` / `systemctl` | Checks the Claude CLI and loads or repairs optional watchdog scheduling. |
-| `scripts/_watchdog-heal.mjs` | `launchctl` / `systemctl` | Reloads the optional watchdog unit after `update` repoints or rewrites it for the selected OpenClaw instance. |
-| `scripts/doctor.mjs` | `npm view`, `claude --version`, `openclaw models auth list` / `openclaw agent`, `launchctl` / `systemctl` | Checks registry version when its cache is stale, inspects auth and watchdog status, and optionally probes accounts. |
-| `scripts/eviction-watchdog.mjs` | `openclaw logs --plain` / `openclaw gateway restart` | Detects the eviction signature and restarts the gateway when the watchdog's conditions are met. |
-| `scripts/hermes.mjs` | Python interpreter with `-c` / bundled bridge | Checks Python availability and runs the Hermes bridge. |
+| `dist/shim.js` | the selected `claude` executable; relaunched for a sibling account when an in-turn retry is armed | Inherits the gateway environment minus the stripped Claude/Anthropic variables, plus the selected account's setup token and/or `CLAUDE_CONFIG_DIR`. Claude Code itself contacts Anthropic. |
+| `dist/shim-transport.js` | `node <shim>` for an execute-transport turn | Passes the host-prepared turn environment (which can carry the account's setup token) on to the shim; the prompt travels on stdin. Makes no network calls of its own; the `claude` child reaches Anthropic. |
+| `dist/credential-store.js` | `security find-generic-password` / `security dump-keychain` (macOS) | `find-generic-password -w` returns the Keychain secret to multi-clawd for login checks and token handover. `dump-keychain` is run without the flag that exposes secrets and lists item attributes only. No network. |
+| `dist/watchdog-schedule.js` | generated `watchdog-launcher.mjs` runs `node <bundled eviction-watchdog.mjs>` | The generated launcher carries no credentials. A systemd user timer or launchd agent runs it. |
+| `dist/openclaw-runner.js` | the `openclaw` CLI (or `directRoute.openclawCommand`) | Direct route only: reads and writes the `anthropic` auth profiles and order through OpenClaw subcommands. A setup token travels on the child's stdin. Network use is OpenClaw's. |
+| `scripts/cli.mjs` | `openclaw plugins inspect`, `openclaw --version`, `openclaw plugins` install and `openclaw gateway restart`; `npm view` and `npm i -g`; `claude auth login`, `claude setup-token` and `claude auth status` (`login`); `node <bundled script>` for `setup`, `doctor` and `direct sync` | `npm` contacts the registry. `login` runs `claude` with the host environment, with `CLAUDE_CONFIG_DIR` set to the chosen account's directory or a scratch directory, so sign-in writes or exposes that account's credentials; the browser flow is Claude's. Restarting the gateway interrupts running turns, and installs and restarts ask first. |
+| `scripts/setup.mjs` | `claude --version`; `systemctl --user daemon-reload` / `enable --now`, `launchctl load` / `unload` | Local only. Registers or reloads the optional watchdog scheduler. |
+| `scripts/_watchdog-heal.mjs` | `launchctl unload` / `load`, `systemctl --user daemon-reload` | Local only. Reloads the optional watchdog unit after `update` rewrites it. |
+| `scripts/doctor.mjs` | `npm view` (when its registry cache is stale), `claude --version`, `openclaw plugins inspect`, `openclaw models auth list`, `openclaw agent` (only with `--probe` / `--probe-pool`), `launchctl list`, `systemctl --user list-timers` | `npm view` contacts the registry. `--probe` runs real turns through `openclaw agent`, which spends account usage and reaches Anthropic via OpenClaw. The other calls are local queries. |
+| `scripts/eviction-watchdog.mjs` | `openclaw logs --plain`, `openclaw gateway restart` | Reads OpenClaw logs; restarts the gateway only when the watchdog's conditions are met. No credential access. |
+| `scripts/hermes.mjs` | Python interpreter with `-c`; the bundled `hermes_bridge.py` | Runs with the host environment (plus `HERMES_HOME` for the bridge) and reads and writes Hermes account files under that home. The bridge script imports no network modules, but it loads Hermes code, whose own behaviour this table does not cover. |
+
+Not every network call goes through a subprocess. The usage poll
+(`src/usage-poll.ts`, also used by `multi-clawd usage`) makes HTTPS requests to
+Anthropic's usage endpoint from inside the plugin process, using the account's
+stored login. Nothing in this table claims that multi-clawd avoids credential
+access or network traffic.
 
 None of these pass a command string to a shell: child-process calls use an
-executable and argument array. The launcher generated by `watchdog-schedule`
-uses the same form.
+executable and argument array (no `shell: true`, no `exec` of a string). The
+launcher generated by `watchdog-schedule` uses the same form.
 
 ## Things you should decide for yourself
 

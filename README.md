@@ -457,7 +457,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.6.5/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.6.6/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -940,7 +940,7 @@ Three moves, all through the official plugin SDK (details in
 bundled `claude-cli` backend declares `exec` and `process` as *host-owned*:
 a normal chat turn runs shell commands through OpenClaw's own `exec` tool,
 under OpenClaw's approval and allowlist policy, and Claude Code's native
-`Bash` is disabled for that turn. The unreleased pool fix declares the same set,
+`Bash` is disabled for that turn. From v2.6.6 the pool declares the same set,
 so a turn on `clawd/*` or `claw<N>/*` takes the same path as one on
 `claude-cli/*`. Before v2.6.6 the pool left native `Bash` enabled on those
 gateways, governed only by the permission mode derived from
