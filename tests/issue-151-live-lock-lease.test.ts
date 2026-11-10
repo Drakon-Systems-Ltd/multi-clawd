@@ -157,6 +157,7 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
     let journalAfterSecond: string | undefined;
     let visibleDuringPause: string[] = [];
     let parkedDuringPause: string[] = [];
+    let parkedContentDuringPause: string | undefined;
     const pending = () => readdirSync(dirname(file)).filter((name) => name.startsWith("history.jsonl.pending-"));
     seam.path = file;
     seam.run = () => {
@@ -167,6 +168,9 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
       journalAtPause = readFileSync(file, "utf8");
       later(() => recordHistory(stateFile, ev("claw2")));
       parkedDuringPause = pending();
+      if (parkedDuringPause.length === 1) {
+        parkedContentDuringPause = readFileSync(join(dirname(file), parkedDuringPause[0]), "utf8");
+      }
       heldAfterSecond = lockBytes(file);
       journalAfterSecond = readFileSync(file, "utf8");
       visibleDuringPause = readHistory(file).map((e) => e.accountId);
@@ -178,7 +182,7 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
     expect(heldAfterSecond).toEqual(heldAtPause);
     expect(journalAfterSecond).toBe(journalAtPause);
     expect(parkedDuringPause).toHaveLength(1);
-    expect(readFileSync(join(dirname(file), parkedDuringPause[0]), "utf8")).toContain('"accountId":"claw2"');
+    expect(parkedContentDuringPause).toContain('"accountId":"claw2"');
     const final = readHistory(file).map((e) => e.accountId);
     expect(final).toEqual(["claw0", "claw1", "claw2"]);
     expect(visibleDuringPause).toEqual(["claw0", "claw2"]);
