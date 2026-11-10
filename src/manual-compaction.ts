@@ -33,6 +33,16 @@
  * and session key) and runs both launch targets inside that lane, so a turn
  * and a compaction of the same session do not overlap.
  *
+ * Inside the lane, before the control run, the host retires that session's
+ * live-session slot (`restartCliLiveSession`, keyed by backend id and the
+ * same session digest) and closes it again when the run ends. For these
+ * backends the slot only ever holds the per-turn shim process, which the
+ * transport registers when a turn starts and removes once the process has
+ * exited (shim-transport.ts), and the transport already asks the host for the
+ * same restart before every turn. So the slot is empty when a compaction
+ * starts: there is no process to stop, and the operation touches no
+ * transcript or session binding.
+ *
  * That is correct for a single-account backend on a verified launch: the
  * command is claude, the prepared env is that one account's login, and the
  * session can only be in that account's config dir. Nothing is recorded,

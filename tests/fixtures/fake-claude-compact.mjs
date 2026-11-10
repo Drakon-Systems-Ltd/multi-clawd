@@ -1,13 +1,17 @@
 #!/usr/bin/env node
-// Fixture `claude` for #159: answers a native `/compact` control run the way
-// Claude Code does, on the transcript in ITS OWN config dir and nowhere else.
+// Fixture `claude` for #159: a SYNTHETIC model of an account-local compaction.
+// It is not Claude Code and does not claim to reproduce what Claude Code writes
+// to a transcript or prints under this argv; neither has been observed here.
+// It models the one property the tests rely on: a compaction acts on the
+// transcript in the process's OWN config dir and nowhere else.
 //
 //   claude ... --resume <id> ... "/compact [instructions]"
 //
-// Found:   rewrites <CLAUDE_CONFIG_DIR>/projects/*/<id>.jsonl to a compact
-//          boundary plus one summary record naming how many records it folded,
-//          prints a `compact_boundary` system event, exits 0.
-// Missing: prints Claude Code's "No conversation found" line, exits 1.
+// Found:   rewrites <CLAUDE_CONFIG_DIR>/projects/*/<id>.jsonl to a boundary
+//          record plus one summary record naming how many records it folded,
+//          prints a `compact_boundary` system event (one of the two signals the
+//          contract's validator accepts), exits 0.
+// Missing: prints "No conversation found with session ID", exits 1.
 //
 // Every invocation is appended to FAKE_CLAUDE_LOG (argv + the env the test
 // cares about) so the test can assert exactly what was launched. No network.
