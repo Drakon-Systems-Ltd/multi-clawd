@@ -954,7 +954,9 @@ on the pool exactly as on `claude-cli/*`: the argv is rewritten to
 `--safe-mode --tools "" --disallowedTools mcp__* --strict-mcp-config
 --no-session-persistence --max-turns 1 --permission-mode default`, with any
 session, resume, fork, effort, tool and MCP-config flags dropped first. No
-native tool (Bash, Edit, Write, ...) and no MCP tool is selectable, and
+native tool (Bash, Edit, Write, ...) and no MCP tool is selectable, except
+that an explicit native-tool cap supplied by OpenClaw is applied last and is
+honoured as named (a side question capped to `Read` gets `--tools Read`), and
 `bypassPermissions` from `tools.exec.mode: full` does not carry over. This
 holds on every supported gateway, with or without host-owned `exec`. Before
 the unreleased fix the pool ignored the side-question mode, so a side question

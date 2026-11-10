@@ -198,8 +198,8 @@ describe(`the side-question projection matches the bundled resolver (closed by #
     }
     const missing = bundled.filter((arg) => !pool.includes(arg));
     expect(missing).toEqual([]);
-    // Full parity: the projection now yields the bundled argv exactly.
-    expect(pool.filter((arg) => !bundled.includes(arg))).toEqual([]);
+    // Full parity: the projection yields the bundled argv exactly (order and count).
+    expect(pool).toEqual(bundled);
   });
 
   test("an ordinary side-question is projected tool-free, matching the bundled backend", () => {
@@ -209,6 +209,6 @@ describe(`the side-question projection matches the bundled resolver (closed by #
     // #142: the pool no longer hands a side question the full agent argv.
     expect(pool).not.toEqual(baseArgs);
     expect(pool).not.toContain("--allowedTools");
-    expect(bundled.filter((arg) => !pool.includes(arg))).toEqual([]);
+    expect(pool).toEqual(bundled);
   });
 });
