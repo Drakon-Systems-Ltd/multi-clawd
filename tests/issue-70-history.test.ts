@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HISTORY_FOLD_MAX, HISTORY_MAX_BYTES, HISTORY_MAX_EVENTS, historyFile, parseHistorySince, readHistory, recordHistory, renderHistory } from "../src/history.js";
-import { acquireShimLock, shimLockFile } from "../src/shim-lock.js";
+import { acquireShimLock } from "../src/shim-lock.js";
 import { cleanShimEnv } from "./shim-env.js";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
@@ -17,6 +17,12 @@ const event = (accountId = "claw1") => ({ at: at(), kind: "served" as const, acc
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const pendingIn = (dir: string) => readdirSync(dir).filter((name) => name.startsWith("history.jsonl.pending-")).sort();
 const pendingId = (name: string) => name.slice(-36);
+const lockOf = (file: string) => `${file}.lock`;
+const waitFor = async (path: string) => {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(path) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  return existsSync(path);
+};
 /**
  * A pending file exactly as a writer that lost the lock race publishes it:
  * `<13-digit park time>-<10-digit pid>-<9-digit sequence>-<id>`, one event
@@ -48,12 +54,24 @@ const interruptedWriter = (dir: string) => {
     `import fs from "node:fs";`,
     `import { syncBuiltinESMExports } from "node:module";`,
     `const [state, mode, journal] = process.argv.slice(2);`,
-    `const real = { unlinkSync: fs.unlinkSync, writeFileSync: fs.writeFileSync, readFileSync: fs.readFileSync };`,
+    `const real = { unlinkSync: fs.unlinkSync, writeFileSync: fs.writeFileSync, readFileSync: fs.readFileSync, statSync: fs.statSync };`,
     `const idle = new Int32Array(new SharedArrayBuffer(4));`,
     `const die = () => { process.kill(process.pid, "SIGKILL"); Atomics.wait(idle, 0, 0); };`,
     `const isPending = (path) => /history\\.jsonl\\.pending-[^/]*$/.test(String(path)) && !String(path).includes(".tmp-");`,
+    `const lock = journal + ".lock";`,
+    `const holdsJournal = mode === "hold-after-journal-read" || mode === "hold-at-lock-and-journal";`,
+    `const holdsLock = mode === "hold-at-lock-and-journal";`,
     `let removals = 0;`,
-    `let held = false;`,
+    `let stage = 0;`,
+    `let heldAtJournal = false;`,
+    `let heldAtLock = false;`,
+    `const hold = () => {`,
+    `  stage += 1;`,
+    `  real.writeFileSync(journal + ".held-" + stage, "");`,
+    `  const until = Date.now() + 10000;`,
+    `  while (!fs.existsSync(journal + ".resume-" + stage) && Date.now() < until) Atomics.wait(idle, 0, 0, 10);`,
+    `};`,
+    `const holdAtLock = (path) => { if (holdsLock && String(path) === lock && !heldAtLock) { heldAtLock = true; hold(); } };`,
     `fs.unlinkSync = (path) => {`,
     `  if (isPending(path)) {`,
     `    removals += 1;`,
@@ -65,14 +83,11 @@ const interruptedWriter = (dir: string) => {
     `  if (mode === "kill-before-replace" && String(path).startsWith(journal + ".tmp-")) die();`,
     `  return real.writeFileSync(path, ...rest);`,
     `};`,
+    `fs.statSync = (path, ...rest) => { holdAtLock(path); return real.statSync(path, ...rest); };`,
     `fs.readFileSync = (path, ...rest) => {`,
+    `  holdAtLock(path);`,
     `  const out = real.readFileSync(path, ...rest);`,
-    `  if (mode === "hold-after-journal-read" && String(path) === journal && !held) {`,
-    `    held = true;`,
-    `    real.writeFileSync(journal + ".held", "");`,
-    `    const until = Date.now() + 10000;`,
-    `    while (!fs.existsSync(journal + ".resume") && Date.now() < until) Atomics.wait(idle, 0, 0, 10);`,
-    `  }`,
+    `  if (holdsJournal && String(path) === journal && !heldAtJournal) { heldAtJournal = true; hold(); }`,
     `  return out;`,
     `};`,
     `syncBuiltinESMExports();`,
@@ -401,7 +416,7 @@ describe("issue #70 account history", () => {
 
     expect(await interruptedWriter(dir)(state, mode)).toEqual({ code: null, signal: "SIGKILL" });
     expect(pendingIn(dir)).toHaveLength(pendingLeft);
-    expect(existsSync(shimLockFile(file))).toBe(true);
+    expect(existsSync(lockOf(file))).toBe(true);
     if (journalHasFold) {
       // Killed after its replace: the journal holds everything it folded and
       // names both files, including the one it did get to remove.
@@ -421,7 +436,7 @@ describe("issue #70 account history", () => {
     expect(journalOf(file).events).toHaveLength(expected.length + 1);
     expect(readHistory(file).filter((e) => e.accountId === "claw2").map((e) => e.modelId)).toEqual(["parked-one", "parked-two"]);
     expect(pendingIn(dir)).toEqual([]);
-    expect(existsSync(shimLockFile(file))).toBe(false);
+    expect(existsSync(lockOf(file))).toBe(false);
     recordHistory(state, event("claw1"));
     expect(accounts()).toEqual([...expected, "claw1", "claw1"]);
   }, 15_000);
@@ -437,17 +452,15 @@ describe("issue #70 account history", () => {
     park(dir, Date.now() - 1000, 0, { ...event("claw2"), modelId: "parked" });
     const exit = interruptedWriter(dir)(state, "hold-after-journal-read");
     // The child now holds the lock, has read the journal and is held there.
-    const deadline = Date.now() + 10_000;
-    while (!existsSync(`${file}.held`) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(existsSync(`${file}.held`)).toBe(true);
-    expect(existsSync(shimLockFile(file))).toBe(true);
+    expect(await waitFor(`${file}.held-1`)).toBe(true);
+    expect(existsSync(lockOf(file))).toBe(true);
     // Another writer treats the lock as expired, takes it, commits and releases.
-    unlinkSync(shimLockFile(file));
+    unlinkSync(lockOf(file));
     recordHistory(state, event("claw4"));
     expect(journalOf(file).events.map((l) => l.accountId)).toEqual(["claw1", "claw2", "claw4"]);
     expect(pendingIn(dir)).toEqual([]);
     const committed = readFileSync(file, "utf8");
-    writeFileSync(`${file}.resume`, "");
+    writeFileSync(`${file}.resume-1`, "");
     expect(await exit).toEqual({ code: 0, signal: null });
     // The paused holder backed off: the journal is the other writer's, byte
     // for byte, and its own event is parked instead of lost.
@@ -459,6 +472,42 @@ describe("issue #70 account history", () => {
     expect(journalOf(file).events).toHaveLength(5);
     expect(pendingIn(dir)).toEqual([]);
   }, 20_000);
+
+  // Ownership has to be what the acquisition itself established. A holder
+  // that learns "its" lock by reading the lock file back can be paused before
+  // that read, lose the lock, and then take the new holder's lock for its
+  // own: every later check passes while the other writer is still inside.
+  test("a holder replaced right after it took the lock does not mistake the new holder's lock for its own", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-adopted-lock-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    recordHistory(state, event("claw1"));
+    // The child is held twice: at its first look at the lock file and after
+    // its journal read, in whichever order its code reaches them.
+    const exit = interruptedWriter(dir)(state, "hold-at-lock-and-journal");
+    expect(await waitFor(`${file}.held-1`)).toBe(true);
+    // Another writer treats the lock as expired, takes it and keeps it.
+    unlinkSync(lockOf(file));
+    const other = acquireShimLock(file);
+    expect(other).toBeDefined();
+    writeFileSync(`${file}.resume-1`, "");
+    expect(await waitFor(`${file}.held-2`)).toBe(true);
+    // That writer commits while the child is paused again, and is still inside its own write.
+    const committed = `${readFileSync(file, "utf8")}${JSON.stringify({ ...event("claw4"), modelId: "committed" })}\n`;
+    writeFileSync(file, committed, { mode: 0o600 });
+    writeFileSync(`${file}.resume-2`, "");
+    expect(await exit).toEqual({ code: 0, signal: null });
+    try {
+      // The child neither replaced that commit nor released a lock that is not its own.
+      expect(readFileSync(file, "utf8")).toBe(committed);
+      expect(other?.held()).toBe(true);
+      expect(pendingIn(dir)).toHaveLength(1);
+    } finally { other?.(); }
+    expect(readHistory(file).map((e) => e.accountId).sort()).toEqual(["claw1", "claw3", "claw4"]);
+    recordHistory(state, event("claw1"));
+    expect(pendingIn(dir)).toEqual([]);
+    expect(readHistory(file).map((e) => e.accountId).sort()).toEqual(["claw1", "claw1", "claw3", "claw4"]);
+  }, 30_000);
 
   test("a holder that stops before its journal replace leaves parked events to be folded once by the next holder", () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-history-unfolded-"));
@@ -530,18 +579,31 @@ describe("issue #70 account history", () => {
     expect(pendingIn(dir)).toEqual([]);
     expect(readHistory(file).map((e) => e.modelId)).toEqual([...expectedDuring.slice(1), "own-d"]);
 
-    // Writers that never let up: every attempt meets a newer journal. The
-    // reader still returns a bounded view with no event counted twice.
-    let writes = 0;
+    // Writers that never let up: the journal changes under every attempt, and
+    // on the last one a parked event the reader has already read is folded
+    // and then loses its receipt to a second write. Combined with that
+    // journal the reader's copy would count the event twice, so the reader
+    // returns the journal alone.
+    let attempts = 0;
     const busy = readHistory(file, { afterPending: () => {
-      park(dir, base + 3000 + writes, 0, { at: stamp(3000 + writes), kind: "served", accountId: "claw2", modelId: `late${writes}` });
-      recordHistory(state, { at: stamp(4000 + writes), kind: "served", accountId: "claw1", modelId: `busy${writes}` });
-      writes += 1;
+      attempts += 1;
+      if (attempts === 2) {
+        recordHistory(state, { at: stamp(3000), kind: "served", accountId: "claw1", modelId: "busy-a" });
+        // Parked after that write, so the third attempt reads it as pending.
+        park(dir, base + 3100, 0, { at: stamp(3100), kind: "served", accountId: "claw2", modelId: "late" });
+        return;
+      }
+      recordHistory(state, { at: stamp(3200 + attempts), kind: "served", accountId: "claw1", modelId: `busy-b${attempts}` });
+      recordHistory(state, { at: stamp(3300 + attempts), kind: "served", accountId: "claw1", modelId: `busy-c${attempts}` });
     } });
-    expect(writes).toBe(3);
+    expect(attempts).toBe(3);
+    expect(pendingIn(dir)).toEqual([]);
+    expect(journalOf(file).receipts).toBe(0);
     expect(busy).toHaveLength(HISTORY_MAX_EVENTS);
+    expect(busy.filter((e) => e.modelId === "late")).toHaveLength(1);
     expect(new Set(busy.map((e) => e.modelId)).size).toBe(HISTORY_MAX_EVENTS);
-    expect(readHistory(file).map((e) => e.modelId).slice(-6)).toEqual(["late0", "late1", "late2", "busy0", "busy1", "busy2"]);
+    // It is the journal as last committed, which a settled read returns too.
+    expect(busy).toEqual(readHistory(file));
   }, 30_000);
 
   // Pending names sort by park time, which is not event time: a writer that
@@ -701,11 +763,40 @@ describe("issue #70 account history", () => {
     } finally { chmodSync(file, 0o600); }
     expect(readFileSync(file, "utf8")).toBe(before);
     expect(pendingIn(dir)).toHaveLength(1);
-    expect(existsSync(shimLockFile(file))).toBe(false);
+    expect(existsSync(lockOf(file))).toBe(false);
     expect(readHistory(file).map((e) => e.modelId)).toEqual(["kept0", "kept1", "kept2", "during"]);
     recordHistory(state, { ...event("claw1"), modelId: "after" });
     expect(pendingIn(dir)).toEqual([]);
     expect(readHistory(file).map((e) => e.modelId)).toEqual(["kept0", "kept1", "kept2", "during", "after"]);
+  });
+
+  test.skipIf(asRoot)("a directory that cannot be listed stops the write from replacing the journal or dropping a receipt", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-unlistable-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    recordHistory(state, { ...event("claw1"), modelId: "first" });
+    // A fold that committed and stopped before removing the file it folded.
+    const left = park(dir, Date.now() - 1000, 0, { ...event("claw2"), modelId: "folded" });
+    const content = readFileSync(join(dir, left.name), "utf8");
+    recordHistory(state, { ...event("claw1"), modelId: "second" });
+    writeFileSync(join(dir, left.name), content, { mode: 0o600 });
+    const before = readFileSync(file, "utf8");
+    expect(journalOf(file).folded).toEqual([left.id]);
+
+    // Files can still be created and opened by name, but not listed. A write
+    // that took "cannot list" for "nothing pending" would replace the journal
+    // without the receipt, and the leftover file would later count twice.
+    chmodSync(dir, 0o300);
+    try {
+      recordHistory(state, { ...event("claw1"), modelId: "during" });
+      expect(readFileSync(file, "utf8")).toBe(before);
+    } finally { chmodSync(dir, 0o700); }
+    expect(pendingIn(dir)).toHaveLength(2);
+    const models = () => readHistory(file).map((e) => e.modelId).sort();
+    expect(models()).toEqual(["during", "first", "folded", "second"]);
+    recordHistory(state, { ...event("claw1"), modelId: "after" });
+    expect(pendingIn(dir)).toEqual([]);
+    expect(models()).toEqual(["after", "during", "first", "folded", "second"]);
   });
 
   test("a child writer starved of the lock for its whole run loses no events once the holder releases", async () => {

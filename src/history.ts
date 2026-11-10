@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { acquireShimLock, shimLockFile } from "./shim-lock.js";
+import { acquireShimLock, type ShimLockRelease } from "./shim-lock.js";
 
 export const HISTORY_FILE = "history.jsonl";
 export const HISTORY_MAX_BYTES = 64 * 1024;
@@ -149,21 +149,23 @@ interface ReadHistoryHooks {
 /**
  * The journal plus the parked events no write has consumed yet, inside the
  * journal's own 500-event / 64 KiB bound, oldest first by event time. A
- * reader therefore never misses an event only because its writer lost a lock
- * race, and never gets back more than the bound however many are parked. It
- * opens at most the 500 most recently parked files.
+ * reader includes parked events, with one exception: if the journal changes
+ * during all three of its attempts it returns the last journal alone, which
+ * can omit events that are still parked. It never gets back more than the
+ * bound however many are parked, and opens at most the 500 most recently
+ * parked files.
  *
  * A fold replaces the journal, receipt included, before it removes a pending
- * file, so pending files are read first and the journal after them: a parked
- * event that a fold consumed in between is named in the receipt of the
- * journal read that follows and is not counted from its file as well. The
- * journal is also read before the pending files, and the read is repeated
- * when the two copies differ, so the result normally describes a single
- * journal state. Under continuous writes the third attempt is returned as
- * read; it can then be out of date by the writes that overlapped it.
+ * file, and a later write drops a receipt once the files it names are gone.
+ * Pending contents are therefore only combined with a journal that is known
+ * not to have changed while they were read: the journal is read before and
+ * after them, and the read is repeated when the two copies differ. If the
+ * journal changed under all three attempts, the last journal is returned on
+ * its own. That result is a committed state; under such continuous writes
+ * it can omit events that are still parked.
  */
 export function readHistory(file: string, hooks: ReadHistoryHooks = {}): HistoryEvent[] {
-  let view: HistoryEvent[] = [];
+  let latest: HistoryEvent[] = [];
   for (let attempt = 0; attempt < 3; attempt++) {
     const before = readTextOrNothing(file);
     let pending: Pending[] = [];
@@ -172,11 +174,12 @@ export function readHistory(file: string, hooks: ReadHistoryHooks = {}): History
     hooks.afterPending?.();
     const after = readTextOrNothing(file);
     const journal = parse(after ?? "");
+    latest = journal.events;
+    if (before !== after) continue;
     const unfolded = parked.filter(({ id }) => !journal.folded.has(id)).flatMap(({ events }) => events).sort(byEventTime);
-    view = capped([...journal.events, ...unfolded], HISTORY_MAX_BYTES);
-    if (before === after) break;
+    return capped([...journal.events, ...unfolded], HISTORY_MAX_BYTES).sort(byEventTime);
   }
-  return view.sort(byEventTime);
+  return capped(latest, HISTORY_MAX_BYTES).sort(byEventTime);
 }
 
 /**
@@ -198,10 +201,13 @@ export function readHistory(file: string, hooks: ReadHistoryHooks = {}): History
  * remove them, and never apply them again, whether or not the cap has since
  * trimmed their events from the journal.
  *
- * Nothing unread is replaced or removed. If the journal or the directory
- * cannot be read the writer parks its event and leaves both alone. A pending
- * file is removed only by a lock holder, only after a replace that names it,
- * and only if it was read; one that cannot be read stays for a later write.
+ * Nothing unread is replaced, folded or lost. If the journal or the
+ * directory cannot be read the writer parks its event and leaves both alone.
+ * A pending file that cannot be read is not folded and stays for a later
+ * write. A pending file is removed only by a lock holder and only once a
+ * committed replace names it in its receipt, which means the holder that
+ * first committed its name had read it; a later holder removes such a file
+ * without reading it again.
  * Pending files are folded oldest first, so those beyond one write's share
  * wait their turn and the journal's tail stays its newest events. Until a
  * writer takes the lock, pending files accumulate without a bound of their
@@ -209,23 +215,20 @@ export function readHistory(file: string, hooks: ReadHistoryHooks = {}): History
  *
  * The lock is a lease: a holder paused past it can be replaced while it is
  * still running. Before the replace and before removing files the holder
- * checks that the lock still carries its bytes, and backs off if not. That
- * narrows a stale write to the instant between the check and the rename; it
- * does not close it.
+ * asks the lock whether it is still the one this acquisition created, and
+ * backs off if not. That narrows a stale write to the instant between the
+ * check and the rename; it does not close it.
  */
 export function recordHistory(stateFile: string | undefined, event: HistoryEvent): void {
   if (!stateFile) return;
-  let release: (() => void) | undefined;
+  let release: ShimLockRelease | undefined;
   try {
     const checked = valid(event);
     if (!checked) return;
     const file = historyFile(stateFile);
     const park = () => publish(pendingName(file), line(checked));
-    release = acquireShimLock(file);
-    if (!release) return park();
-    const lockBytes = () => { try { return readFileSync(shimLockFile(file)); } catch { return undefined; } };
-    const mine = lockBytes();
-    const stillHeld = () => mine !== undefined && lockBytes()?.equals(mine) === true;
+    const lock = release = acquireShimLock(file);
+    if (!lock) return park();
 
     let journal: ReturnType<typeof parse>;
     let pending: Pending[];
@@ -248,9 +251,9 @@ export function recordHistory(stateFile: string | undefined, event: HistoryEvent
     }
     const receipt = consumed.length ? JSON.stringify({ folded: consumed.map(({ id }) => id) }) + "\n" : "";
     const events = capped([...journal.events, ...folded.sort(byEventTime), checked], HISTORY_MAX_BYTES - Buffer.byteLength(receipt));
-    if (!stillHeld()) return park();
+    if (!lock.held()) return park();
     publish(file, receipt + events.map(line).join(""));
-    if (!stillHeld()) return;
+    if (!lock.held()) return;
     for (const { path } of consumed) try { unlinkSync(path); } catch { /* the receipt covers it until a later holder removes it */ }
   } catch { /* history cannot affect the launch */ }
   finally { release?.(); }
