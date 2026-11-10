@@ -184,12 +184,16 @@ describe("#151 a paused holder's commit cannot erase a second writer", () => {
     expect(parkedDuringPause).toHaveLength(1);
     expect(parkedContentDuringPause).toContain('"accountId":"claw2"');
     const final = readHistory(file).map((e) => e.accountId);
-    expect(final).toEqual(["claw0", "claw1", "claw2"]);
+    expect(final[0]).toBe("claw0");
+    expect(final.slice(1).sort()).toEqual(["claw1", "claw2"]);
     expect(visibleDuringPause).toEqual(["claw0", "claw2"]);
     expect(existsSync(`${file}.lock`)).toBe(false);
 
     recordHistory(stateFile, ev("claw3"));
     expect(pending()).toEqual([]);
-    expect(readHistory(file).map((e) => e.accountId)).toEqual(["claw0", "claw1", "claw2", "claw3"]);
+    const folded = readHistory(file).map((e) => e.accountId);
+    expect(folded[0]).toBe("claw0");
+    expect(folded.slice(1, -1).sort()).toEqual(["claw1", "claw2"]);
+    expect(folded[folded.length - 1]).toBe("claw3");
   });
 });

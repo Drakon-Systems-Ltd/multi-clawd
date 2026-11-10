@@ -309,6 +309,17 @@ describe("procfs state of a kill-confirmed live holder with a matching generatio
     expect(later(() => acquireShimLock(target, 20, { procRoot }))).toBeUndefined();
     expect(readFileSync(lock, "utf8")).toBe(held);
   });
+
+  test.each(["Z", "X"])("a holder stat truncated at ') %s' without field 22 stays protected past the lease", (state) => {
+    const target = join(box(), "home.json");
+    const procRoot = fakeProc(`1 (holder) ${state}`);
+    const held = `1 ${Date.now() - LATER_MS} tok ${HOLDER_GEN}\n`;
+    const lock = writeStaleLock(target, held);
+
+    expect(acquireShimLock(target, 20, { procRoot })).toBeUndefined();
+    expect(later(() => acquireShimLock(target, 20, { procRoot }))).toBeUndefined();
+    expect(readFileSync(lock, "utf8")).toBe(held);
+  });
 });
 
 describe("a partially written lock never reads as a reused pid", () => {

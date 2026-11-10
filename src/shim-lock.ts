@@ -143,9 +143,9 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
       // keeps the live-pid protection, and the generation is compared only
       // in a complete record (newline-terminated): a waiter can read the lock
       // mid-write and see a truncated fourth field. A live pid whose procfs
-      // state is Z or X has exited: an unreaped zombie still passes kill(0)
-      // but can never commit, so it holds nothing, generation or not. A
-      // missing or unparseable state keeps the protection.
+      // state is Z or X with a parsed start time has exited: an unreaped
+      // zombie still passes kill(0) but can never commit, generation or not.
+      // An incomplete or unparseable stat keeps the live-pid protection.
       let dead = false;
       let live = false;
       if (/^\d+$/.test(pidText ?? "") && Number.isSafeInteger(pid) && pid > 0) {
@@ -158,7 +158,7 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
           const { state, start } = readProcStat(procRoot, pid);
           const reused = text.endsWith("\n") && storedGeneration !== undefined && /^\d+$/.test(storedGeneration)
             && start !== undefined && BigInt(start) !== BigInt(storedGeneration);
-          if (state === "Z" || state === "X" || reused) {
+          if ((start !== undefined && (state === "Z" || state === "X")) || reused) {
             live = false;
             dead = true;
           }
