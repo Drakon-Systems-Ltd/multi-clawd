@@ -3,8 +3,9 @@
  *
  * OpenClaw's public `manualCompaction` contract (`CliBackendManualCompaction`)
  * lets a backend that owns native compaction serve an explicit `/compact`. What
- * the host does with a backend that declares it is the same on 2026.8.1,
- * 2026.10.10, 2026.11.1 and 2026.11.2:
+ * the host does with a backend that declares it was read from the dist of
+ * 2026.8.1, 2026.11.1 and 2026.11.2 and from the tagged source of 2026.10.10,
+ * and is the same in all four:
  *
  *  - it resumes the stored native session with the backend's `resumeArgs` and
  *    passes `manualCompaction.buildPrompt(...)` as an argv prompt;
@@ -27,12 +28,21 @@
  * selected account is compacted, becomes the newest file, and replaces the real
  * conversation on the next turn. So the pool keeps the host's refusal.
  *
- * What this suite is. FIXTURE throughout: the host's launch is reproduced from
+ * What this suite is. FIXTURE throughout: the host's launch is REPRODUCED from
  * the rules above (prepareExecution, then resolveExecutionArgs on resumeArgs,
  * then `config.command` spawned directly with the prepared env), against a
- * fixture `claude`. The host's target selection itself is checked against the
- * installed dist in tests/host-execute-target.test.ts. Nothing here starts a
- * gateway, reads a credential or contacts a provider.
+ * fixture `claude`. It does not call the host's `compactNativeCliSession`, and
+ * a refusal here is this file's own helper declining to launch, not the host.
+ * Host facts are checked elsewhere: the refusal gate in
+ * tests/issue-146-manual-compaction-contract.test.ts, and the target selection
+ * for a compact run in tests/host-execute-target.test.ts (which loads the
+ * host's own function on dists that export it). The pool suite shows a
+ * transcript rewrite and what the handover planner would then do; it is not a
+ * run of the host or of Claude Code. Tests that change with this PR: the
+ * verified single-account declaration, the single-account control run and the
+ * control-run argv. The pool and legacy "undeclared" tests pin behaviour that
+ * was already there. Nothing here starts a gateway, reads a credential or
+ * contacts a provider.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -320,8 +330,35 @@ describe("a manual /compact on a verified single-account backend (#159)", () => 
     expect(seen[0]!.argv).toEqual(run.argv);
     expect(run.argv.slice(run.argv.indexOf("--resume"), run.argv.indexOf("--resume") + 2)).toEqual(["--resume", SESSION]);
     expect(run.argv.at(-1)).toBe("/compact keep the plan");
-    // No pool steering reaches a bare claude: there is no roster, session-dir list or affinity for one account.
+    // What the backend PREPARES carries no pool steering: there is no roster, session-dir list or
+    // affinity for one account. (How the host merges a prepared env into the child is the host's;
+    // this reproduction passes the prepared env and nothing else of ours.)
+    expect(Object.keys(run.prepared.env ?? {}).filter((k) => k.startsWith("MULTI_CLAWD_")).sort()).toEqual([
+      "MULTI_CLAWD_ACCOUNT_ID",
+      "MULTI_CLAWD_STATE_FILE",
+    ]);
     expect(seen[0]!.envKeys).toEqual(["MULTI_CLAWD_ACCOUNT_ID", "MULTI_CLAWD_STATE_FILE"]);
+  });
+
+  test("full exec mode, through the registered hook: the marked run is launched without bypassPermissions, an unmarked one keeps it", async () => {
+    writeTranscript("claw1", 3, 60_000);
+    const backend = buildBackend({ id: "claw1", configDir: configDir("claw1") }, "full", verifiedLaunch());
+    expect(backend.config.resumeArgs).toContain("bypassPermissions");
+
+    const marked = await hostCompactLaunch(backend, { controlOperation: "compact" });
+    expect(marked.status).toBe(0);
+    expect(launches().at(-1)!.argv).not.toContain("--permission-mode");
+    expect(launches().at(-1)!.argv).not.toContain("bypassPermissions");
+
+    // A host before 2026.11.2 passes no marker; the bundled backend keeps the mode there as well.
+    writeTranscript("claw1", 3, 60_000);
+    const unmarked = await hostCompactLaunch(backend, {});
+    expect(unmarked.status).toBe(0);
+    const argv = launches().at(-1)!.argv;
+    expect(argv.slice(argv.indexOf("--permission-mode"), argv.indexOf("--permission-mode") + 2)).toEqual([
+      "--permission-mode",
+      "bypassPermissions",
+    ]);
   });
 
   test("writes nothing to the multi-clawd state dir: no served launch, no sticky entry, no health record", async () => {
@@ -388,7 +425,19 @@ describe("argv for the control run mirrors the bundled resolver (#159)", () => {
     ]);
   });
 
-  test("an ordinary turn keeps its permission mode: the strip is the control run's alone", () => {
+  test.each(["plan", "default", "acceptEdits"])("an explicit %s mode is kept on the control run, in both spellings: only the injected bypass goes", (mode) => {
+    const spaced = RESUME(["--permission-mode", mode]);
+    expect(resolvePoolExecutionArgs({ baseArgs: spaced, controlOperation: "compact" })).toEqual(spaced);
+    const equals = [...RESUME([]).slice(0, -2), `--permission-mode=${mode}`, "--resume", "{sessionId}"];
+    expect(resolvePoolExecutionArgs({ baseArgs: equals, controlOperation: "compact" })).toEqual(equals);
+  });
+
+  test("a trailing --permission-mode with no value is not treated as the bypass pair", () => {
+    const dangling = [...RESUME([]), "--permission-mode"];
+    expect(resolvePoolExecutionArgs({ baseArgs: dangling, controlOperation: "compact" })).toEqual(dangling);
+  });
+
+  test("an ordinary turn keeps bypassPermissions: the strip is the control run's alone", () => {
     expect(resolvePoolExecutionArgs({ baseArgs: RESUME(BYPASS), executionMode: "agent" })).toEqual(RESUME(BYPASS));
   });
 
@@ -428,7 +477,7 @@ describe("why the pooled backend keeps the host's refusal (#159)", () => {
     ).toMatchObject({ action: "copy", fromDir: configDir("claw2") });
   });
 
-  test("if the pool declared the contract, the host's launch would compact the stale copy, report success and lose turns 6 to 10", async () => {
+  test("reproduction: with the contract attached to a copy of the pool backend, the launch rules compact the stale copy, the validator confirms it, and the handover planner then prefers it", async () => {
     rotatedConversation();
     const pool = registerPool(verifiedLaunch());
     expect(manualOf(pool)).toBeUndefined();
@@ -439,7 +488,7 @@ describe("why the pooled backend keeps the host's refusal (#159)", () => {
 
     const run = await hostCompactLaunch(declared);
 
-    // The host would report this as a completed compaction.
+    // Exit 0 and a confirming validator: the two things the host requires before reporting a completed compaction.
     expect(run.status).toBe(0);
     expect(CLAUDE_MANUAL_COMPACTION.validateOutput(run.stdout)).toEqual({ ok: true });
     // It compacted claw1's five-turn prefix, not the ten-turn conversation.
@@ -459,12 +508,12 @@ describe("why the pooled backend keeps the host's refusal (#159)", () => {
       action: "none",
       reason: "already-local",
     });
-    // Pool steering also reached a bare claude, which the shim would have stripped.
+    // The pool's prepared env carries its steering variables, which only the shim consumes and strips.
     expect(launches()[0]!.envKeys).toContain("MULTI_CLAWD_SESSION_DIRS");
     expect(launches()[0]!.envKeys).toContain("MULTI_CLAWD_RETRY_ACCOUNTS");
   });
 
-  test("undeclared, the real pool backend launches nothing and every copy of the conversation is left as it was", async () => {
+  test("the real pool backend is undeclared, so this reproduction (like the host gate pinned in the #146 suite) stops before any launch", async () => {
     rotatedConversation();
     const pool = registerPool(verifiedLaunch());
     await expect(hostCompactLaunch(pool)).rejects.toThrow(/declares no manualCompaction/);

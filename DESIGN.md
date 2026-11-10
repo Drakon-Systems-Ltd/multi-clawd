@@ -249,16 +249,18 @@ there, when the ordinary handover replaces it with the sibling's newer copy.
 
 The backends declare `ownsNativeCompaction`, so OpenClaw refuses a manual
 `/compact` unless the backend also declares the public `manualCompaction`
-contract. What the host does with a declaration, read from the dist of
-2026.8.1, 2026.10.10, 2026.11.1 and 2026.11.2 (`compactNativeCliSession`,
-`resolveCliExecutionTarget`):
+contract. What the host does with a declaration (`compactNativeCliSession`,
+`resolveCliExecutionTarget`; read from the dist of 2026.8.1, 2026.11.1 and
+2026.11.2 and from the tagged source of 2026.10.10):
 
 1. `prepareExecution` runs with the ordinary context: no session id, no
    control-operation marker.
 2. `resolveExecutionArgs` runs on `resumeArgs`; from 2026.11.2 its context
    carries `controlOperation: "compact"`.
 3. The host spawns `config.command` itself with `/compact [instructions]` as
-   an argument. A prepared `execute` transport is not used for this run.
+   an argument. A prepared `execute` transport is not used for this run. On
+   a verified launch that command is claude; on a legacy launch it is node
+   with the shim.
 4. Success requires `validateOutput` to find a compact boundary.
 
 Decision:
@@ -267,8 +269,10 @@ Decision:
   claude, the env is that account's login, and the session can only be in
   that account's config dir. Our shim does not run, so the request is not a
   served launch and writes no state. The contract is a port of the bundled
-  one, and the resolver drops the exec-policy permission mode for the control
-  run, as the bundled resolver does on 2026.11.2.
+  one, and the resolver drops the injected `bypassPermissions` mode for the
+  control run (any other mode is kept), as the bundled resolver does on
+  2026.11.2. Established with a fixture claude driven by the rules above, not
+  by a live `/compact` on a running gateway.
 - **Pooled backend: not declared; the host's refusal stands.** The handover
   above is what makes a pooled session resumable on the launched account, and
   it lives in the shim, which step 3 skips; step 1 cannot replace it without
@@ -276,8 +280,9 @@ Decision:
   prefix of the conversation. Claude would compact that prefix and report
   success, the rewritten file would become the newest copy, and the next
   handover would install it over the real conversation.
-  `tests/issue-159-manual-compaction.test.ts` reproduces this with a fixture
-  claude.
+  `tests/issue-159-manual-compaction.test.ts` reproduces the rewrite and the
+  planner's choice with a fixture claude; it is a reproduction from the rules
+  above, not a run of the host.
 - **Single-account backend, legacy launch: not declared.** The host would run
   the shim, which records every spawn as a served launch.
 

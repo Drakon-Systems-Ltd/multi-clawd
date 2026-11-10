@@ -60,6 +60,7 @@ const NO_CHROME_ARG = "--no-chrome";
 const STRICT_MCP_CONFIG_ARG = "--strict-mcp-config";
 const DENY_MCP_TOOLS_VALUE = "mcp__*";
 const PERMISSION_MODE_ARG = "--permission-mode";
+const BYPASS_PERMISSIONS_MODE = "bypassPermissions";
 const SAFE_MODE_ARG = "--safe-mode";
 const BARE_ARG = "--bare";
 const EFFORT_ARG = "--effort";
@@ -314,19 +315,29 @@ export function resolveSideQuestionExecutionArgs(baseArgs: readonly string[]): s
 }
 
 /**
- * A native control operation (manual `/compact`, #159) does not run under the
- * exec-policy permission mode. OpenClaw 2026.11.2 marks the run with
+ * A native control operation (manual `/compact`, #159) does not run under
+ * `bypassPermissions`. OpenClaw 2026.11.2 marks the run with
  * `controlOperation: "compact"`, and the bundled resolver then leaves out the
  * `--permission-mode bypassPermissions` it injects for a full-exec turn
- * (`normalizeClaudeBackendArgs`). The pool's equivalent injection is baked
- * into its argv (`permissionModeArgs`), so it is dropped here instead. Hosts
- * before 2026.11.2 pass no marker; the bundled backend keeps the mode there
- * too, and so does this.
+ * (`normalizeClaudeBackendArgs`); a mode the operator set explicitly is kept.
+ * The pool's equivalent injection is baked into its argv
+ * (`permissionModeArgs`), so exactly that pair is dropped here, in either
+ * spelling, and any other mode is left alone. Hosts before 2026.11.2 pass no
+ * marker; the bundled backend keeps the mode there too, and so does this.
  */
 export function resolveControlOperationArgs(baseArgs: readonly string[], controlOperation?: string): readonly string[] {
-  return controlOperation === "compact"
-    ? stripClaudeArgs(baseArgs, { value: new Set([PERMISSION_MODE_ARG]) })
-    : baseArgs;
+  if (controlOperation !== "compact") return baseArgs;
+  const out: string[] = [];
+  for (let i = 0; i < baseArgs.length; i++) {
+    const arg = baseArgs[i]!;
+    if (arg === PERMISSION_MODE_ARG && baseArgs[i + 1] === BYPASS_PERMISSIONS_MODE) {
+      i++;
+      continue;
+    }
+    if (arg === `${PERMISSION_MODE_ARG}=${BYPASS_PERMISSIONS_MODE}`) continue;
+    out.push(arg);
+  }
+  return out;
 }
 
 /**
@@ -341,7 +352,7 @@ export function resolveControlOperationArgs(baseArgs: readonly string[], control
  * the bundled resolver's does. A side-question (`/btw`, setup probes) is made
  * tool-free on every gateway, whatever the operator argv or exec mode; with a
  * cap as well, the cap rewrites the projected argv exactly as core's does.
- * A control operation first drops the exec-policy permission mode (above).
+ * A control operation first drops the injected `bypassPermissions` mode (above).
  */
 export function resolvePoolExecutionArgs(ctx: {
   baseArgs: readonly string[];

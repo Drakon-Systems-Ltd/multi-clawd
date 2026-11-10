@@ -11,8 +11,9 @@
  * tests/issue-159-manual-compaction.test.ts compares the two on the installed
  * OpenClaw.
  *
- * How the host runs it (identical on 2026.8.1, 2026.10.10, 2026.11.1 and
- * 2026.11.2; `compactNativeCliSession` and `resolveCliExecutionTarget`):
+ * How the host runs it (`compactNativeCliSession` and
+ * `resolveCliExecutionTarget`; read from the dist of 2026.8.1, 2026.11.1 and
+ * 2026.11.2 and from the tagged source of 2026.10.10):
  *
  *  1. `prepareExecution` is called with the ordinary context. It carries no
  *     session id and nothing that marks the run as a control operation.
@@ -20,15 +21,17 @@
  *     carries `controlOperation: "compact"`; earlier hosts pass no marker.
  *  3. The host spawns `config.command` itself, as a plain process, resuming
  *     the stored session with the prompt as an argument. A prepared `execute`
- *     transport is NOT used for this run, so on a verified launch the shim
- *     does not run.
+ *     transport is NOT used for this run. On a verified launch the command is
+ *     claude, so the shim does not run; on a legacy launch the command is node
+ *     with the shim as its first argument, so it does.
  *  4. A zero exit counts only if `validateOutput` finds the compact boundary.
  *
  * That is correct for a single-account backend on a verified launch: the
  * command is claude, the prepared env is that one account's login, and the
  * session can only be in that account's config dir. Nothing is recorded,
  * because nothing of ours runs: no served launch, no sticky entry, no health
- * capture.
+ * capture. This rests on the host rules above and a fixture claude; a live
+ * `/compact` against a running gateway has not been exercised.
  *
  * It is NOT correct for the pooled backend, which therefore does not declare
  * the contract and keeps the host's refusal:

@@ -9,14 +9,16 @@ versioning from v1.0.
 ### Added
 - **Manual `/compact` on single-account backends (#159).** A `claw<N>/*`
   backend on the verified launch now declares OpenClaw's public
-  `manualCompaction` contract, a port of the bundled `claude-cli` backend's
-  (same `/compact [instructions]` prompt, passed as an argument, confirmed by
-  a compact boundary in the output). OpenClaw runs the request as `claude`
-  itself on that account's login; the shim is not involved, so nothing is
-  recorded as a served launch and no health state changes. From OpenClaw
-  2026.11.2 the request no longer carries `--permission-mode
-  bypassPermissions`, as on the bundled backend. Covered by a fixture
-  `claude`; not yet exercised from a chat surface against a running gateway.
+  `manualCompaction` contract, a port of the bundled `claude-cli` backend's:
+  the same `/compact [instructions]` prompt, passed as an argument, accepted
+  only when the output carries a `compact_boundary` system event or
+  `compact_result: "success"`. OpenClaw runs the request as `claude` itself on
+  that account's login; the shim is not involved, so nothing is recorded as a
+  served launch and no health state changes. From OpenClaw 2026.11.2 the
+  request no longer carries the `--permission-mode bypassPermissions` that
+  full exec mode adds, as on the bundled backend. Covered by a fixture
+  `claude` driven by the host's launch rules; a live `/compact` against a
+  running gateway has not been exercised.
 
 ### Known limitations
 - **Manual `/compact` stays refused on the pooled backend (#159).** `clawd/*`
