@@ -57,11 +57,22 @@ versioning from v1.0.
   the same set and its `resolveExecutionArgs` ports the bundled step
   byte-for-byte: when the gateway marks `exec` host-owned for the run, every
   operator denial is kept in order and `Bash` is appended once; nothing else
-  in the argv moves. Exact-cap runs and side questions without the field,
-  and 2026.8.x gateways (which never pass it), are unchanged. A side
-  question carrying host-owned `exec` also gains the native `Bash` denial;
-  the separate tool-free side-question projection is tracked in #142. Verified
-  against the 2026.10.10 and 2026.11.1 sources; not observed live. (#136)
+  in the argv moves. Exact-cap runs and 2026.8.x gateways (which never pass
+  it) are unchanged. Verified against the 2026.10.10 and 2026.11.1 sources;
+  not observed live. (#136)
+- **Side questions on the pool kept Claude Code's native tools.** The pool
+  declares `sideQuestionToolMode: "disabled"`, which core trusts (no empty
+  tool cap is injected for side questions), but its argv resolver ignored the
+  execution mode, so `/btw` and setup probes ran with native Bash/Edit/Write
+  selectable — under `bypassPermissions` when `tools.exec.mode` is `full`.
+  `resolveExecutionArgs` now ports the bundled side-question projection:
+  session/resume/fork/effort/tool/MCP-config flags are dropped and
+  `--safe-mode --tools "" --disallowedTools mcp__* --strict-mcp-config
+  --no-session-persistence --max-turns 1 --permission-mode default` is
+  appended, in the bundled order (host-owned denial, side-question
+  projection, exact cap). Non-side-question runs are unchanged. Verified
+  against the 2026.8.1 and 2026.11.1 sources and through the shim on a
+  fixture; not observed live. (#142)
 - **OpenClaw >= 2026.9 (incl. 2026.10.10 and 2026.11.1): the bundled Claude
   catalog mirror silently used the static list.** Those releases removed
   `dist/extensions/anthropic/cli-catalog.js`, the module the mirror imported,

@@ -137,19 +137,19 @@ describe("paths core never hands hostOwnedTools to stay as they were", () => {
     expect(out).not.toContain("bypassPermissions");
   });
 
-  it("a side question without the field is untouched", () => {
+  it("a side question receiving host-owned exec ends up tool-free, same as without the field (#142)", () => {
     const backend = buildBackend(account);
-    expect(backend.resolveExecutionArgs!(ctx(baseArgs, { executionMode: "side-question" }))).toEqual(baseArgs);
-  });
-
-  it("a side question receiving host-owned exec also denies Bash", () => {
-    const backend = buildBackend(account);
-    const out = backend.resolveExecutionArgs!(ctx(baseArgs, {
+    const withField = backend.resolveExecutionArgs!(ctx(baseArgs, {
       executionMode: "side-question",
       hostOwnedTools: ["exec", "process"],
     })) as string[];
-    expect(disallowed(out)).toEqual(["Monitor", "Bash"]);
-    expect(out).toContain("bypassPermissions"); // Full tool-free projection remains #142.
+    const without = backend.resolveExecutionArgs!(ctx(baseArgs, { executionMode: "side-question" }));
+    expect(withField).toEqual(without);
+    // Bundled order: the side-question projection replaces the denial list,
+    // and `--tools ""` leaves no native Bash to deny.
+    expect(disallowed(withField)).toEqual(["mcp__*"]);
+    expect(withField[withField.indexOf("--tools") + 1]).toBe("");
+    expect(withField).not.toContain("bypassPermissions");
   });
 
   it("if both an exact cap and the field ever arrive together, the result matches the bundled order (Bash lands in the sorted cap denials)", () => {

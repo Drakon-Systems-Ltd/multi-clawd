@@ -951,10 +951,20 @@ gateways, governed only by the permission mode derived from
 `tools.exec.mode`, so OpenClaw's exec approvals did not apply to it. On
 OpenClaw 2026.8.x there is no host-owned contract on either backend:
 commands run through Claude Code's native `Bash` under that permission mode,
-unchanged. Exact-cap runs (cron tool policies, `disableTools`) and side
-questions without the host-owned field remain unchanged. A side question
-that receives host-owned `exec` also gains the native `Bash` denial; the
-separate side-question tool-free projection is tracked in #142.
+unchanged. Exact-cap runs (cron tool policies, `disableTools`) are unchanged.
+
+**Side questions are tool-free.** A side question (`/btw`, setup probes) runs
+on the pool exactly as on `claude-cli/*`: the argv is rewritten to
+`--safe-mode --tools "" --disallowedTools mcp__* --strict-mcp-config
+--no-session-persistence --max-turns 1 --permission-mode default`, with any
+session, resume, fork, effort, tool and MCP-config flags dropped first. No
+native tool (Bash, Edit, Write, ...) and no MCP tool is selectable, except
+that an explicit native-tool cap supplied by OpenClaw is applied last and is
+honoured as named (a side question capped to `Read` gets `--tools Read`), and
+`bypassPermissions` from `tools.exec.mode: full` does not carry over. This
+holds on every supported gateway, with or without host-owned `exec`. Before
+the unreleased fix the pool ignored the side-question mode, so a side question
+kept Claude Code's native tools under the operator's permission mode (#142).
 
 ## Legacy issue: idle backend eviction on OpenClaw ≤ 2026.7.1
 

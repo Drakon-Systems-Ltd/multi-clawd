@@ -28,6 +28,15 @@
  * host is not `node` and the run carries no exact cap, so exact caps and older
  * gateways (2026.8.x has no such field) never see it. Same port discipline:
  * the denial step below mirrors the bundled one byte-for-byte.
+ *
+ * Side-questions (#142). The pool declares `sideQuestionToolMode: "disabled"`
+ * and core trusts it: no empty cap is injected for a side-question, and a
+ * `disableTools` side run is accepted on this selectable backend. The bundled
+ * resolver honours the declaration with `resolveClaudeCliSideQuestionExecutionArgs`
+ * (identical on 2026.8.1 and 2026.11.1): strip session / resume / fork / effort /
+ * tool / MCP-config flags and append a fixed tool-free, single-turn,
+ * non-persistent tail under the default permission mode. Ported below and run
+ * in the bundled order: host-owned denial, side-question projection, exact cap.
  */
 
 /** The bundled backend's host-owned set on OpenClaw 2026.10.10 and 2026.11.1 (`extensions/anthropic/cli-backend.ts`). */
@@ -50,6 +59,12 @@ const DISABLE_SLASH_COMMANDS_ARG = "--disable-slash-commands";
 const NO_CHROME_ARG = "--no-chrome";
 const STRICT_MCP_CONFIG_ARG = "--strict-mcp-config";
 const DENY_MCP_TOOLS_VALUE = "mcp__*";
+const PERMISSION_MODE_ARG = "--permission-mode";
+const SAFE_MODE_ARG = "--safe-mode";
+const BARE_ARG = "--bare";
+const EFFORT_ARG = "--effort";
+const MAX_TURNS_ARG = "--max-turns";
+const NO_SESSION_PERSISTENCE_ARG = "--no-session-persistence";
 
 /** Mirrors core's CLAUDE_RESTRICTED_SETTINGS byte-for-byte (key order matters for the guard tests). */
 export const RESTRICTED_SETTINGS = JSON.stringify({
@@ -218,23 +233,109 @@ export function resolveHostOwnedExecutionArgs(
   ];
 }
 
+/** Core `CLAUDE_SIDE_QUESTION_VARIADIC_VALUE_ARGS`. */
+const SIDE_QUESTION_VARIADIC_VALUE_ARGS = new Set([
+  ALLOWED_TOOLS_ARG,
+  "--allowed-tools",
+  DISALLOWED_TOOLS_ARG,
+  "--disallowed-tools",
+  TOOLS_ARG,
+  "--mcp-config",
+]);
+
+/** Core `CLAUDE_SIDE_QUESTION_VALUE_ARGS`. */
+const SIDE_QUESTION_VALUE_ARGS = new Set([
+  PERMISSION_MODE_ARG,
+  "--session-id",
+  "--resume",
+  "--resume-session-at",
+  "-r",
+  MAX_TURNS_ARG,
+]);
+
+/** Core `CLAUDE_SIDE_QUESTION_BARE_ARGS`. */
+const SIDE_QUESTION_BARE_ARGS = new Set([
+  "--continue",
+  "-c",
+  "--fork-session",
+  BARE_ARG,
+  SAFE_MODE_ARG,
+  STRICT_MCP_CONFIG_ARG,
+  NO_SESSION_PERSISTENCE_ARG,
+]);
+
 /**
- * Backend hook body, in the bundled order: host-owned denial first, exact cap
- * second. A chat turn on a gateway that routes `exec` through OpenClaw
+ * Port of core `stripClaudeEffortArgs`: drops `--effort` (and its value, when
+ * the next arg is a non-blank non-flag) and every `--effort=...`.
+ */
+function stripEffortArgs(args: readonly string[]): string[] {
+  const normalized: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? "";
+    if (arg === EFFORT_ARG) {
+      const maybeValue = args[i + 1];
+      if (typeof maybeValue === "string" && maybeValue.trim().length > 0 && !maybeValue.startsWith("-")) i += 1;
+      continue;
+    }
+    if (arg.startsWith(`${EFFORT_ARG}=`)) continue;
+    normalized.push(arg);
+  }
+  return normalized;
+}
+
+/**
+ * Port of core `resolveClaudeCliSideQuestionExecutionArgs`. Drops every flag a
+ * side-question must not inherit (session / resume / fork / effort / tool /
+ * MCP config / turn limit / permission mode) and appends, in this order:
+ * `--safe-mode --tools "" --disallowedTools mcp__* --strict-mcp-config
+ * --no-session-persistence --max-turns 1 --permission-mode default`. No native
+ * tool is selectable and no MCP tool is reachable, so any host-owned Bash
+ * denial before it is subsumed (and, as in core, its denial list replaced).
+ */
+export function resolveSideQuestionExecutionArgs(baseArgs: readonly string[]): string[] {
+  return [
+    ...stripClaudeArgs(stripEffortArgs(baseArgs), {
+      bare: SIDE_QUESTION_BARE_ARGS,
+      variadicValue: SIDE_QUESTION_VARIADIC_VALUE_ARGS,
+      value: SIDE_QUESTION_VALUE_ARGS,
+    }),
+    SAFE_MODE_ARG,
+    TOOLS_ARG,
+    "",
+    DISALLOWED_TOOLS_ARG,
+    DENY_MCP_TOOLS_VALUE,
+    STRICT_MCP_CONFIG_ARG,
+    NO_SESSION_PERSISTENCE_ARG,
+    MAX_TURNS_ARG,
+    "1",
+    PERMISSION_MODE_ARG,
+    "default",
+  ];
+}
+
+/**
+ * Backend hook body, in the bundled order: host-owned denial first, then the
+ * side-question projection (`executionMode === "side-question"`), exact cap
+ * last. A chat turn on a gateway that routes `exec` through OpenClaw
  * (2026.10+) loses native Bash and keeps everything else; a chat turn on an
  * older gateway arrives without `hostOwnedTools` and keeps its argv untouched.
  * Runs with an exact `toolAvailability` (cron tool policies, `disableTools`)
  * are rewritten as before; core never pairs them with `hostOwnedTools`, and if
  * it ever did the cap's preserved-denial merge would carry `Bash` exactly as
- * the bundled resolver's does.
+ * the bundled resolver's does. A side-question (`/btw`, setup probes) is made
+ * tool-free on every gateway, whatever the operator argv or exec mode; with a
+ * cap as well, the cap rewrites the projected argv exactly as core's does.
  */
 export function resolvePoolExecutionArgs(ctx: {
   baseArgs: readonly string[];
+  executionMode?: string;
   hostOwnedTools?: readonly string[];
   toolAvailability?: ToolAvailability;
 }): readonly string[] {
   const baseArgs = resolveHostOwnedExecutionArgs(ctx.baseArgs, ctx.hostOwnedTools);
+  const executionArgs =
+    ctx.executionMode === "side-question" ? resolveSideQuestionExecutionArgs(baseArgs) : baseArgs;
   return ctx.toolAvailability
-    ? resolveRestrictedExecutionArgs(baseArgs, ctx.toolAvailability)
-    : baseArgs;
+    ? resolveRestrictedExecutionArgs(executionArgs, ctx.toolAvailability)
+    : executionArgs;
 }
