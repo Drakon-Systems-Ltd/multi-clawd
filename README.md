@@ -218,6 +218,10 @@ claude-cli/claude-fable-5        # main login
       → anthropic/claude-opus-4-8   # only NOW drop a tier
 ```
 
+## Automation compatibility
+
+> OpenClaw 2026.11.2 automation compatibility: the multi-clawd pool does not provide a stored inference account. An automation already bound to a stored account cannot use `clawd/*` as its primary or fallback; changing only the model does not change the recorded account. Creating a pool-based automation can also be refused by upstream account admission. Interactive model availability does not establish automation compatibility. Do not create placeholder credentials to bypass this check. Native-runtime and configured-auth paths have different admission rules; this is not a claim that every automation is interactive-only.
+
 ## What you get
 
 - 🦞 **Extra claws** — every account registers as a real CLI backend
