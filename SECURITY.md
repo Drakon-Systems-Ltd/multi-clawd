@@ -49,7 +49,7 @@ credit you (unless you'd rather we didn't), and note it in the CHANGELOG.
   remove them is not applied a second time. Pending files hold the same
   fields as journal lines and nothing else. They are not bounded on their
   own: they accumulate until a launch takes the lock. Readers count pending
-  events, with one exception: if the journal changes during all three of a
+  events, with one exception: if the journal is replaced during all three of a
   reader's attempts, it returns the last journal alone, which can omit events
   that are still pending. Readers apply the journal's bound to what they
   return.

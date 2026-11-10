@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HISTORY_FOLD_MAX, HISTORY_MAX_BYTES, HISTORY_MAX_EVENTS, historyFile, parseHistorySince, readHistory, recordHistory, renderHistory } from "../src/history.js";
-import { acquireShimLock } from "../src/shim-lock.js";
+import { acquireShimLock, shimLockFile } from "../src/shim-lock.js";
 import { cleanShimEnv } from "./shim-env.js";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
@@ -17,7 +17,6 @@ const event = (accountId = "claw1") => ({ at: at(), kind: "served" as const, acc
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const pendingIn = (dir: string) => readdirSync(dir).filter((name) => name.startsWith("history.jsonl.pending-")).sort();
 const pendingId = (name: string) => name.slice(-36);
-const lockOf = (file: string) => `${file}.lock`;
 const waitFor = async (path: string) => {
   const deadline = Date.now() + 10_000;
   while (!existsSync(path) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -416,7 +415,7 @@ describe("issue #70 account history", () => {
 
     expect(await interruptedWriter(dir)(state, mode)).toEqual({ code: null, signal: "SIGKILL" });
     expect(pendingIn(dir)).toHaveLength(pendingLeft);
-    expect(existsSync(lockOf(file))).toBe(true);
+    expect(existsSync(shimLockFile(file))).toBe(true);
     if (journalHasFold) {
       // Killed after its replace: the journal holds everything it folded and
       // names both files, including the one it did get to remove.
@@ -436,7 +435,7 @@ describe("issue #70 account history", () => {
     expect(journalOf(file).events).toHaveLength(expected.length + 1);
     expect(readHistory(file).filter((e) => e.accountId === "claw2").map((e) => e.modelId)).toEqual(["parked-one", "parked-two"]);
     expect(pendingIn(dir)).toEqual([]);
-    expect(existsSync(lockOf(file))).toBe(false);
+    expect(existsSync(shimLockFile(file))).toBe(false);
     recordHistory(state, event("claw1"));
     expect(accounts()).toEqual([...expected, "claw1", "claw1"]);
   }, 15_000);
@@ -453,9 +452,9 @@ describe("issue #70 account history", () => {
     const exit = interruptedWriter(dir)(state, "hold-after-journal-read");
     // The child now holds the lock, has read the journal and is held there.
     expect(await waitFor(`${file}.held-1`)).toBe(true);
-    expect(existsSync(lockOf(file))).toBe(true);
+    expect(existsSync(shimLockFile(file))).toBe(true);
     // Another writer treats the lock as expired, takes it, commits and releases.
-    unlinkSync(lockOf(file));
+    unlinkSync(shimLockFile(file));
     recordHistory(state, event("claw4"));
     expect(journalOf(file).events.map((l) => l.accountId)).toEqual(["claw1", "claw2", "claw4"]);
     expect(pendingIn(dir)).toEqual([]);
@@ -487,7 +486,7 @@ describe("issue #70 account history", () => {
     const exit = interruptedWriter(dir)(state, "hold-at-lock-and-journal");
     expect(await waitFor(`${file}.held-1`)).toBe(true);
     // Another writer treats the lock as expired, takes it and keeps it.
-    unlinkSync(lockOf(file));
+    unlinkSync(shimLockFile(file));
     const other = acquireShimLock(file);
     expect(other).toBeDefined();
     writeFileSync(`${file}.resume-1`, "");
@@ -606,6 +605,35 @@ describe("issue #70 account history", () => {
     expect(busy).toEqual(readHistory(file));
   }, 30_000);
 
+  // Equal bytes are not an unchanged journal. With a full journal of
+  // identical events, a fold of a parked event followed by enough identical
+  // writes trims that event out again and leaves the journal byte for byte
+  // as the reader first saw it. The reader's cached copy of the parked file
+  // must not be added to it: that would bring back what the cap trimmed.
+  test("a reader does not take a journal replaced with the same bytes for one that did not change", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-same-bytes-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    const same = { at: new Date(Date.now() - 60_000).toISOString(), kind: "served" as const, accountId: "claw1", modelId: "same" };
+    for (let i = 0; i < HISTORY_MAX_EVENTS; i++) recordHistory(state, same);
+    const full = readFileSync(file, "utf8");
+    park(dir, Date.now() - 1000, 0, { ...same, accountId: "claw2", modelId: "parked" });
+    expect(readHistory(file).filter((e) => e.modelId === "parked")).toHaveLength(1);
+
+    let attempts = 0;
+    const view = readHistory(file, { afterPending: () => {
+      if (attempts++ > 0) return;
+      // The first write folds the parked event; the rest push it out.
+      for (let i = 0; i < HISTORY_MAX_EVENTS; i++) recordHistory(state, same);
+      expect(readFileSync(file, "utf8")).toBe(full);
+      expect(pendingIn(dir)).toEqual([]);
+    } });
+    expect(attempts).toBe(2);
+    expect(view.filter((e) => e.modelId === "parked")).toEqual([]);
+    expect(view).toEqual(readHistory(file));
+    expect(view).toHaveLength(HISTORY_MAX_EVENTS);
+  }, 30_000);
+
   // Pending names sort by park time, which is not event time: a writer that
   // stamped its event first can lose a longer race and park later. Readers
   // and the fold order parked events by their own timestamp; events with the
@@ -653,7 +681,9 @@ describe("issue #70 account history", () => {
   // The 500-event / 64 KiB bound has to hold for what a reader gets back, not
   // only for the journal file: placement and `explain --history` read parked
   // events too, and a long lock hold can park any number of them. A locked
-  // write folds a bounded share, oldest first, and removes only what it read.
+  // write folds a bounded share, oldest first, and removes only files that a
+  // committed receipt names: the ones it read and folded, and leftovers an
+  // earlier write named, which it does not read again.
   test("the read view stays inside the journal bound however many events are parked, and a backlog drains without loss", () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-history-parked-cap-"));
     const state = join(dir, "claw1.json");
@@ -763,7 +793,7 @@ describe("issue #70 account history", () => {
     } finally { chmodSync(file, 0o600); }
     expect(readFileSync(file, "utf8")).toBe(before);
     expect(pendingIn(dir)).toHaveLength(1);
-    expect(existsSync(lockOf(file))).toBe(false);
+    expect(existsSync(shimLockFile(file))).toBe(false);
     expect(readHistory(file).map((e) => e.modelId)).toEqual(["kept0", "kept1", "kept2", "during"]);
     recordHistory(state, { ...event("claw1"), modelId: "after" });
     expect(pendingIn(dir)).toEqual([]);
