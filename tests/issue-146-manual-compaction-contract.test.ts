@@ -8,21 +8,25 @@
  * bundled `claude-cli` backend declares the public `manualCompaction`
  * contract and runs Claude Code's native `/compact` as a control operation.
  *
- * This suite pins the facts and fixes nothing:
+ * What this suite is: a STATIC shape pin of the host gate, plus the two
+ * declarations the gate reads. It does not call the host's compaction
+ * function; the refusal itself was measured separately by running that
+ * function in-process (reports/compat-audit/2026-11-10-openclaw-2026.11.2.md).
+ * It fixes nothing.
  *
- *  1. Host evidence, read by shape from the installed OpenClaw dist (point
+ *  1. Host gate, read from the installed OpenClaw dist (point
  *     MULTI_CLAWD_OPENCLAW_DIST at another `openclaw/dist` to audit a
- *     different release): the refusal gate exists and is keyed on the two
- *     backend fields. This is STATIC evidence about the host; the audit
- *     report records the separate in-process run of the host's own function.
+ *     different release). One function-local match: the ownership early
+ *     return, the read of `backend.manualCompaction`, and the failure return
+ *     carrying the refusal text, consecutively. If upstream reorders or
+ *     reroutes any of the three, the match fails.
  *
- *  2. The bundled backend of the installed OpenClaw, when it declares the
- *     contract, has the three members the public type requires. Releases
- *     whose bundled backend predates the contract are reported, not failed.
+ *  2. The bundled backend of that same OpenClaw must declare the contract
+ *     (it does on every supported release, 2026.8.1 included). A missing
+ *     builder or a missing declaration fails; nothing is skipped.
  *
- *  3. Our backend today: owns compaction, declares no manual compaction. The
- *     last test fails on purpose once #159 lands; update it then to assert
- *     the mirrored contract instead.
+ *  3. Our backend's declaration today. The last test fails on purpose once
+ *     #159 lands; update it then to assert the mirrored contract instead.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -38,14 +42,31 @@ function openclawDist(): string {
 }
 
 const REFUSAL_TEXT = "owns compaction but does not support manual compaction.";
+
 /**
- * `if (!backend?.ownsNativeCompaction) return;` then `if (!manualCompaction) return ...`.
- * 2026.8.1 returns the failure object inline; 2026.10+ builds it with a helper.
+ * The three consecutive statements of core's `compactNativeCliSession`:
+ *
+ *   if (!backend?.ownsNativeCompaction) return;
+ *   const manualCompaction = backend.manualCompaction;
+ *   if (!manualCompaction) return <failure carrying the refusal text>;
+ *
+ * 2026.8.1 returns the failure object inline; 2026.10+ builds it with
+ * `buildCompactionFailureResult(`. Only whitespace may sit between them.
  */
-const OWNERSHIP_GATE = /if \(!backend\?\.ownsNativeCompaction\) return;/;
-const MANUAL_GATE = /if \(!manualCompaction\) return (?:buildCompactionFailureResult\(|\{\s*ok: false,)/;
+const REFUSAL_GATE = new RegExp(
+  [
+    String.raw`if \(!backend\?\.ownsNativeCompaction\) return;`,
+    String.raw`const manualCompaction = backend\.manualCompaction;`,
+    String.raw`if \(!manualCompaction\) return (?:buildCompactionFailureResult\(|\{\s*ok: false,\s*compacted: false,\s*reason: )` +
+      "`" +
+      String.raw`CLI backend "\$\{runtime\}" owns compaction but does not support manual compaction\.` +
+      "`",
+  ].join(String.raw`\s*`),
+);
 
 const dist = openclawDist();
+const hostVersion = (JSON.parse(readFileSync(join(dist, "..", "package.json"), "utf8")) as { version: string }).version;
+
 /** Only the compaction chunks: reading the whole dist is slow enough to time out on a cold cache. */
 const compactionSources = readdirSync(dist)
   .filter((f) => /^compact-.*\.m?js$/.test(f))
@@ -58,35 +79,26 @@ type ManualCompaction = {
   validateOutput?: (raw: string) => { ok: boolean; reason?: string };
 };
 
-async function bundledManualCompaction(): Promise<ManualCompaction | undefined> {
-  const mod = (await import(pathToFileURL(join(dist, "extensions", "anthropic", "cli-backend.js")).href)) as {
-    buildAnthropicCliBackend?: () => { ownsNativeCompaction?: boolean; manualCompaction?: ManualCompaction };
-  };
-  return mod.buildAnthropicCliBackend?.().manualCompaction;
-}
-
-describe(`OpenClaw refuses manual compaction without the manualCompaction contract (${dist})`, () => {
-  test("the installed dist carries the refusal, gated on ownsNativeCompaction then manualCompaction", () => {
+describe(`OpenClaw ${hostVersion} gates manual compaction on the manualCompaction contract (${dist})`, () => {
+  test("the installed dist returns the refusal when a backend owns compaction and declares no manualCompaction", () => {
     expect(compactionSources.length).toBeGreaterThan(0);
-    for (const src of compactionSources) {
-      expect(src).toMatch(OWNERSHIP_GATE);
-      expect(src).toMatch(MANUAL_GATE);
-      expect(src.indexOf("ownsNativeCompaction) return;")).toBeLessThan(src.indexOf(REFUSAL_TEXT));
-    }
+    for (const src of compactionSources) expect(src).toMatch(REFUSAL_GATE);
   });
 
-  test("the bundled claude-cli backend, where it declares the contract, runs native /compact and checks for a boundary", async () => {
-    const manual = await bundledManualCompaction();
-    if (!manual) {
-      // Older bundled backends (the pinned build SDK) predate the declaration.
-      expect(manual).toBeUndefined();
-      return;
-    }
-    expect(manual.buildPrompt?.()).toBe("/compact");
-    expect(manual.buildPrompt?.("  keep the plan  ")).toBe("/compact keep the plan");
-    expect(manual.input).toBe("arg");
-    expect(manual.validateOutput?.('{"type":"system","subtype":"compact_boundary"}')).toEqual({ ok: true });
-    expect(manual.validateOutput?.('{"type":"result","subtype":"success"}').ok).toBe(false);
+  test("the bundled claude-cli backend declares the contract: native /compact, validated by a compact boundary", async () => {
+    const mod = (await import(pathToFileURL(join(dist, "extensions", "anthropic", "cli-backend.js")).href)) as {
+      buildAnthropicCliBackend?: () => { ownsNativeCompaction?: boolean; manualCompaction?: ManualCompaction };
+    };
+    expect(typeof mod.buildAnthropicCliBackend).toBe("function");
+    const bundled = mod.buildAnthropicCliBackend!();
+    const manual = bundled.manualCompaction;
+    expect(bundled.ownsNativeCompaction).toBe(true);
+    expect(manual, `OpenClaw ${hostVersion} bundled backend no longer declares manualCompaction`).toBeDefined();
+    expect(manual!.buildPrompt?.()).toBe("/compact");
+    expect(manual!.buildPrompt?.("  keep the plan  ")).toBe("/compact keep the plan");
+    expect(manual!.input).toBe("arg");
+    expect(manual!.validateOutput?.('{"type":"system","subtype":"compact_boundary"}')).toEqual({ ok: true });
+    expect(manual!.validateOutput?.('{"type":"result","subtype":"success"}').ok).toBe(false);
   });
 });
 
@@ -96,11 +108,11 @@ describe("the pool's compaction declaration today (#159)", () => {
     manualCompaction?: unknown;
   };
 
-  test("the pool owns native compaction, which is the half of the pair that routes /compact to the gate", () => {
+  test("the pool declares ownsNativeCompaction, the first field the host gate reads", () => {
     expect(backend.ownsNativeCompaction).toBe(true);
   });
 
-  test("the pool declares no manualCompaction, so core refuses a manual /compact (flips when #159 is implemented)", () => {
+  test("the pool declares no manualCompaction, the second field the host gate reads (flips when #159 is implemented)", () => {
     expect(backend.manualCompaction).toBeUndefined();
   });
 });
