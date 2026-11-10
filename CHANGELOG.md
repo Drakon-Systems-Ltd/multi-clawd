@@ -7,6 +7,9 @@ versioning from v1.0.
 ## [Unreleased]
 
 ### Fixed
+- **Fable 5.2 advertised with its real limits.** `claude-fable-5-2` (released 9 Nov 2026) was not in the known-model table, so the pool exposed it with the conservative unknown-id default (200k context, 64k output) and OpenClaw compacted far too early. The table now carries its 1M context and 128k output, matching the bundled Anthropic catalog.
+
+### Fixed
 - **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
   bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
   declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal

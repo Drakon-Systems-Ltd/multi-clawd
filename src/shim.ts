@@ -285,6 +285,26 @@ const STDIN_REPLAY_CAP_BYTES = 8 * 1024 * 1024;
 let stdinReplay: Buffer[] = [];
 let stdinReplayBytes = 0;
 let stdinEnded = false;
+
+/**
+ * Forward into the CURRENT child's stdin, skipping a sink that is already
+ * destroyed or ended. A child that gave up stdin before reading its prompt (a
+ * refusal, a failed --resume, a startup crash) is not a reason to stop the
+ * shim (#147): when a retry is armed the chunk is already in stdinReplay for
+ * the sibling, and otherwise the child's own exit is about to be handed on.
+ */
+function writeChildStdin(chunk: Buffer): void {
+  const sink = child.stdin;
+  if (sink.destroyed || sink.writableEnded) return;
+  sink.write(chunk);
+}
+
+function endChildStdin(): void {
+  const sink = child.stdin;
+  if (sink.destroyed || sink.writableEnded) return;
+  sink.end();
+}
+
 if (retryArmed) {
   process.stdin.on("data", (chunk: Buffer) => {
     if (retryArmed) {
@@ -299,13 +319,16 @@ if (retryArmed) {
         stdinReplay.push(chunk);
       }
     }
-    child.stdin.write(chunk);
+    writeChildStdin(chunk);
   });
   process.stdin.on("end", () => {
     stdinEnded = true;
-    child.stdin.end();
+    endChildStdin();
   });
 } else {
+  // pipe() unpipes on a destination error and only rethrows when the
+  // destination has no other 'error' listener; attachChildHandlers gives it
+  // one, so a child that closed its stdin early ends the pump, not the shim.
   process.stdin.pipe(child.stdin);
 }
 
@@ -620,8 +643,8 @@ function attemptRetry(cause: RetryCause): boolean {
   child.once("spawn", () => recordHistory(stateFile, { at: new Date().toISOString(),
     kind: "served", accountId, modelId: effectiveModelId() }));
   attachChildHandlers();
-  for (const chunk of stdinReplay) child.stdin.write(chunk);
-  if (stdinEnded) child.stdin.end();
+  for (const chunk of stdinReplay) writeChildStdin(chunk);
+  if (stdinEnded) endChildStdin();
   stdinReplay = [];
   return true;
 }
@@ -756,6 +779,21 @@ function attachChildHandlers(): void {
   });
   child.on("close", onChildClose);
   child.on("error", onChildError);
+  child.stdin.on("error", onChildStdinError);
+}
+
+/**
+ * `child.stdin` had no error listener, so the EPIPE from forwarding into a
+ * child that had already closed its read end became an unhandled 'error'
+ * event and killed the shim — before onChildClose could hop the turn to a
+ * sibling or hand the child's exit code downstream (#147). A broken or
+ * finished pipe is ordinary lifecycle and says nothing the child's own close
+ * will not; anything else is reported once and is still never fatal.
+ */
+function onChildStdinError(err: Error): void {
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_WRITE_AFTER_END") return;
+  process.stderr.write(`[multi-clawd shim] stdin to claude failed: ${String(err)}\n`);
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
