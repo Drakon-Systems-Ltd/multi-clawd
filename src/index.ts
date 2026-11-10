@@ -90,6 +90,7 @@ import { resolveSecretRefValues } from "openclaw/plugin-sdk/secret-ref-runtime";
 import { POOL_HOST_OWNED_TOOLS, resolvePoolExecutionArgs } from "./tool-cap.js";
 import { RETRY_ROSTER_ENV } from "./retry-plan.js";
 import { SESSION_DIRS_ENV } from "./session-handover.js";
+import { CLAUDE_MANUAL_COMPACTION, declaresManualCompaction } from "./manual-compaction.js";
 import {
   addAlert,
   alertKeysWithPrefix,
@@ -1017,6 +1018,7 @@ export function buildBackend(
   account: AccountConfig,
   execMode?: string,
   launch: BackendLaunch = { kind: "legacy", shimPath: SHIM_PATH },
+  options: { pooled?: boolean } = {},
 ): CliBackendPlugin {
   const verified = launch.kind === "verified";
   // Plain claude argv: the shim (when one runs) is the transport's business.
@@ -1063,6 +1065,15 @@ export function buildBackend(
     // bundled tool-free, single-turn tail (#142).
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
+    // Manual `/compact` (#159). The host runs this control operation as a
+    // plain `config.command` process, never through the execute transport,
+    // and prepares it without a session id. That is exactly right for one
+    // account on a verified launch (claude itself, on the only login that can
+    // hold the session) and wrong for the pool, which must stay undeclared so
+    // the host keeps refusing. See manual-compaction.ts.
+    ...(declaresManualCompaction({ launch, pooled: options.pooled === true })
+      ? { manualCompaction: CLAUDE_MANUAL_COMPACTION }
+      : {}),
     config: {
       // Verified: the real claude executable, so the host can bind it as a
       // setup owner; agent turns still run through the shim via the execute
@@ -1669,7 +1680,7 @@ export function registerPoolBackend(
     );
   }
   const stickyFile = join(multiClawdStateDir(), `pool-${poolId}.sticky.json`);
-  const backend = buildBackend(poolAccount, execMode, deps?.launch);
+  const backend = buildBackend(poolAccount, execMode, deps?.launch, { pooled: true });
   const { launch, transport } = launchTransports.get(backend)!;
   backend.prepareExecution = async (ctx: CliBackendPrepareExecutionContext) => {
     if (members.length === 0) throw new Error(`[multi-clawd] pool "${poolId}": every member has pool.accounts[].disabled: true`);

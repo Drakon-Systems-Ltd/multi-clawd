@@ -245,6 +245,60 @@ transcript's length before spawning and gives the sibling exactly that many
 bytes. The refusing account's copy keeps the stray tail until the next launch
 there, when the ordinary handover replaces it with the sibling's newer copy.
 
+### Manual compaction (#159)
+
+The backends declare `ownsNativeCompaction`, so OpenClaw refuses a manual
+`/compact` unless the backend also declares the public `manualCompaction`
+contract. What the host does with a declaration, read from the dist of
+2026.8.1, 2026.10.10, 2026.11.1 and 2026.11.2 (`compactNativeCliSession`,
+`resolveCliExecutionTarget`):
+
+1. `prepareExecution` runs with the ordinary context: no session id, no
+   control-operation marker.
+2. `resolveExecutionArgs` runs on `resumeArgs`; from 2026.11.2 its context
+   carries `controlOperation: "compact"`.
+3. The host spawns `config.command` itself with `/compact [instructions]` as
+   an argument. A prepared `execute` transport is not used for this run.
+4. Success requires `validateOutput` to find a compact boundary.
+
+Decision:
+
+- **Single-account backend, verified launch: declared.** The command is
+  claude, the env is that account's login, and the session can only be in
+  that account's config dir. Our shim does not run, so the request is not a
+  served launch and writes no state. The contract is a port of the bundled
+  one, and the resolver drops the exec-policy permission mode for the control
+  run, as the bundled resolver does on 2026.11.2.
+- **Pooled backend: not declared; the host's refusal stands.** The handover
+  above is what makes a pooled session resumable on the launched account, and
+  it lives in the shim, which step 3 skips; step 1 cannot replace it without
+  the session id. After a rotation the selected account can hold a stale
+  prefix of the conversation. Claude would compact that prefix and report
+  success, the rewritten file would become the newest copy, and the next
+  handover would install it over the real conversation.
+  `tests/issue-159-manual-compaction.test.ts` reproduces this with a fixture
+  claude.
+- **Single-account backend, legacy launch: not declared.** The host would run
+  the shim, which records every spawn as a served launch.
+
+Options weighed for the pool:
+- **Carry the session from `prepareExecution` to `resolveExecutionArgs` in
+  module state and hand over there** — neither hook is given the session, and
+  the ordering between them is not part of the contract.
+- **Hand over every session on every prepare** — unbounded work per launch,
+  and wrong under session affinity, which picks the account inside the
+  transport.
+- **Detect the bad run in `validateOutput`** — it runs after claude has
+  already rewritten the transcript.
+- **Move, not copy, on handover so no stale prefix exists** — deleting
+  transcripts to make a later refusal safe trades one data-loss risk for
+  another, and the control run would still fail whenever selection and the
+  session's holder differ.
+
+What would unblock the pool: the host passing the resumed session id to
+`prepareExecution` for a control operation, or routing control operations
+through the prepared `execute` transport.
+
 ### Native accounts
 
 `"native": true` pools the machine's main login without copying credentials.

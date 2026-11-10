@@ -222,6 +222,10 @@ claude-cli/claude-fable-5        # main login
 
 > OpenClaw 2026.11.2 automation compatibility: the multi-clawd pool does not provide a stored inference account. An automation already bound to a stored account cannot use `clawd/*` as its primary or fallback; changing only the model does not change the recorded account. Creating a pool-based automation can also be refused by upstream account admission. Interactive model availability does not establish automation compatibility. Do not create placeholder credentials to bypass this check. Native-runtime and configured-auth paths have different admission rules; this is not a claim that every automation is interactive-only.
 
+## Manual `/compact` compatibility
+
+> A manual `/compact` works on a single-account backend (`claw<N>/*`) and is refused on the pooled backend (`clawd/*`). On the pool, OpenClaw answers `CLI backend "clawd" owns compaction but does not support manual compaction.` and starts nothing; the conversation is untouched. This is deliberate. OpenClaw (2026.8.1 through 2026.11.2) runs a manual compaction as a bare `claude` process, outside the plugin's launch path, and does not tell the plugin which session it is compacting. One account can only hold the session in its own config dir, so that is safe. The pool cannot check which account holds the newest copy of a pooled conversation, and compacting an older copy after a rotation would replace the newer turns. Claude Code's automatic compaction inside a turn is unaffected on every backend. Single-account support needs the verified launch (OpenClaw ≥ 2026.8.1 with `claude` on the gateway's `PATH`; the gateway log line `[multi-clawd] launch mode: verified` confirms it). The compaction request itself uses that account's quota and is not recorded in the pool's usage history. Tested with a fixture `claude` and the host's documented launch rules; not yet exercised from a chat surface against a running gateway. Tracked in #159.
+
 ## What you get
 
 - 🦞 **Extra claws** — every account registers as a real CLI backend

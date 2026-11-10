@@ -314,6 +314,22 @@ export function resolveSideQuestionExecutionArgs(baseArgs: readonly string[]): s
 }
 
 /**
+ * A native control operation (manual `/compact`, #159) does not run under the
+ * exec-policy permission mode. OpenClaw 2026.11.2 marks the run with
+ * `controlOperation: "compact"`, and the bundled resolver then leaves out the
+ * `--permission-mode bypassPermissions` it injects for a full-exec turn
+ * (`normalizeClaudeBackendArgs`). The pool's equivalent injection is baked
+ * into its argv (`permissionModeArgs`), so it is dropped here instead. Hosts
+ * before 2026.11.2 pass no marker; the bundled backend keeps the mode there
+ * too, and so does this.
+ */
+export function resolveControlOperationArgs(baseArgs: readonly string[], controlOperation?: string): readonly string[] {
+  return controlOperation === "compact"
+    ? stripClaudeArgs(baseArgs, { value: new Set([PERMISSION_MODE_ARG]) })
+    : baseArgs;
+}
+
+/**
  * Backend hook body, in the bundled order: host-owned denial first, then the
  * side-question projection (`executionMode === "side-question"`), exact cap
  * last. A chat turn on a gateway that routes `exec` through OpenClaw
@@ -325,14 +341,16 @@ export function resolveSideQuestionExecutionArgs(baseArgs: readonly string[]): s
  * the bundled resolver's does. A side-question (`/btw`, setup probes) is made
  * tool-free on every gateway, whatever the operator argv or exec mode; with a
  * cap as well, the cap rewrites the projected argv exactly as core's does.
+ * A control operation first drops the exec-policy permission mode (above).
  */
 export function resolvePoolExecutionArgs(ctx: {
   baseArgs: readonly string[];
   executionMode?: string;
   hostOwnedTools?: readonly string[];
   toolAvailability?: ToolAvailability;
+  controlOperation?: string;
 }): readonly string[] {
-  const baseArgs = resolveHostOwnedExecutionArgs(ctx.baseArgs, ctx.hostOwnedTools);
+  const baseArgs = resolveHostOwnedExecutionArgs(resolveControlOperationArgs(ctx.baseArgs, ctx.controlOperation), ctx.hostOwnedTools);
   const executionArgs =
     ctx.executionMode === "side-question" ? resolveSideQuestionExecutionArgs(baseArgs) : baseArgs;
   return ctx.toolAvailability
