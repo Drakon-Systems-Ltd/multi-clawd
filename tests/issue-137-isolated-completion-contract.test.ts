@@ -22,12 +22,12 @@
  *     enforce; core then fails closed ("does not support isolated completion;
  *     OpenClaw did not start the run") and no process is started.
  *
- *  3. The exact projection gap behind that refusal: the bundled backend pairs
- *     its flag with a side-question argv projection that the pool's resolver
- *     does not apply. The bundled resolver runs in a child process because
- *     two OpenClaw releases cannot share one Node process. The pinned diff is
- *     the next implementation scope (see reports/compat-audit/
- *     2026-11-08-isolated-completion-contract.md).
+ *  3. Projection parity: the bundled backend pairs its flag with a
+ *     side-question argv projection; since #142 the pool's resolver applies
+ *     the same one (the gap this section originally pinned is closed). The
+ *     bundled resolver runs in a child process because two OpenClaw releases
+ *     cannot share one Node process. Still no isolatedCompletionEnforced
+ *     (see reports/compat-audit/2026-11-08-isolated-completion-contract.md).
  */
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -174,7 +174,7 @@ function bundledExecutionArgs(ctx: Record<string, unknown>): string[] | undefine
   return parsed ?? undefined;
 }
 
-describe(`the projection gap behind the refusal, against the bundled resolver (${dist})`, () => {
+describe(`the side-question projection matches the bundled resolver (closed by #142) (${dist})`, () => {
   const backend = buildBackend({ id: "claw1", configDir: "/tmp/claw1-login" }, undefined, verifiedLaunch());
   const baseArgs = [...(backend.config.args ?? [])];
   const sideQuestion = (toolAvailability?: { native: string[]; openClaw: string[] }) => ({
@@ -187,7 +187,7 @@ describe(`the projection gap behind the refusal, against the bundled resolver ($
     ...(toolAvailability ? { toolAvailability } : {}),
   });
 
-  test("an isolated completion's argv lacks exactly the bundled session-persistence and turn bounds", () => {
+  test("an isolated completion's argv carries every bundled session-persistence and turn bound", () => {
     const bundled = bundledExecutionArgs(sideQuestion({ native: [], openClaw: [] }));
     if (!bundled) return; // dist does not export the resolver: nothing to compare against
     const pool = [...(backend.resolveExecutionArgs!(sideQuestion({ native: [], openClaw: [] })) ?? [])];
@@ -197,30 +197,18 @@ describe(`the projection gap behind the refusal, against the bundled resolver ($
       expect(bundled).toContain(shared);
     }
     const missing = bundled.filter((arg) => !pool.includes(arg));
-    expect(missing).toEqual(["--no-session-persistence", "--max-turns", "1", "mcp__*"]);
-    // The only pool-side extra is the operator denial list the bundled projection drops;
-    // with `--tools ""` present on both sides it widens nothing.
-    const extra = pool.filter((arg) => !bundled.includes(arg));
-    expect(extra).toEqual(["Bash(run_in_background:true),CronCreate,Monitor,ScheduleWakeup,mcp__*"]);
+    expect(missing).toEqual([]);
+    // Full parity: the projection now yields the bundled argv exactly.
+    expect(pool.filter((arg) => !bundled.includes(arg))).toEqual([]);
   });
 
-  test("an ordinary side-question keeps the pool's full argv while the bundled backend disables tools", () => {
+  test("an ordinary side-question is projected tool-free, matching the bundled backend", () => {
     const bundled = bundledExecutionArgs(sideQuestion());
     if (!bundled) return;
     const pool = [...(backend.resolveExecutionArgs!(sideQuestion()) ?? [])];
-    expect(pool).toEqual(baseArgs);
-    const missing = bundled.filter((arg) => !pool.includes(arg));
-    expect(missing).toEqual([
-      "--safe-mode",
-      "--tools",
-      "",
-      "mcp__*",
-      "--strict-mcp-config",
-      "--no-session-persistence",
-      "--max-turns",
-      "1",
-      "--permission-mode",
-      "default",
-    ]);
+    // #142: the pool no longer hands a side question the full agent argv.
+    expect(pool).not.toEqual(baseArgs);
+    expect(pool).not.toContain("--allowedTools");
+    expect(bundled.filter((arg) => !pool.includes(arg))).toEqual([]);
   });
 });
