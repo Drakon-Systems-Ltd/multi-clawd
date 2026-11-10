@@ -9,14 +9,16 @@ const readJson = (path: string) => JSON.parse(readFileSync(join(ROOT, path), "ut
  * Committed-lockfile guard for the dev tree's security floors (#157).
  *
  * Every package here arrives through the pinned `openclaw` devDependency. This
- * package does not bundle any of them: it declares no `dependencies`, and a
- * host's own OpenClaw install resolves its own copies, which the overrides
+ * package declares none of them as a production or npm-bundled dependency, and
+ * a host's own OpenClaw install resolves its own copies, which the overrides
  * below do not reach (npm applies `overrides` from the root project only).
  *
  * Each floor is the first release carrying the fixes for the advisories
  * Dependabot reported against the committed lockfile. The guard reads the
- * lockfile's `node_modules/<name>` records, hoisted and nested; it does not
- * inspect an installed tree, an aliased install or a bundled copy.
+ * lockfile only: every record that is one of these packages by install path
+ * (hoisted or nested), by recorded `name` (how npm writes an alias) or by
+ * registry tarball URL. It does not inspect an installed tree, the built
+ * `dist/` or the packed tarball, so it says nothing about a vendored copy.
  *
  * `minimatch` has no floor on purpose: patched releases start at 11.0.1, a new
  * major, and `openclaw` pins 10.x exactly. It stays open in #157.
@@ -34,6 +36,11 @@ const FLOORS: Record<string, string> = {
  */
 const OVERRIDDEN = ["undici", "@modelcontextprotocol/sdk"];
 
+/**
+ * Plain `x.y.z` only. The lockfile pins published registry releases of these
+ * packages; a prerelease or build-metadata version throws, so it fails the
+ * guard and gets looked at instead of being ordered by guesswork.
+ */
 function parse(version: string): number[] {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
   if (!match) throw new Error(`not a plain release version: ${version}`);
@@ -51,8 +58,15 @@ function atLeast(version: string, floor: string): boolean {
 
 function lockedVersions(lock: any, name: string): Array<{ path: string; version: string }> {
   const suffix = `node_modules/${name}`;
+  const tarballPrefix = `https://registry.npmjs.org/${name}/-/`;
   return Object.entries<any>(lock.packages)
-    .filter(([path]) => path === suffix || path.endsWith(`/${suffix}`))
+    .filter(
+      ([path, entry]) =>
+        path === suffix ||
+        path.endsWith(`/${suffix}`) ||
+        entry.name === name ||
+        (typeof entry.resolved === "string" && entry.resolved.startsWith(tarballPrefix)),
+    )
     .map(([path, entry]) => ({ path, version: entry.version }));
 }
 
@@ -94,7 +108,7 @@ describe("dev-tree security floors (#157)", () => {
     }
   });
 
-  test("these packages are development-only in the lockfile and not bundled", () => {
+  test("these packages are development-only lockfile records, not declared production or npm-bundled dependencies", () => {
     expect(pkg.dependencies).toBeUndefined();
     expect(pkg.bundleDependencies ?? pkg.bundledDependencies).toBeUndefined();
     expect(pkg.files).not.toContain("package-lock.json");
