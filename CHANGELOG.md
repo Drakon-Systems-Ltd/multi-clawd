@@ -13,8 +13,8 @@ versioning from v1.0.
   the same `/compact [instructions]` prompt, passed as an argument, accepted
   only when the output carries a `compact_boundary` system event or
   `compact_result: "success"`. OpenClaw runs the request as `claude` itself on
-  that account's login; the shim is not involved, so nothing is recorded as a
-  served launch and no health state changes. From OpenClaw 2026.11.2 the
+  that account's login; the shim is not involved, so multi-clawd records no
+  served launch and writes none of its own state. From OpenClaw 2026.11.2 the
   request no longer carries the `--permission-mode bypassPermissions` that
   full exec mode adds, as on the bundled backend. Covered by a fixture
   `claude` driven by the host's launch rules; a live `/compact` against a

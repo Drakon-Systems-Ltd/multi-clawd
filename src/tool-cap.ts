@@ -322,8 +322,11 @@ export function resolveSideQuestionExecutionArgs(baseArgs: readonly string[]): s
  * (`normalizeClaudeBackendArgs`); a mode the operator set explicitly is kept.
  * The pool's equivalent injection is baked into its argv
  * (`permissionModeArgs`), so exactly that pair is dropped here, in either
- * spelling, and any other mode is left alone. Hosts before 2026.11.2 pass no
- * marker; the bundled backend keeps the mode there too, and so does this.
+ * spelling, and any other mode is left alone. This matches by value, not by
+ * origin: the backend's argv is fixed (`BASE_ARGS` plus `permissionModeArgs`)
+ * and takes no operator-supplied flags, so the injection is the only source of
+ * `bypassPermissions` in it. Hosts before 2026.11.2 pass no marker; the
+ * bundled backend keeps the mode there too, and so does this.
  */
 export function resolveControlOperationArgs(baseArgs: readonly string[], controlOperation?: string): readonly string[] {
   if (controlOperation !== "compact") return baseArgs;

@@ -24,7 +24,14 @@
  *     transport is NOT used for this run. On a verified launch the command is
  *     claude, so the shim does not run; on a legacy launch the command is node
  *     with the shim as its first argument, so it does.
- *  4. A zero exit counts only if `validateOutput` finds the compact boundary.
+ *  4. A zero exit counts only if `validateOutput` confirms it: a
+ *     `compact_boundary` system event or `compact_result: "success"`.
+ *
+ * The run is queued like any other launch of that backend. The host derives
+ * one lane key per OpenClaw session for a backend with a live-session mode
+ * (`resolveCliRunQueueKey`: backend id plus a digest of agent id, session id
+ * and session key) and runs both launch targets inside that lane, so a turn
+ * and a compaction of the same session do not overlap.
  *
  * That is correct for a single-account backend on a verified launch: the
  * command is claude, the prepared env is that one account's login, and the

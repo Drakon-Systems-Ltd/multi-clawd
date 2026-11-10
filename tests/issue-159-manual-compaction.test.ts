@@ -441,6 +441,21 @@ describe("argv for the control run mirrors the bundled resolver (#159)", () => {
     expect(resolvePoolExecutionArgs({ baseArgs: RESUME(BYPASS), executionMode: "agent" })).toEqual(RESUME(BYPASS));
   });
 
+  test("the backend's argv has one source of bypassPermissions, the exec-policy injection: no operator flag can be confused with it", () => {
+    const legacy: BackendLaunch = { kind: "legacy", shimPath: "/x/shim.js" };
+    const full = buildBackend({ id: "claw1", configDir: "/tmp/claw1-login" }, "full", legacy).config;
+    for (const argv of [full.args!, full.resumeArgs!]) {
+      expect(argv.filter((a) => a === "--permission-mode")).toHaveLength(1);
+      expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
+      expect(argv.some((a) => a.startsWith("--permission-mode="))).toBe(false);
+    }
+    // Every other exec mode, and none at all, adds no permission flag.
+    for (const mode of [undefined, "allowlist", "deny", "ask"]) {
+      const config = buildBackend({ id: "claw1", configDir: "/tmp/claw1-login" }, mode, legacy).config;
+      expect([...config.args!, ...config.resumeArgs!].join(" ")).not.toMatch(/permission-mode|bypassPermissions/);
+    }
+  });
+
   test("an older host (2026.8.1 to 2026.11.1) passes no marker, so the run keeps the argv the bundled backend also keeps there", () => {
     const backend = buildBackend({ id: "claw1", configDir: "/tmp/claw1-login" }, "full", { kind: "legacy", shimPath: "/x/shim.js" });
     const resume = backend.config.resumeArgs!.slice(1);

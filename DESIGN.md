@@ -261,7 +261,13 @@ contract. What the host does with a declaration (`compactNativeCliSession`,
    an argument. A prepared `execute` transport is not used for this run. On
    a verified launch that command is claude; on a legacy launch it is node
    with the shim.
-4. Success requires `validateOutput` to find a compact boundary.
+4. Success requires `validateOutput` to confirm it: a `compact_boundary`
+   system event or `compact_result: "success"`.
+
+The run is queued in the same lane as that session's turns: the host computes
+one lane key per OpenClaw session for a backend with a live-session mode
+(`resolveCliRunQueueKey`) and both launch targets run inside it, so a turn and
+a compaction of one session do not overlap.
 
 Decision:
 
@@ -269,9 +275,10 @@ Decision:
   claude, the env is that account's login, and the session can only be in
   that account's config dir. Our shim does not run, so the request is not a
   served launch and writes no state. The contract is a port of the bundled
-  one, and the resolver drops the injected `bypassPermissions` mode for the
-  control run (any other mode is kept), as the bundled resolver does on
-  2026.11.2. Established with a fixture claude driven by the rules above, not
+  one, and the resolver drops the `bypassPermissions` mode for the control
+  run (any other mode is kept), as the bundled resolver declines to inject it
+  on 2026.11.2. The match is by value: the backend's argv takes no
+  operator-supplied flags, so the exec-policy injection is its only source. Established with a fixture claude driven by the rules above, not
   by a live `/compact` on a running gateway.
 - **Pooled backend: not declared; the host's refusal stands.** The handover
   above is what makes a pooled session resumable on the launched account, and
