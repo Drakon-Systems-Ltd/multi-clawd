@@ -31,8 +31,9 @@
  *     builder or a missing declaration fails; nothing is skipped.
  *
  *  3. Our backends as the plugin entry registers them: both single-account
- *     backends and the pooled one. The last test fails on purpose once #159
- *     lands; update it then to assert the mirrored contract instead.
+ *     backends and the pooled one. The three "declares no manualCompaction"
+ *     cases fail on purpose once #159 lands; update them then to assert the
+ *     mirrored contract instead.
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -191,7 +192,8 @@ describe("our backends' compaction declarations today, as the plugin entry regis
     try {
       plugin.register(api as never);
     } finally {
-      process.env.PATH = savedPath;
+      if (savedPath === undefined) delete process.env.PATH;
+      else process.env.PATH = savedPath;
       if (savedBin !== undefined) process.env.MULTI_CLAWD_CLAUDE_BIN = savedBin;
     }
     return backends;
