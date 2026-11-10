@@ -14,10 +14,15 @@ interface ShimLockTestHooks {
   close?: (fd: number) => void;
 }
 
+/** Where the lock for `file` lives. Its bytes name the current holder. */
+export function shimLockFile(file: string): string {
+  return `${file}.lock`;
+}
+
 /** Undefined means fail open: callers must avoid replacing protected snapshots. */
 export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockTestHooks = {}): (() => void) | undefined {
   if (!file || !isAbsolute(file)) return undefined;
-  const lock = `${file}.lock`;
+  const lock = shimLockFile(file);
   const deadline = Date.now() + waitMs;
   try { mkdirSync(dirname(lock), { recursive: true }); } catch { return undefined; }
   do {

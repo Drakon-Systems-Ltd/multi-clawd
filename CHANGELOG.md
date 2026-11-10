@@ -8,8 +8,28 @@ versioning from v1.0.
 
 ### Fixed
 - **Fable 5.2 advertised with its real limits.** `claude-fable-5-2` (released 9 Nov 2026) was not in the known-model table, so the pool exposed it with the conservative unknown-id default (200k context, 64k output) and OpenClaw compacted far too early. The table now carries its 1M context and 128k output, matching the bundled Anthropic catalog.
-
-### Fixed
+- **Account history could silently lose an event when two launches wrote at
+  once.** A shim that could not take the `history.jsonl` lock within its
+  150 ms wait returned without recording, so `explain --history` and the
+  `spread` strategy's served-launch count could be one short while every
+  process exited 0. Such a writer now parks its event in a `0600`
+  `history.jsonl.pending-*` file, and a later writer that takes the lock folds
+  parked events into the journal (up to 100 files per write, oldest first)
+  and removes the files it folded. The journal replace carries a receipt of
+  the files it folded, so a writer that stops before removing them, at any
+  point, does not cause an event to be counted twice or brought back after
+  the cap has trimmed it. Readers include parked events, order them by their
+  own timestamps, and stay inside the journal's 500-event / 64 KiB bound
+  however many are parked. A journal or pending file that cannot be read is
+  left alone, never replaced or removed. Pending files are not bounded on
+  their own: they accumulate until a writer takes the lock. History still
+  never fails a launch; the wait for the lock is still at most 150 ms, and the
+  file work after it is synchronous. (#145)
+- History validation no longer coerces values. An event whose `kind` or
+  `reason` is not exactly one of the allowed strings is rejected, and the
+  timestamp is stored in canonical ISO form, so a value that merely prints
+  as an allowed one, or a date string carrying free text, cannot reach
+  `history.jsonl`. (#145)
 - **OpenClaw >= 2026.10.10 (incl. 2026.11.1): shell commands on the pool
   bypassed OpenClaw's exec approval policy.** The bundled `claude-cli` backend
   declares `hostOwnedTools: ["exec", "process"]`, so core routes a normal
