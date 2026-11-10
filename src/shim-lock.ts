@@ -14,10 +14,22 @@ interface ShimLockTestHooks {
   close?: (fd: number) => void;
 }
 
+/** Where the lock for `file` lives. Its bytes name the current holder. */
+export function shimLockFile(file: string): string {
+  return `${file}.lock`;
+}
+
+/**
+ * Releases the lock. `held()` says whether the lock file is still the one
+ * this acquisition created: same inode, same bytes. The lock is a lease, so
+ * a holder that was paused past it can find that it no longer is.
+ */
+export type ShimLockRelease = (() => void) & { held: () => boolean };
+
 /** Undefined means fail open: callers must avoid replacing protected snapshots. */
-export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockTestHooks = {}): (() => void) | undefined {
+export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockTestHooks = {}): ShimLockRelease | undefined {
   if (!file || !isAbsolute(file)) return undefined;
-  const lock = `${file}.lock`;
+  const lock = shimLockFile(file);
   const deadline = Date.now() + waitMs;
   try { mkdirSync(dirname(lock), { recursive: true }); } catch { return undefined; }
   do {
@@ -40,11 +52,15 @@ export function acquireShimLock(file: string, waitMs = WAIT_MS, hooks: ShimLockT
         try { closeSync(fd); } catch { /* best effort */ }
         return undefined;
       }
-      const release = () => {
-        try {
-          if (statSync(lock).ino === ino && readFileSync(lock).equals(content)) unlinkSync(lock);
-        } catch { /* best effort */ }
+      const held = () => {
+        try { return statSync(lock).ino === ino && readFileSync(lock).equals(content); }
+        catch { return false; }
       };
+      const release: ShimLockRelease = Object.assign(() => {
+        try {
+          if (held()) unlinkSync(lock);
+        } catch { /* best effort */ }
+      }, { held });
       try { (hooks.close ?? closeSync)(fd); } catch {
         try { closeSync(fd); } catch { /* best effort */ }
         // The caller still owns the lock and can release it in its finally block.

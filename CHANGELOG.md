@@ -6,6 +6,42 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **Account history could silently lose an event when two launches wrote at
+  once.** A shim that could not take the `history.jsonl` lock within its
+  150 ms wait returned without recording, so `explain --history` and the
+  `spread` strategy's served-launch count could be one short while every
+  process exited 0. Such a writer now parks its event in a `0600`
+  `history.jsonl.pending-*` file, and a later writer that takes the lock folds
+  parked events into the journal (up to 100 files per write, oldest first)
+  and removes the files it folded. The journal replace carries a receipt of
+  the files it folded, so a writer that stops before removing them, at any
+  point, does not cause an event to be counted twice or brought back after
+  the cap has trimmed it. Readers include parked events, with one exception:
+  if the journal is replaced during all three of a reader's attempts, it returns
+  the last journal alone, which can omit events that are still parked.
+  Readers order what they return by event timestamp and stay inside the
+  journal's 500-event / 64 KiB bound however many are parked. A journal that
+  cannot be read is never replaced,
+  and a pending file that cannot be read is not folded; a pending file is
+  removed only by a writer that took the lock and found it still its own
+  after its write, and only once a committed write names the file as folded:
+  the writer that first named it had read it, and a later writer removes such
+  a leftover without reading it again. A writer that finds its lock was taken
+  over while it was paused backs off: before its write it parks its event
+  instead, and after it, it leaves the removals to a later writer (this
+  narrows the lock's lease window, tracked in #151; it does not close it: a
+  pause between the check and the write, or between the check and a removal,
+  is not caught). Pending files are not bounded on their own:
+  they accumulate until a writer takes the lock. History still never fails a
+  launch; the wait for the lock is still at most 150 ms, and the file work
+  after it is synchronous. (#145)
+- History validation no longer coerces values. An event whose `kind` or
+  `reason` is not exactly one of the allowed strings is rejected, and the
+  timestamp is stored in canonical ISO form, so a value that merely prints
+  as an allowed one, or a date string carrying free text, cannot reach
+  `history.jsonl`. (#145)
+
 ## [2.6.6] - 2026-11-10
 
 ### Fixed
