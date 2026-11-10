@@ -76,6 +76,12 @@
     "typescript": "^5.9.0",
     "vitest": "^4.1.10"
   },
+  "overrides": {
+    "openclaw@2026.8.1": {
+      "undici": "8.12.2",
+      "@modelcontextprotocol/sdk": "1.32.0"
+    }
+  },
   "homepage": "https://github.com/Drakon-Systems-Ltd/multi-clawd#readme",
   "bugs": {
     "url": "https://github.com/Drakon-Systems-Ltd/multi-clawd/issues"
