@@ -6,7 +6,7 @@ versioning from v1.0.
 
 ## [Unreleased]
 
-## [2.6.7] - 2026-11-10
+## [2.7.0] - 2026-11-11
 
 ### Added
 - **Manual `/compact` on single-account backends (#159).** A `claw<N>/*`

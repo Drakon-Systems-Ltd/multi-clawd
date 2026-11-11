@@ -465,7 +465,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.6.7/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.7.0/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -966,8 +966,8 @@ native tool (Bash, Edit, Write, ...) and no MCP tool is selectable, except
 that an explicit native-tool cap supplied by OpenClaw is applied last and is
 honoured as named (a side question capped to `Read` gets `--tools Read`), and
 `bypassPermissions` from `tools.exec.mode: full` does not carry over. From
-v2.6.7 this holds on every supported gateway, with or without host-owned
-`exec`. Before v2.6.7 the pool ignored the side-question mode, so a side
+v2.7.0 this holds on every supported gateway, with or without host-owned
+`exec`. Before v2.7.0 the pool ignored the side-question mode, so a side
 question kept Claude Code's native tools under the operator's permission
 mode. Published v2.6.6 did not include this projection; it was still tracked
 in #142.
