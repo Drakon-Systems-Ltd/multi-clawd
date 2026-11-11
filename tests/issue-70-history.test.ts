@@ -223,9 +223,11 @@ describe("issue #70 account history", () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-history-parked-allowlist-"));
     const state = join(dir, "claw1.json");
     const file = historyFile(state);
-    const leaky = { ...event("claw2"), modelId: "claude-fable-5-1", id: "caller-chosen-id", folded: ["caller-chosen-id"],
+    // Pinned to a timestamp whose seconds.millis ("12.527") would collide with a
+    // naive "12.5" cost pattern (#161); the secrets regex below must not match it.
+    const leaky = { ...event("claw2"), at: "2026-11-10T12:39:12.527Z", modelId: "claude-fable-5-1", id: "caller-chosen-id", folded: ["caller-chosen-id"],
       prompt: "private prompt", token: "secret token", credential: "secret credential",
-      env: { PRIVATE_ENV_VALUE: "sensitive env" }, cost: 12.5 } as Parameters<typeof recordHistory>[1];
+      env: { PRIVATE_ENV_VALUE: "sensitive env" }, cost: 98765.4321 } as Parameters<typeof recordHistory>[1];
     const release = acquireShimLock(file);
     expect(release).toBeDefined();
     try {
@@ -238,7 +240,7 @@ describe("issue #70 account history", () => {
     expect(Object.keys(JSON.parse(parkedRaw) as object).sort()).toEqual(["accountId", "at", "kind", "modelId"]);
     // The file's id is the writer's own random one, never a caller's value.
     expect(pendingId(name)).toMatch(UUID);
-    const secrets = /private prompt|secret token|secret credential|sensitive env|PRIVATE_ENV_VALUE|caller-chosen-id|12\.5/;
+    const secrets = /private prompt|secret token|secret credential|sensitive env|PRIVATE_ENV_VALUE|caller-chosen-id|98765\.4321/;
     expect(parkedRaw).not.toMatch(secrets);
     expect(name).not.toMatch(secrets);
     expect(readHistory(file)).toEqual([{ at: leaky.at, kind: "served", accountId: "claw2", modelId: "claude-fable-5-1" }]);
