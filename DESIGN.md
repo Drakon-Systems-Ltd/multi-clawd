@@ -245,6 +245,72 @@ transcript's length before spawning and gives the sibling exactly that many
 bytes. The refusing account's copy keeps the stray tail until the next launch
 there, when the ordinary handover replaces it with the sibling's newer copy.
 
+### Manual compaction (#159)
+
+The backends declare `ownsNativeCompaction`, so OpenClaw refuses a manual
+`/compact` unless the backend also declares the public `manualCompaction`
+contract. What the host does with a declaration (`compactNativeCliSession`,
+`resolveCliExecutionTarget`; read from the dist of 2026.8.1, 2026.11.1 and
+2026.11.2 and from the tagged source of 2026.10.10):
+
+1. `prepareExecution` runs with the ordinary context: no session id, no
+   control-operation marker.
+2. `resolveExecutionArgs` runs on `resumeArgs`; from 2026.11.2 its context
+   carries `controlOperation: "compact"`.
+3. The host spawns `config.command` itself with `/compact [instructions]` as
+   an argument. A prepared `execute` transport is not used for this run. On
+   a verified launch that command is claude; on a legacy launch it is node
+   with the shim.
+4. Success requires `validateOutput` to confirm it: a `compact_boundary`
+   system event or `compact_result: "success"`.
+
+The run is queued in the same lane as that session's turns: the host computes
+one lane key per OpenClaw session for a backend with a live-session mode
+(`resolveCliRunQueueKey`) and both launch targets run inside it, so a turn and
+a compaction of one session do not overlap.
+
+Decision:
+
+- **Single-account backend, verified launch: declared.** The command is
+  claude, the env is that account's login, and the session can only be in
+  that account's config dir. Our shim does not run, so the request is not a
+  served launch and writes no state. The contract is a port of the bundled
+  one, and the resolver drops the `bypassPermissions` mode for the control
+  run (any other mode is kept), as the bundled resolver declines to inject it
+  on 2026.11.2. The match is by value: the backend's argv takes no
+  operator-supplied flags, so the exec-policy injection is its only source. Established with a fixture claude driven by the rules above, not
+  by a live `/compact` on a running gateway.
+- **Pooled backend: not declared; the host's refusal stands.** The handover
+  above is what makes a pooled session resumable on the launched account, and
+  it lives in the shim, which step 3 skips; step 1 cannot replace it without
+  the session id. After a rotation the selected account can hold a stale
+  prefix of the conversation. Claude would compact that prefix and report
+  success, the rewritten file would become the newest copy, and the next
+  handover would install it over the real conversation.
+  `tests/issue-159-manual-compaction.test.ts` reproduces the rewrite and the
+  planner's choice with a fixture claude; it is a reproduction from the rules
+  above, not a run of the host.
+- **Single-account backend, legacy launch: not declared.** The host would run
+  the shim, which records every spawn as a served launch.
+
+Options weighed for the pool:
+- **Carry the session from `prepareExecution` to `resolveExecutionArgs` in
+  module state and hand over there** — neither hook is given the session, and
+  the ordering between them is not part of the contract.
+- **Hand over every session on every prepare** — unbounded work per launch,
+  and wrong under session affinity, which picks the account inside the
+  transport.
+- **Detect the bad run in `validateOutput`** — it runs after claude has
+  already rewritten the transcript.
+- **Move, not copy, on handover so no stale prefix exists** — deleting
+  transcripts to make a later refusal safe trades one data-loss risk for
+  another, and the control run would still fail whenever selection and the
+  session's holder differ.
+
+What would unblock the pool: the host passing the resumed session id to
+`prepareExecution` for a control operation, or routing control operations
+through the prepared `execute` transport.
+
 ### Native accounts
 
 `"native": true` pools the machine's main login without copying credentials.

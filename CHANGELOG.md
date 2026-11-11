@@ -8,6 +8,31 @@ versioning from v1.0.
 
 ## [2.6.7] - 2026-11-10
 
+### Added
+- **Manual `/compact` on single-account backends (#159).** A `claw<N>/*`
+  backend on the verified launch now declares OpenClaw's public
+  `manualCompaction` contract, a port of the bundled `claude-cli` backend's:
+  the same `/compact [instructions]` prompt, passed as an argument, accepted
+  only when the output carries a `compact_boundary` system event or
+  `compact_result: "success"`. OpenClaw runs the request as `claude` itself on
+  that account's login; the shim is not involved, so multi-clawd records no
+  served launch and writes none of its own state. From OpenClaw 2026.11.2 the
+  request no longer carries the `--permission-mode bypassPermissions` that
+  full exec mode adds, as on the bundled backend. Covered by a fixture
+  `claude` driven by the host's launch rules; a live `/compact` against a
+  running gateway has not been exercised.
+
+### Known limitations
+- **Manual `/compact` stays refused on the pooled backend (#159).** `clawd/*`
+  still answers `CLI backend "clawd" owns compaction but does not support
+  manual compaction.` OpenClaw runs a manual compaction outside the plugin's
+  launch path and without naming the session, so the pool cannot make sure it
+  lands on the account holding the newest copy of the conversation; after a
+  rotation it could compact an older copy and replace the newer turns. The
+  refusal starts nothing and changes nothing. Automatic compaction inside a
+  turn is unaffected. A legacy-launch single-account backend is refused as
+  well. See README, "Manual `/compact` compatibility".
+
 ### Fixed
 - **Account history could silently lose an event when two launches wrote at
   once.** A shim that could not take the `history.jsonl` lock within its
@@ -57,6 +82,15 @@ versioning from v1.0.
   against the 2026.8.1 and 2026.11.1 sources and through the shim on a
   fixture; not observed live. Published v2.6.6 did not include this
   projection. (#142)
+
+- The history bound now keeps the newest events of the merged history. Readers
+  and writers apply the 500-event / 64 KiB bound to journal, parked and new
+  events merged in event-time order (ties keep journal, then park order,
+  then the new event), not to the journal followed by parked events. A
+  backlog of older parked events could otherwise hide a just-recorded launch
+  from `explain --history` and the `spread` count, and draining it could
+  permanently trim newer launches in favour of older parked ones. The
+  journal file is now kept in event order. (#145)
 
 ### Repository
 - **Dev-tree dependency floors only.** The development install resolves

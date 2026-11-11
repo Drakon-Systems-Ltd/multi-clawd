@@ -14,7 +14,7 @@
  * and the bundled prompt builder and output validator, are called). Nothing
  * here calls the host's compaction function; the refusal itself was measured
  * separately by running that function in-process
- * (reports/compat-audit/2026-11-10-openclaw-2026.11.2.md). It fixes nothing.
+ * (reports/compat-audit/2026-11-10-openclaw-2026.11.2.md).
  *
  *  1. Host gate, read from the installed OpenClaw dist (point
  *     MULTI_CLAWD_OPENCLAW_DIST at another `openclaw/dist` to audit a
@@ -31,11 +31,13 @@
  *     builder or a missing declaration fails; nothing is skipped.
  *
  *  3. Our backends as the plugin entry registers them: both single-account
- *     backends and the pooled one. The three "declares no manualCompaction"
- *     cases fail on purpose once #159 lands; update them then to assert the
- *     mirrored contract instead.
+ *     backends and the pooled one, on a legacy and on a verified launch.
+ *     #159 settled what each declares: a verified single-account backend
+ *     declares `manualCompaction`; the pooled backend and every legacy-launch
+ *     backend do not, so the host gate in (1) is still what answers them. The
+ *     reasons and the behaviour are in tests/issue-159-manual-compaction.test.ts.
  */
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -159,13 +161,14 @@ describe(`OpenClaw ${hostVersion} gates manual compaction on the manualCompactio
   });
 });
 
-describe("our backends' compaction declarations today, as the plugin entry registers them (#159)", () => {
+describe("our backends' compaction declarations, as the plugin entry registers them (#159)", () => {
   const scratch = mkdtempSync(join(tmpdir(), "mc-146-"));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-  type Declared = { id: string; ownsNativeCompaction?: boolean; manualCompaction?: unknown };
+  type Declared = { id: string; ownsNativeCompaction?: boolean; manualCompaction?: ManualCompaction };
 
-  function registered(): Declared[] {
+  /** Register through the entry. `verified`: a host that runs execute transports, with a `claude` on PATH. */
+  function registered(mode: "legacy" | "verified"): Declared[] {
     const backends: Declared[] = [];
     const pluginConfig = {
       accounts: [
@@ -175,19 +178,29 @@ describe("our backends' compaction declarations today, as the plugin entry regis
       pool: { id: "clawd", accounts: ["claw1", "claw2"] },
     };
     const config = { plugins: { entries: { "multi-clawd": { config: pluginConfig } } } };
+    const bin = join(scratch, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "claude"), "#!/bin/sh\n");
+    chmodSync(join(bin, "claude"), 0o755);
     const api = {
       config,
       pluginConfig,
-      runtime: { config: { current: () => config } },
+      runtime: {
+        config: { current: () => config },
+        ...(mode === "verified"
+          ? { agent: { runCommandFromIngress: () => {} }, hooks: { dispatchHookAgentTurn: () => {} } }
+          : {}),
+      },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       registerCliBackend: (backend: Declared) => backends.push(backend),
       registerProvider: () => {},
       on: () => {},
     };
-    // Pin the launch mode to "no claude on PATH" so every machine registers the same way.
+    // Pin the launch mode so every machine registers the same way: no claude
+    // on PATH is a legacy launch, a fixture claude on PATH is a verified one.
     const savedPath = process.env.PATH;
     const savedBin = process.env.MULTI_CLAWD_CLAUDE_BIN;
-    process.env.PATH = "";
+    process.env.PATH = mode === "verified" ? bin : "";
     delete process.env.MULTI_CLAWD_CLAUDE_BIN;
     try {
       plugin.register(api as never);
@@ -199,22 +212,41 @@ describe("our backends' compaction declarations today, as the plugin entry regis
     return backends;
   }
 
-  const backends = registered();
+  const legacy = registered("legacy");
+  const verified = registered("verified");
 
-  test("the entry registers both single-account backends and the pooled backend", () => {
+  test.each([
+    ["legacy", legacy],
+    ["verified", verified],
+  ] as const)("the entry registers both single-account backends and the pooled backend (%s launch)", (_mode, backends) => {
     expect(backends.map((b) => b.id)).toEqual(["claw1", "claw2", "clawd"]);
+    for (const backend of backends) expect(backend.ownsNativeCompaction, backend.id).toBe(true);
   });
 
-  test.each(["claw1", "claw2", "clawd"])("%s declares ownsNativeCompaction, the first field the host gate reads", (id) => {
-    expect(backends.find((b) => b.id === id)?.ownsNativeCompaction).toBe(true);
+  test("the verified registration really is verified: the command is the fixture claude, not node", () => {
+    const claw1 = verified.find((b) => b.id === "claw1") as unknown as { config: { command: string } };
+    expect(claw1.config.command).toBe(join(scratch, "bin", "claude"));
   });
 
-  test.each(["claw1", "claw2", "clawd"])(
-    "%s declares no manualCompaction, the second field the host gate reads (flips when #159 is implemented)",
-    (id) => {
-      const backend = backends.find((b) => b.id === id);
-      expect(backend).toBeDefined();
-      expect(backend!.manualCompaction).toBeUndefined();
-    },
-  );
+  test.each(["claw1", "claw2"])("%s on a verified launch declares manualCompaction: native /compact, validated by a compact boundary", (id) => {
+    const manual = verified.find((b) => b.id === id)?.manualCompaction;
+    expect(manual).toBeDefined();
+    expect(manual!.buildPrompt?.()).toBe("/compact");
+    expect(manual!.buildPrompt?.("  keep the plan  ")).toBe("/compact keep the plan");
+    expect(manual!.input).toBe("arg");
+    expect(manual!.validateOutput?.('{"type":"system","subtype":"compact_boundary"}')).toEqual({ ok: true });
+    expect(manual!.validateOutput?.('{"type":"result","subtype":"success"}').ok).toBe(false);
+  });
+
+  test.each(["legacy", "verified"] as const)("the pooled backend declares no manualCompaction on a %s launch, so the host gate still refuses it", (mode) => {
+    const pool = (mode === "legacy" ? legacy : verified).find((b) => b.id === "clawd");
+    expect(pool).toBeDefined();
+    expect(pool!.manualCompaction).toBeUndefined();
+  });
+
+  test.each(["claw1", "claw2"])("%s on a legacy launch declares no manualCompaction", (id) => {
+    const backend = legacy.find((b) => b.id === id);
+    expect(backend).toBeDefined();
+    expect(backend!.manualCompaction).toBeUndefined();
+  });
 });

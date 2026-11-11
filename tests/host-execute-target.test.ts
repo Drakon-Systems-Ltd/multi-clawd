@@ -80,6 +80,16 @@ describe.skipIf(!host.resolve)(`OpenClaw's own execution-target selection (${hos
     expect(host.resolve!({ backendId: "claw1", params: {}, execute: prepared?.execute }).kind).toBe("process");
   });
 
+  test("a manual-compaction control run ignores the prepared transport: the host runs the process itself (#159)", async () => {
+    const prepared = await verifiedBackend().prepareExecution!({
+      workspaceDir: "/tmp", provider: "claw1", modelId: "claude-fable-5", executionMode: "agent",
+    });
+    expect(typeof prepared?.execute).toBe("function");
+    const target = host.resolve!({ backendId: "claw1", params: { controlOperation: "compact" }, execute: prepared?.execute });
+    expect(target.kind).toBe("process");
+    expect(target.execute).toBeUndefined();
+  });
+
   test("the runner dispatches a plugin target to the transport", () => {
     expect(host.runnerSource).toBeDefined();
     expect(host.runnerSource).toMatch(/executionTarget\.kind === "plugin"\) result = await executePluginOwnedProcess\(/);
