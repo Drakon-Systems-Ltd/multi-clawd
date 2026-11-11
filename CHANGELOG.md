@@ -66,6 +66,14 @@ versioning from v1.0.
   timestamp is stored in canonical ISO form, so a value that merely prints
   as an allowed one, or a date string carrying free text, cannot reach
   `history.jsonl`. (#145)
+- The history bound now keeps the newest events of the merged history. Readers
+  and writers apply the 500-event / 64 KiB bound to journal, parked and new
+  events merged in event-time order (ties keep journal, then park order,
+  then the new event), not to the journal followed by parked events. A
+  backlog of older parked events could otherwise hide a just-recorded launch
+  from `explain --history` and the `spread` count, and draining it could
+  permanently trim newer launches in favour of older parked ones. The
+  journal file is now kept in event order. (#145)
 
 ## [2.6.6] - 2026-11-10
 

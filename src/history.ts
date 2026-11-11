@@ -52,6 +52,13 @@ function valid(raw: unknown): HistoryEvent | undefined {
 
 const line = (event: HistoryEvent): string => JSON.stringify(event) + "\n";
 const byEventTime = (a: HistoryEvent, b: HistoryEvent): number => Date.parse(a.at) - Date.parse(b.at);
+/**
+ * One stream in event-time order. The sort is stable, so events with the same
+ * timestamp keep the order of the arguments: journal, then parked events in
+ * park order, then a new event. The cap applies to this merge, never to a
+ * concatenation, so an older batch cannot push out newer events.
+ */
+const chronological = (...streams: HistoryEvent[][]): HistoryEvent[] => streams.flat().sort(byEventTime);
 
 /**
  * A journal is event lines plus, after a write that folded pending files, one
@@ -138,7 +145,7 @@ function pendingFiles(file: string): Pending[] {
   });
 }
 
-/** The journal's bound: the newest HISTORY_MAX_EVENTS lines within `maxBytes`. */
+/** The journal's bound: the newest HISTORY_MAX_EVENTS lines within `maxBytes`, given events oldest first. */
 function capped(events: HistoryEvent[], maxBytes: number): HistoryEvent[] {
   const kept = events.slice(-HISTORY_MAX_EVENTS);
   let bytes = kept.reduce((sum, event) => sum + Buffer.byteLength(line(event)), 0);
@@ -194,10 +201,10 @@ export function readHistory(file: string, hooks: ReadHistoryHooks = {}): History
     const journal = parse(after.text ?? "");
     latest = journal.events;
     if (before.text !== after.text || before.identity !== after.identity) continue;
-    const unfolded = parked.filter(({ id }) => !journal.folded.has(id)).flatMap(({ events }) => events).sort(byEventTime);
-    return capped([...journal.events, ...unfolded], HISTORY_MAX_BYTES).sort(byEventTime);
+    const unfolded = parked.filter(({ id }) => !journal.folded.has(id)).flatMap(({ events }) => events);
+    return capped(chronological(journal.events, unfolded), HISTORY_MAX_BYTES);
   }
-  return capped(latest, HISTORY_MAX_BYTES).sort(byEventTime);
+  return capped(chronological(latest), HISTORY_MAX_BYTES);
 }
 
 /**
@@ -272,7 +279,7 @@ export function recordHistory(stateFile: string | undefined, event: HistoryEvent
       consumed.push(candidate);
     }
     const receipt = consumed.length ? JSON.stringify({ folded: consumed.map(({ id }) => id) }) + "\n" : "";
-    const events = capped([...journal.events, ...folded.sort(byEventTime), checked], HISTORY_MAX_BYTES - Buffer.byteLength(receipt));
+    const events = capped(chronological(journal.events, folded, [checked]), HISTORY_MAX_BYTES - Buffer.byteLength(receipt));
     if (!lock.held()) return park();
     publish(file, receipt + events.map(line).join(""));
     if (!lock.held()) return;
