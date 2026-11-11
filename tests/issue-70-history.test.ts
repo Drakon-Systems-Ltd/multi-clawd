@@ -251,10 +251,11 @@ describe("issue #70 account history", () => {
     expect(journalRaw).not.toMatch(secrets);
     expect(journalRaw).not.toContain("foreign-id");
     const journal = journalOf(file);
+    // In event order: both leaky events share the first timestamp; the foreign one was stamped later.
     expect(journal.events.map((l) => Object.keys(l).sort())).toEqual([
       ["accountId", "at", "kind", "modelId"],
-      ["accountId", "at", "kind"],
       ["accountId", "at", "kind", "modelId"],
+      ["accountId", "at", "kind"],
     ]);
     // The receipt names the two files this write consumed, by their random ids, and nothing else.
     expect(journal.receipts).toBe(1);
@@ -753,6 +754,80 @@ describe("issue #70 account history", () => {
     expect(bytes(after)).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
     expect(after.at(-1)?.accountId).toBe(wide(1003));
     expect(after.filter((e) => e.accountId < wide(1000)).at(-1)?.accountId).toBe(wide(399));
+  });
+
+  // The bound keeps the newest events of the chronological merge of journal,
+  // parked and new events. Applying it to journal-then-parked concatenation let
+  // a large backlog of older parked events push newer committed launches out.
+  test("a committed launch stays visible behind a backlog of older parked events larger than the bound", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-merge-read-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    const now = Date.now();
+    const old = now - 2 * 60 * 60 * 1000;
+    for (let i = 0; i < 1000; i++) park(dir, old + i, i, { at: new Date(old + i).toISOString(), kind: "served", accountId: "claw2", modelId: `old${i}` });
+    recordHistory(state, { at: new Date(now).toISOString(), kind: "served", accountId: "claw1", modelId: "own0" });
+    expect(pendingIn(dir)).toHaveLength(1000 - HISTORY_FOLD_MAX);
+    const view = readHistory(file);
+    expect(view).toHaveLength(HISTORY_MAX_EVENTS);
+    expect(view.at(-1)).toEqual({ at: new Date(now).toISOString(), kind: "served", accountId: "claw1", modelId: "own0" });
+    // The 499 newest older events, oldest first.
+    expect(view.slice(0, -1).map((e) => e.modelId)).toEqual(Array.from({ length: 499 }, (_, i) => `old${501 + i}`));
+  });
+
+  test("draining a backlog of older parked events keeps every newer launch, under the event and the byte bound", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-merge-drain-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    const now = Date.now();
+    const old = now - 2 * 60 * 60 * 1000;
+    for (let i = 0; i < 1000; i++) park(dir, old + i, i, { at: new Date(old + i).toISOString(), kind: "served", accountId: "claw2", modelId: `old${i}` });
+    for (let i = 0; i < 10; i++) recordHistory(state, { at: new Date(now + i).toISOString(), kind: "served", accountId: "claw1", modelId: `own${i}` });
+    expect(pendingIn(dir)).toEqual([]);
+    const own = Array.from({ length: 10 }, (_, i) => `own${i}`);
+    const view = readHistory(file);
+    expect(view).toHaveLength(HISTORY_MAX_EVENTS);
+    expect(view.filter((e) => e.accountId === "claw1").map((e) => e.modelId)).toEqual(own);
+    expect(view.slice(-10).map((e) => e.modelId)).toEqual(own);
+    expect(journalOf(file).events.filter((l) => l.accountId === "claw1").map((l) => l.modelId)).toEqual(own);
+
+    // The same under byte pressure: the byte bound trims older events, never the newer launches.
+    const bytesDir = mkdtempSync(join(tmpdir(), "mc-history-merge-drain-bytes-"));
+    const bytesState = join(bytesDir, "claw1.json");
+    const bytesFile = historyFile(bytesState);
+    const wide = (tag: string, i: number) => `${tag}${String(i).padStart(4, "0")}-${"a".repeat(92)}`;
+    const big = (tag: string, ms: number, i: number) => ({ at: new Date(ms).toISOString(), kind: "retry" as const, accountId: wide(tag, i), toAccountId: wide(tag, i), reason: "model_limit" as const });
+    for (let i = 0; i < 400; i++) park(bytesDir, old + i, i, big("old", old + i, i));
+    for (let i = 0; i < 10; i++) recordHistory(bytesState, big("new", now + i, i));
+    expect(pendingIn(bytesDir)).toEqual([]);
+    expect(statSync(bytesFile).size).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
+    const newer = Array.from({ length: 10 }, (_, i) => wide("new", i));
+    const bytesView = readHistory(bytesFile);
+    expect(bytesView.length).toBeLessThan(400);
+    expect(bytesView.slice(-10).map((e) => e.accountId)).toEqual(newer);
+    expect(journalOf(bytesFile).events.filter((l) => String(l.accountId).startsWith("new")).map((l) => l.accountId)).toEqual(newer);
+  });
+
+  test("late parked events take their chronological place under the bound, and the oldest event is the one trimmed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-history-merge-late-"));
+    const state = join(dir, "claw1.json");
+    const file = historyFile(state);
+    const base = Date.now() - 60 * 60 * 1000;
+    const stamp = (offsetMs: number) => new Date(base + offsetMs).toISOString();
+    const j = (i: number) => ({ at: stamp(i * 10), kind: "served" as const, accountId: "claw1", modelId: `j${i}` });
+    // A full journal, as a writer leaves it.
+    writeFileSync(file, Array.from({ length: HISTORY_MAX_EVENTS }, (_, i) => JSON.stringify(j(i)) + "\n").join(""), { mode: 0o600 });
+    // Parked after the journal was written: one stamped between j250 and j251, one older than everything.
+    park(dir, base + 10_000, 0, { at: stamp(2505), kind: "served", accountId: "claw2", modelId: "late" });
+    park(dir, base + 10_001, 0, { at: stamp(-1), kind: "served", accountId: "claw2", modelId: "ancient" });
+    const expected = [...Array.from({ length: 250 }, (_, i) => `j${i + 1}`), "late", ...Array.from({ length: 249 }, (_, i) => `j${i + 251}`)];
+    const view = readHistory(file);
+    expect(view.map((e) => e.modelId)).toEqual(expected);
+    recordHistory(state, { at: stamp(10_000), kind: "served", accountId: "claw1", modelId: "own" });
+    expect(pendingIn(dir)).toEqual([]);
+    // The fold keeps the same newest events, in event order, in the journal as in the view.
+    expect(readHistory(file).map((e) => e.modelId)).toEqual([...expected.slice(1), "own"]);
+    expect(journalOf(file).events.map((l) => l.modelId)).toEqual([...expected.slice(1), "own"]);
   });
 
   // A read that fails is not an empty file. Treating it as one let a fold
