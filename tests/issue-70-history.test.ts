@@ -443,9 +443,8 @@ describe("issue #70 account history", () => {
     expect(accounts()).toEqual([...expected, "claw1", "claw1"]);
   }, 15_000);
 
-  // The lock is a lease. A holder that is held up for longer than the lease
-  // can be replaced while it is still running, and would then replace the
-  // journal from a snapshot taken before the other writer's commit.
+  // External replacement can remove a live holder's lock; the holder must
+  // not write a stale journal from before the replacement's commit.
   test("a holder that lost its lock while paused does not replace the journal with its stale snapshot", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mc-history-stale-holder-"));
     const state = join(dir, "claw1.json");
@@ -456,7 +455,7 @@ describe("issue #70 account history", () => {
     // The child now holds the lock, has read the journal and is held there.
     expect(await waitFor(`${file}.held-1`)).toBe(true);
     expect(existsSync(shimLockFile(file))).toBe(true);
-    // Another writer treats the lock as expired, takes it, commits and releases.
+    // Simulate external replacement (a live holder is never reclaimed by age).
     unlinkSync(shimLockFile(file));
     recordHistory(state, event("claw4"));
     expect(journalOf(file).events.map((l) => l.accountId)).toEqual(["claw1", "claw2", "claw4"]);
@@ -488,7 +487,7 @@ describe("issue #70 account history", () => {
     // its journal read, in whichever order its code reaches them.
     const exit = interruptedWriter(dir)(state, "hold-at-lock-and-journal");
     expect(await waitFor(`${file}.held-1`)).toBe(true);
-    // Another writer treats the lock as expired, takes it and keeps it.
+    // Simulate external replacement while the original holder is still live.
     unlinkSync(shimLockFile(file));
     const other = acquireShimLock(file);
     expect(other).toBeDefined();

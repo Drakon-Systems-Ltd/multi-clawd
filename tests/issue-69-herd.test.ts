@@ -97,7 +97,9 @@ describe("#69 cross-process shim guards", () => {
     const dead = acquireShimLock(target);
     expect(dead).toBeTypeOf("function");
     dead?.();
-    writeFileSync(`${target}.lock`, `${process.pid} ${Date.now() - 60_000}\n`);
+    // Expired and dead: recovered. An expired lock whose holder is still
+    // alive is never taken over (#151, tests/issue-151-live-lock-lease).
+    writeFileSync(`${target}.lock`, `99999999 ${Date.now() - 60_000}\n`);
     const expired = acquireShimLock(target);
     expect(expired).toBeTypeOf("function");
     expired?.();

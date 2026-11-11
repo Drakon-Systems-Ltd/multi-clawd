@@ -240,13 +240,11 @@ export function readHistory(file: string, hooks: ReadHistoryHooks = {}): History
  * writer takes the lock, pending files accumulate without a bound of their
  * own.
  *
- * The lock is a lease: a holder paused past it can be replaced while it is
- * still running. Before the replace and before removing files the holder
- * asks the lock whether it is still the one this acquisition created, and
- * backs off if not. That narrows a stale write to the instant between the
- * check and the rename, and a stale removal to the time between the check
- * and the last removal; it does not close either. A removal made there is
- * still only of a file a committed receipt names.
+ * Live holders are never reclaimed by age (#151), but a lock can still be
+ * replaced externally. Before the replace and before removing files the
+ * holder asks whether it still owns this acquisition, and backs off if not.
+ * That check does not make the check-and-rename or check-and-remove atomic.
+ * A removal is still only of a file a committed receipt names.
  */
 export function recordHistory(stateFile: string | undefined, event: HistoryEvent): void {
   if (!stateFile) return;
