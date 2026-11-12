@@ -106,11 +106,14 @@ describe(`OpenClaw's isolated-completion gate is a private contract (${dist})`, 
     for (const src of runnerSources) expect(src).toMatch(REFUSAL_GATE);
     // 2026.8.1 inlines the error builder into the runner chunk; 2026.10+ imports it
     // from an execution-target chunk, so the operator-facing text is searched dist-wide.
-    const refusalText = readDistSources(dist, /\.m?js$/).filter((src) =>
-      src.includes("does not support isolated completion; OpenClaw did not start the run."),
-    );
+    // Scan the likely chunks first (a few files); only a dist that moved the text
+    // elsewhere pays for the full ~9k-file cold scan, which timed out at 5 s on 2026.11.3.
+    const REFUSAL_TEXT = "does not support isolated completion; OpenClaw did not start the run.";
+    const hasText = (src: string) => src.includes(REFUSAL_TEXT);
+    const likely = readDistSources(dist, /^(prepare|execution-target|isolated-completion|execute).*\.m?js$/).filter(hasText);
+    const refusalText = likely.length > 0 ? likely : readDistSources(dist, /\.m?js$/).filter(hasText);
     expect(refusalText.length).toBeGreaterThan(0);
-  });
+  }, 60_000);
 
   test("core hands the private isolatedCompletion* context to every backend's prepareExecution", () => {
     for (const src of runnerSources) {

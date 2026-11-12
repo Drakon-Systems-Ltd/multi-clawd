@@ -33,21 +33,50 @@ function openclawDist(): string {
   return dirname(require.resolve("openclaw"));
 }
 
-async function loadHostTargetSelection(): Promise<{ resolve?: ResolveTarget; runnerSource?: string; dist: string }> {
+/**
+ * Body of `function executePluginOwnedProcess(...) { ... }` in a chunk, found by
+ * balancing parens (signature) then braces (body). Strings and comments in the
+ * bundled runner are not parsed; the balance only has to hold for this function.
+ */
+function functionBody(src: string, name: string): string | undefined {
+  const start = src.search(new RegExp(`function ${name}\\(`));
+  if (start < 0) return undefined;
+  let i = src.indexOf("(", start);
+  for (let depth = 0; i < src.length; i++) {
+    if (src[i] === "(") depth++;
+    else if (src[i] === ")" && --depth === 0) break;
+  }
+  const open = src.indexOf("{", i);
+  if (open < 0) return undefined;
+  for (let depth = 0, j = open; j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}" && --depth === 0) return src.slice(open, j + 1);
+  }
+  return undefined;
+}
+
+async function loadHostTargetSelection(): Promise<{
+  resolve?: ResolveTarget;
+  runnerSource?: string;
+  dispatchBody?: string;
+  dist: string;
+}> {
   const dist = openclawDist();
   const files = readdirSync(dist).filter((f) => /\.(m?js)$/.test(f));
   let resolve: ResolveTarget | undefined;
   let runnerSource: string | undefined;
+  let dispatchBody: string | undefined;
   for (const f of files) {
     const src = readFileSync(join(dist, f), "utf8");
     if (!runnerSource && src.includes("executePluginOwnedProcess(")) runnerSource = src;
+    dispatchBody ??= functionBody(src, "executePluginOwnedProcess");
     if (resolve || !src.includes("function resolveCliExecutionTarget(")) continue;
     const alias = /resolveCliExecutionTarget as ([A-Za-z_$][\w$]*)/.exec(src)?.[1];
     if (!alias) continue;
     const mod = (await import(pathToFileURL(join(dist, f)).href)) as Record<string, unknown>;
     if (typeof mod[alias] === "function") resolve = mod[alias] as ResolveTarget;
   }
-  return { resolve, runnerSource, dist };
+  return { resolve, runnerSource, dispatchBody, dist };
 }
 
 const host = await loadHostTargetSelection();
@@ -93,6 +122,20 @@ describe.skipIf(!host.resolve)(`OpenClaw's own execution-target selection (${hos
   test("the runner dispatches a plugin target to the transport", () => {
     expect(host.runnerSource).toBeDefined();
     expect(host.runnerSource).toMatch(/executionTarget\.kind === "plugin"\) result = await executePluginOwnedProcess\(/);
-    expect(host.runnerSource).toMatch(/iterator = params\.execute\(/);
+    // The call to the prepared transport must sit inside executePluginOwnedProcess
+    // itself; the local variable it is assigned to has been renamed between releases
+    // (`iterator`, `execution`, `executionIterator`), so the name is not asserted.
+    expect(host.dispatchBody).toBeDefined();
+    expect(host.dispatchBody).toMatch(/\bparams\.execute\(/);
+  });
+});
+
+describe("dispatch-body scoping helper", () => {
+  test("functionBody scopes the dispatch assertion: a call elsewhere in the chunk does not satisfy it", () => {
+    const chunk = "function other(params){ return params.execute({}); }\nfunction executePluginOwnedProcess(params, x = (1)){ const executionIterator = params.run({}); }";
+    expect(functionBody(chunk, "executePluginOwnedProcess")).not.toMatch(/params\.execute\(/);
+    const good = "function executePluginOwnedProcess({a,b}){ const executionIterator = params.execute({a}); }\nfunction z(){}";
+    expect(functionBody(good, "executePluginOwnedProcess")).toMatch(/\bparams\.execute\(/);
+    expect(functionBody("function nothing(){}", "executePluginOwnedProcess")).toBeUndefined();
   });
 });
