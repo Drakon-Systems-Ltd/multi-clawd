@@ -41,12 +41,13 @@ ${BOLD}🦞 multi-clawd${RESET} — multi-account Claude failover for OpenClaw
   ${BOLD}direct${RESET}    the direct anthropic/* route — status, or \`direct sync\` to store profiles
   ${BOLD}usage${RESET}     live usage per account from the provider — what is left, and what the pool will do
   ${BOLD}update${RESET}    update the plugin to the latest version
-  ${BOLD}doctor${RESET}    health check (add --probe for a live turn)
+  ${BOLD}doctor${RESET}    health check (add --probe for live turns)
   ${BOLD}hermes${RESET}    sync or diagnose Hermes Agent's Anthropic credential pool
   ${BOLD}version${RESET}   show CLI + installed plugin versions
 
 Run via npx (${DIM}npx ${PKG} <command>${RESET}) or install globally
 (${DIM}npm i -g ${PKG}${RESET}) for a bare ${DIM}multi-clawd <command>${RESET}.
+Run ${DIM}multi-clawd <command> --help${RESET} for a command's flags.
 `);
 }
 
@@ -81,7 +82,7 @@ const COMMAND_HELP = {
   chain: {
     usage: "multi-clawd chain [--raw]",
     flags: ["--raw"],
-    detail: "  Audit your model routing: what actually serves each turn.\n  --raw       include raw routing detail",
+    detail: "  Audit your model routing: what actually serves each turn.\n  --raw       show session ids unmasked (do not paste the output into issues)",
   },
   direct: {
     usage: "multi-clawd direct [status | sync [--dry-run] [--yes] [--resync]]",
@@ -101,7 +102,7 @@ const COMMAND_HELP = {
   doctor: {
     usage: "multi-clawd doctor [--probe] [--probe-pool] [--verbose] [--raw] [--preflight]",
     flags: ["--probe", "--probe-pool", "--verbose", "--raw", "--preflight"],
-    detail: "  Health check.\n  --probe       run a live turn per account plus the pool\n  --probe-pool  with --probe: probe the pool ref only (one turn)\n  --verbose     show more detail\n  --raw         show raw output\n  --preflight   plan the install-manifest strip (used before an update)",
+    detail: "  Health check.\n  --probe       run one live turn per account plus one for the pool (spends real turns)\n  --probe-pool  with --probe: probe the pool ref only (one turn)\n  --verbose     show more detail (env: DOCTOR_VERBOSE=1)\n  --raw         show login emails and session ids unmasked (do not paste the output into issues; env: DOCTOR_RAW=1)\n  --preflight   plan the install-manifest strip (used before an update)",
   },
   version: {
     usage: "multi-clawd version",
