@@ -220,7 +220,17 @@ claude-cli/claude-fable-5        # main login
 
 ## Automation compatibility
 
-> OpenClaw 2026.11.2 automation compatibility: the multi-clawd pool does not provide a stored inference account. An automation already bound to a stored account cannot use `clawd/*` as its primary or fallback; changing only the model does not change the recorded account. Creating a pool-based automation can also be refused by upstream account admission. Interactive model availability does not establish automation compatibility. Do not create placeholder credentials to bypass this check. Native-runtime and configured-auth paths have different admission rules; this is not a claim that every automation is interactive-only.
+> **OpenClaw 2026.11.2, isolated agent-turn automations:** An automation
+> bound to a stored inference account cannot route `clawd/*` as its primary
+> model **or fallback**. Changing only its model preserves the recorded account
+> binding, so an existing bound job still rejects the pool. A new `clawd/*`
+> job may also fail admission: the pool is not a stored, bindable inference
+> account. Interactive model availability does not prove automation
+> compatibility. Unbound native-CLI and configured-auth paths have different
+> admission rules; this does not mean all automations are impossible, but
+> neither path is a verified pool workaround. No plugin-only runtime fix is
+> established for this gap. Do not create placeholder credentials to bypass
+> the account check. See the [source diagnosis in #155](https://github.com/Drakon-Systems-Ltd/multi-clawd/issues/155).
 
 ## Manual `/compact` compatibility
 
