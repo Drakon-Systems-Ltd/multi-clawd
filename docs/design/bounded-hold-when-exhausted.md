@@ -20,9 +20,9 @@ Candidates:
 - **`prepareExecution` (`src/index.ts:1685`)**: it is the only place that knows the whole pool
   state (verdicts, `src/index.ts:1693-1700`) and decides the launch. A hold would be an
   `await sleep` before returning the prepared execution. The exhausted decision point is
-  `src/index.ts:1736-1760` (the `probing` branch, #26) and the error alert is raised at
-  `src/index.ts:1804-1809`. A hold would have to sit just before the child is launched,
-  after the sweep at `src/index.ts:1790-1800` so alerts stay truthful.
+  `src/index.ts:1747-1763` (the `probing` branch, #26) and the error alert is raised at
+  `src/index.ts:1804-1809` (key at `:1807`). A hold would have to sit just before the child is launched,
+  after the sweep at `src/index.ts:1795-1802` so alerts stay truthful.
   Cost: it blocks the host's launch call with no child and therefore no output at all.
   Unverified: whether the host's no-output watchdog clock starts before or after `prepareExecution`
   returns; the plugin cannot observe this. Treat it as starting before (the safe assumption).
@@ -58,7 +58,7 @@ Conclusion: the cap fits, but the benefit does not. This is the central reason f
 ## 3. Interaction with the degrade ladder and pinned lanes
 
 - Today: all-exhausted + ladder configured -> `decideDegradation` (`src/degrade.ts:33-50`) steps to
-  `ladder[0]` immediately, wired at `src/index.ts:1950-1982`. Pinned lanes (`matchesPin`,
+  `ladder[0]` immediately, wired at `src/index.ts:1951-1982`. Pinned lanes (`matchesPin`,
   `src/degrade.ts:51-60`) keep the requested model and fail over via the host chain
   (`src/index.ts:1983-1987`).
 - A hold must not delay degradation: degrading is instant and succeeds, so waiting before it
@@ -96,7 +96,7 @@ Verdict: trustworthy enough for a log line, not for scheduling a wait.
 (b) it converts a fast, clear limit error into silent latency right at the host's watchdog edge,
 with the resume floor (60 s) closer than the shim comments imply; (c) it adds a second pool-wide
 state machine beside re-probe (#26) and degrade; (d) a plugin-side sleep also holds the serialised
-backend (`serialize: true`, `src/index.ts:1133`), so queued turns for the same backend stall behind it.
+backend (`serialize: true`, `src/index.ts:1134`, set on the per-account backend; the pool backend is built from it, unverified here), so queued turns for the same backend stall behind it.
 
 Constraints from #167 satisfied by "don't build": off by default (moot), no billing or
 extra-usage behaviour, no per-account egress proxy.
