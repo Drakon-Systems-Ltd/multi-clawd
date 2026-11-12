@@ -6,6 +6,28 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-11-11
+
+### Fixed
+- **A shim paused past the 5 s state-lock lease could erase another shim's
+  writes.** The lock was reclaimed by age even while its holder was still
+  running; the paused holder then resumed and published the snapshot it had
+  read before the pause over whatever its replacement wrote, silently losing
+  health observations or history events. A lock whose holder is alive is now
+  never reclaimed, however old: a waiter times out and fails open as before
+  (health deltas are published for the next holder to fold; a history event
+  is parked for a later writer). A dead holder's lock is still recovered at
+  once, and an empty or malformed lock still after the lease. (#151)
+- **A reused pid could pin a dead shim's state lock.** The live-holder rule
+  above trusted the pid alone, so a lock left by a crashed shim whose pid was
+  later reused by an unrelated process stayed held until that process exited.
+  On Linux a lock now also records its holder's start time (`/proc/<pid>/stat`
+  field 22); a live pid whose start time differs from the recorded one is
+  treated as dead and its lock is recovered at once. A matching start time is
+  never reclaimed by age, and when procfs is unavailable or unreadable, or the
+  lock predates this change, a live pid keeps its lock as before. An exited
+  but unreaped zombie is recovered too, despite `kill(pid, 0)` succeeding. (#151)
+
 ## [2.7.0] - 2026-11-11
 
 ### Added
@@ -34,24 +56,6 @@ versioning from v1.0.
   well. See README, "Manual `/compact` compatibility".
 
 ### Fixed
-- **A shim paused past the 5 s state-lock lease could erase another shim's
-  writes.** The lock was reclaimed by age even while its holder was still
-  running; the paused holder then resumed and published the snapshot it had
-  read before the pause over whatever its replacement wrote, silently losing
-  health observations or history events. A lock whose holder is alive is now
-  never reclaimed, however old: a waiter times out and fails open as before
-  (health deltas are published for the next holder to fold; a history event
-  is parked for a later writer). A dead holder's lock is still recovered at
-  once, and an empty or malformed lock still after the lease. (#151)
-- **A reused pid could pin a dead shim's state lock.** The live-holder rule
-  above trusted the pid alone, so a lock left by a crashed shim whose pid was
-  later reused by an unrelated process stayed held until that process exited.
-  On Linux a lock now also records its holder's start time (`/proc/<pid>/stat`
-  field 22); a live pid whose start time differs from the recorded one is
-  treated as dead and its lock is recovered at once. A matching start time is
-  never reclaimed by age, and when procfs is unavailable or unreadable, or the
-  lock predates this change, a live pid keeps its lock as before. An exited
-  but unreaped zombie is recovered too, despite `kill(pid, 0)` succeeding. (#151)
 - **Account history could silently lose an event when two launches wrote at
   once.** A shim that could not take the `history.jsonl` lock within its
   150 ms wait returned without recording, so `explain --history` and the
