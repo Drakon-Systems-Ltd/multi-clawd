@@ -35,7 +35,9 @@ multi-clawd explain --json   # live health plus a rough weekly pace estimate, ma
 multi-clawd account disable claw2 --dry-run  # preview benching an account
 multi-clawd chain     # audit your model routing — what actually serves each turn
 multi-clawd direct    # the direct anthropic/* route: status, or `direct sync` (v1.9, optional)
-multi-clawd doctor    # health check (add --probe for a live end-to-end turn)
+multi-clawd usage    # live usage per account from the provider
+multi-clawd doctor    # health check (add --probe: one live turn per account plus one for the pool)
+multi-clawd <command> --help   # flags for any command
 ```
 
 That's the entire lifecycle. `update` installs the plugin when it's missing and
@@ -293,7 +295,8 @@ claude-cli/claude-fable-5        # main login
   login's OAuth credential exists in more than one place, **which Claude login
   each account authenticates as and which one the next turn will run on**, telemetry age, pool + sticky
   state, **whether every non-Claude chain rung still has a usable auth
-  profile**, watchdog presence, optional `--probe` (one turn per account).
+  profile**, watchdog presence, optional `--probe` (one live turn per account plus one for the pool; `--probe-pool` with `--probe` tests the pool only).
+  `--verbose` (or `DOCTOR_VERBOSE=1`) adds detail; `--raw` (or `DOCTOR_RAW=1`) shows login emails and session ids unmasked, so do not paste that output into issues.
 - 🧯 **Self-healing config** — registration re-reads the resolved runtime
   config if the loader hands it an empty block, so a flaky registration pass
   can't silently no-op the plugin.
@@ -506,7 +509,7 @@ On the source path run `npm run build` explicitly — don't rely on the
 `prepare` hook to refresh `dist/` on a pull-upgrade (observed stale on a live
 production rollout; `doctor` flags it STALE if you forget). If a release adds new
 config keys, `openclaw plugins install --force` validates against the *old*
-manifest — run `node scripts/doctor.mjs --preflight` first for the strip →
+manifest — run `multi-clawd doctor --preflight` (from a source checkout: `node scripts/doctor.mjs --preflight`) first for the strip →
 install → re-add plan.
 
 ## Set up a second account
