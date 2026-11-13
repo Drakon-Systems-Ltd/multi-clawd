@@ -76,6 +76,8 @@ export interface Scratch {
   tripwireLog: string;
   gatewayStdout: string;
   gatewayStderr: string;
+  /** OpenClaw's own rolling file log, pinned into scratch through `logging.file`. */
+  gatewayFileLog: string;
 }
 
 /**
@@ -105,6 +107,7 @@ export function createScratch(label: string): Scratch {
     tripwireLog: join(root, "logs", "net-tripwire.jsonl"),
     gatewayStdout: join(root, "logs", "gateway.stdout.log"),
     gatewayStderr: join(root, "logs", "gateway.stderr.log"),
+    gatewayFileLog: join(root, "logs", "openclaw-file.log"),
   };
   for (const dir of [
     scratch.home,
@@ -181,6 +184,9 @@ export function buildConfig(scratch: Scratch, variant: Variant, port: number): R
     // Documented switches for OpenClaw's own background requests (docs
     // gateway/telemetry.md, gateway/config-runtime.md). The tripwire would
     // refuse them anyway; with these off, a clean tripwire log is expected.
+    // Without this the rolling file log goes to the shared /tmp/openclaw
+    // directory, outside scratch (docs logging.md).
+    logging: { file: scratch.gatewayFileLog },
     update: { checkOnStart: false },
     models: { catalogRefresh: { enabled: false } },
     plugins: {

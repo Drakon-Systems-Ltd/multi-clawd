@@ -38,7 +38,7 @@
  * fails on a new OpenClaw, read what changed before touching the assertion.
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -148,6 +148,19 @@ describe("#155 harness: isolation guard (no gateway)", () => {
     expect(isolationViolations({ ...env, PATH: `${bin}:${env.PATH}` }, scratch.root)).toContain(
       "a real `claude` executable is reachable on the child PATH",
     );
+  });
+
+  test("the config keeps OpenClaw's file log in scratch and switches off its background requests", () => {
+    const config = buildConfig(scratch, "M0", 1) as {
+      logging: { file: string };
+      update: unknown;
+      models: unknown;
+      gateway: { bind: string };
+    };
+    expect(config.logging.file.startsWith(`${scratch.root}/`)).toBe(true);
+    expect(config.update).toEqual({ checkOnStart: false });
+    expect(config.models).toEqual({ catalogRefresh: { enabled: false } });
+    expect(config.gateway.bind).toBe("loopback");
   });
 
   test("the M0 config has no operator model policy and the M1 config has exactly the pool one", () => {
@@ -525,6 +538,9 @@ describe.skipIf(!GATE_ON)("#155 route evidence against a throwaway gateway child
       const sources: Record<string, string> = {
         "cron run/runs output": runOutput,
         "gateway stdout+stderr": gatewayLogs(gateway),
+        "gateway file log": existsSync(gateway.scratch.gatewayFileLog)
+          ? readFileSync(gateway.scratch.gatewayFileLog, "utf8")
+          : "",
         ...collectLogs(gateway.scratch),
       };
       const job = { id: jobId, name: "mc155-s1" };
@@ -536,8 +552,9 @@ describe.skipIf(!GATE_ON)("#155 route evidence against a throwaway gateway child
         // (its own built-ins), which show the detector reads the right log.
         accountNoticesAboutOtherJobs: otherJobAccountNotices(Object.values(sources), job),
       };
-      // The gateway's own file log must be among the sources, or this proves nothing.
-      expect(Object.keys(sources).some((name) => /openclaw-.*\.log$/.test(name))).toBe(true);
+      // The gateway's own file log must be in scratch and must have recorded
+      // this run, or an empty result here proves nothing.
+      expect(sources["gateway file log"]).toContain(jobId);
       expect(lines).toEqual([]);
     }, 60_000);
 
