@@ -6,6 +6,22 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.7.2] - 2026-11-13
+
+### Changed
+- Added a bounded-hold design note (#170); it recommends against a
+  plugin-side wait and ships no runtime behavior change.
+- Clarified CLI help and README wording (#172): `doctor --probe` spends one
+  live turn per account plus one for the pool, while `--raw` reveals unmasked
+  login emails and session ids that should not be pasted into issues.
+- Documented the OpenClaw 2026.11.2 isolated agent-turn automation
+  account-binding caveat (#173); no plugin-only workaround is established.
+
+### Repository
+- Raised the development-tree-only `hono` lockfile floor to 4.13.16 for an
+  advisory patch (#176). The runtime dependency set is unchanged; this does
+  not establish exposure in an installed plugin.
+
 ## [2.7.1] - 2026-11-11
 
 ### Fixed
