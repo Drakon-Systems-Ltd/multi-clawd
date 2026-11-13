@@ -5,6 +5,28 @@ import { join } from "node:path";
 // Stand-in for the claude CLI in shim integration tests.
 // Emits stream-json lines (one split across two writes), echoes one stdin
 // line into an assistant record, and exits with FAKE_CLAUDE_EXIT.
+// Launch log (opt-in, #155 route evidence): one JSON line per launch, written
+// before anything else so a launch that later stalls is still counted. Carries
+// environment variable NAMES and booleans only, never a credential value.
+if (process.env.FAKE_CLAUDE_LAUNCH_LOG) {
+  const modelIdx = process.argv.indexOf("--model");
+  appendFileSync(
+    process.env.FAKE_CLAUDE_LAUNCH_LOG,
+    JSON.stringify({
+      pid: process.pid,
+      model: modelIdx >= 0 ? process.argv[modelIdx + 1] : null,
+      account_id: process.env.MULTI_CLAWD_ACCOUNT_ID ?? null,
+      config_dir: process.env.CLAUDE_CONFIG_DIR ?? null,
+      home: process.env.HOME ?? null,
+      anthropic_env_names: Object.keys(process.env)
+        .filter((name) => name.startsWith("ANTHROPIC_"))
+        .sort(),
+      has_oauth_token: Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN),
+      tripwire_armed: globalThis.__mc155TripwireArmed === true,
+    }) + "\n",
+  );
+}
+
 // Resume emulation (opt-in): the real CLI resolves `--resume <id>` ONLY in its
 // own config dir and fails before emitting anything else when it is absent.
 let resumedTranscript;
