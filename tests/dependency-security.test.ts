@@ -20,6 +20,10 @@ const readJson = (path: string) => JSON.parse(readFileSync(join(ROOT, path), "ut
  * registry tarball URL. It does not inspect an installed tree, the built
  * `dist/` or the packed tarball, so it says nothing about a vendored copy.
  *
+ * `hono` (#175) reaches the tree through the MCP SDK's own `^4.11.4` range, so
+ * its floor is held by the lockfile record alone: no override, and the floor
+ * stays inside major 4.
+ *
  * `minimatch` has no floor on purpose: patched releases start at 11.0.1, a new
  * major, and `openclaw` pins 10.x exactly. It stays open in #157.
  */
@@ -27,6 +31,7 @@ const FLOORS: Record<string, string> = {
   undici: "8.12.2",
   "@modelcontextprotocol/sdk": "1.32.0",
   "fast-uri": "3.1.9",
+  hono: "4.13.16",
 };
 
 /**
@@ -106,6 +111,18 @@ describe("dev-tree security floors (#157)", () => {
       );
       expect(lock.packages[path].integrity, path).toMatch(/^sha512-/);
     }
+  });
+
+  test("hono is floored by the lockfile alone, inside the major its dependents accept (#175)", () => {
+    expect(JSON.stringify(pkg.overrides ?? {})).not.toContain('"hono"');
+    expect(pkg.devDependencies.hono).toBeUndefined();
+
+    const found = lockedVersions(lock, "hono");
+    expect(found.map(({ path }) => path)).toEqual(["node_modules/hono"]);
+    expect(parse(found[0].version)[0]).toBe(parse(FLOORS.hono)[0]);
+
+    const sdkRange = lock.packages["node_modules/@modelcontextprotocol/sdk"].dependencies?.hono;
+    expect(sdkRange, "the MCP SDK's declared hono range").toBe("^4.11.4");
   });
 
   test("these packages are development-only lockfile records, not declared production or npm-bundled dependencies", () => {
