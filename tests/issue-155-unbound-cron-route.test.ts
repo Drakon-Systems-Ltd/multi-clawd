@@ -29,9 +29,13 @@
  * network attempt. No credential exists anywhere in the tree.
  *
  * Where it runs: the gateway-child block needs MC155_GATEWAY_ROUTE=1, which
- * only the CI job (and the remote test runner) sets. Everywhere else that
- * block is SKIPPED, and a skip is not a pass. With the gate on it never skips:
- * a wrong or too-old OpenClaw fails.
+ * only the CI job `cron-route-evidence-155` (and the remote test runner) sets.
+ * Everywhere else that block is SKIPPED, and a skip is not a pass. With the
+ * gate on it never skips: a wrong or too-old OpenClaw fails, and the CI job
+ * also fails unless the evidence file carries S0, S1, S2 and S3.
+ *
+ * Error strings asserted here are not an upstream contract. If S0 or S3
+ * fails on a new OpenClaw, read what changed before touching the assertion.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -119,6 +123,13 @@ describe("#155 harness: isolation guard (no gateway)", () => {
     expect(isolationViolations({ ...env, MULTI_CLAWD_CLAUDE_BIN: "/usr/local/bin/claude" }, scratch.root)).toContain(
       "MULTI_CLAWD_CLAUDE_BIN is not the interpreter-form fake Claude fixture",
     );
+    // The fake without the tripwire preload is refused too.
+    expect(
+      isolationViolations(
+        { ...env, MULTI_CLAWD_CLAUDE_BIN: JSON.stringify([process.execPath, FAKE_CLAUDE]) },
+        scratch.root,
+      ),
+    ).toContain("MULTI_CLAWD_CLAUDE_BIN is not the interpreter-form fake Claude fixture");
     expect(isolationViolations({ ...env, OPENCLAW_SKIP_CHANNELS: "0" }, scratch.root)).toContain(
       'OPENCLAW_SKIP_CHANNELS must be "1"',
     );
@@ -462,6 +473,8 @@ describe.skipIf(!GATE_ON)("#155 route evidence against a throwaway gateway child
     test("S1: `cron add` is admitted and the stored job carries no inference binding", () => {
       const result = cron(gateway, jobArgs("mc155-s1"));
       expect(result.status, `${result.stdout}\n${result.stderr}\n${gatewayLogs(gateway)}`).toBe(0);
+      // The S0 control is not vacuous: the same matcher rejects this admitted result.
+      expect(isAdmissionRefusal155(result)).toBe(false);
       const added = parseCliJson(result.stdout) as { id?: string; job?: { id?: string } };
       jobId = added.id ?? added.job?.id ?? "";
       expect(jobId, result.stdout).not.toBe("");

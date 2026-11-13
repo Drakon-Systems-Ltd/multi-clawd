@@ -73,3 +73,58 @@ jobs:
       - run: npx vitest run tests/openclaw-sdk-contract.test.ts
         env:
           MULTI_CLAWD_EXPECT_OPENCLAW: ${{ matrix.expect }}
+
+  # Route evidence for #155 (does NOT close it): drives a throwaway OpenClaw
+  # gateway child through the documented `openclaw cron` CLI with the fake
+  # Claude subprocess, and records whether the pool is refused at admission
+  # (S0, the current upstream behaviour) and whether a job admitted through the
+  # fixture-only modelProvider + agentRuntime path actually runs on a pool
+  # account (S1-S3). Scratch HOME/state, empty account dirs, no credentials, no
+  # secrets, and a tripwire that refuses every non-loopback network attempt.
+  # MC155_GATEWAY_ROUTE=1 is what allows the gateway child to start; it is set
+  # here and nowhere else. `latest` is the early-warning lane, as above.
+  cron-route-evidence-155:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - openclaw: "2026.10.10"
+            expect: "2026.10.10"
+          - openclaw: "2026.11.1"
+            expect: "2026.11.1"
+          - openclaw: "2026.11.3"
+            expect: "2026.11.3"
+          - openclaw: "latest"
+            expect: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-audit --no-fund
+      - run: npm install --no-save --no-audit --no-fund openclaw@${{ matrix.openclaw }}
+      - run: npm run build
+      - run: npx vitest run tests/issue-155-unbound-cron-route.test.ts
+        env:
+          MC155_GATEWAY_ROUTE: "1"
+          MULTI_CLAWD_EXPECT_OPENCLAW: ${{ matrix.expect }}
+          MC155_EVIDENCE_OUT: ${{ runner.temp }}/mc155-evidence.json
+      # A skipped gateway block must never read as a pass: the evidence file
+      # has to exist and carry every scenario. Printed so the run log is the
+      # evidence record.
+      - name: Evidence file is complete
+        if: always()
+        env:
+          MC155_EVIDENCE_OUT: ${{ runner.temp }}/mc155-evidence.json
+        run: |
+          cat "$MC155_EVIDENCE_OUT"
+          node -e '
+            const e = JSON.parse(require("node:fs").readFileSync(process.env.MC155_EVIDENCE_OUT, "utf8"));
+            const missing = ["S0", "S1", "S2", "S3", "M0_tripwire", "M1_tripwire"].filter((k) => !(k in e));
+            if (missing.length) { console.error("mc155 evidence incomplete, missing: " + missing.join(", ")); process.exit(1); }
+            console.log("mc155 evidence complete for openclaw " + e.openclaw);
+          '
