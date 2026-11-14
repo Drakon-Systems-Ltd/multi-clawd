@@ -6,6 +6,42 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **A session pin could be silently dropped under concurrent turns.** With
+  `sessionAffinity` on, a shim that waited the full 1 s for the pin store's
+  lock gave up without writing and exited normally, so the session's next turn
+  was routed by the pool pick, or by an older pin, instead of the account that
+  had just served it. Such a writer now parks its pin in a
+  `pool-<id>.sessions.json.pending-*` file: readers combine parked pins with
+  the store (the pin served latest wins) and the next writer to take the lock
+  folds them in and removes them. A read opens every parked file of its own
+  session and no other session's, so no number of parked sessions hides a pin.
+  Parked files stay bounded while a live holder keeps the lock: a session
+  keeps one, holding its latest pin; files past the TTL are removed; and the
+  total never exceeds the store's own 1000-session bound. The store also takes
+  the same lock as shim state, so a live holder's lock is no longer removed by
+  age and a dead holder's is recovered at once. The wait stays bounded at 1 s.
+  (#178)
+- **A session pin served earlier could replace one served later.** A writer
+  delayed past a newer write for the same session overwrote the newer pin with
+  its own. The pin served latest now wins whichever writer arrives last. (#178)
+
+## [2.7.2] - 2026-11-13
+
+### Changed
+- Added a bounded-hold design note (#170); it recommends against a
+  plugin-side wait and ships no runtime behavior change.
+- Clarified CLI help and README wording (#172): `doctor --probe` spends one
+  live turn per account plus one for the pool, while `--raw` reveals unmasked
+  login emails and session ids that should not be pasted into issues.
+- Documented the OpenClaw 2026.11.2 isolated agent-turn automation
+  account-binding caveat (#173); no plugin-only workaround is established.
+
+### Repository
+- Raised the development-tree-only `hono` lockfile floor to 4.13.16 for an
+  advisory patch (#176). The runtime dependency set is unchanged; this does
+  not establish exposure in an installed plugin.
+
 ## [2.7.1] - 2026-11-11
 
 ### Fixed
