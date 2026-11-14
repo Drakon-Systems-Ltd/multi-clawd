@@ -24,6 +24,8 @@ const sessionKey = (sessionId: string) => createHash("sha256").update(sessionId)
 const names = () => readdirSync(join(dir, "state")).sort();
 const pending = () => names().filter((name) => name.includes(".pending-"));
 const sessionLocks = () => names().filter((name) => name.includes(".parked-"));
+/** Reader markers and their staging files: none may outlive the read that wrote it. */
+const readerFiles = () => names().filter((name) => name.includes(".reader-"));
 
 /** A lock naming this live process: it is never reclaimed, so whoever wants it waits out its budget. */
 const holdLive = (target: string) => writeFileSync(`${target}.lock`, `${process.pid} ${Date.now()} issue-183-live-holder\n`);
@@ -31,6 +33,12 @@ const holdLive = (target: string) => writeFileSync(`${target}.lock`, `${process.
 const holdStoreLock = () => holdLive(file);
 /** The session's parked-file lock held by a live process: nobody may remove that session's parked files. */
 const sessionLockTarget = (sessionId: string) => `${file}.parked-${sessionKey(sessionId)}`;
+/** A reader's marker for the session, as a read that lost a file writes it, naming `pid`. */
+const readerMarker = (sessionId: string) => `${sessionLockTarget(sessionId)}.reader-4242-0123456789ab.lock`;
+const announce = (sessionId: string, pid: number) =>
+  writeFileSync(readerMarker(sessionId), `${pid} ${Date.now()} issue-183-reader\n`);
+/** No process has this pid: it is above any pid the kernel hands out. */
+const DEAD_PID = 2_147_483_646;
 
 const parkDirect = (sessionId: string, account: string, servedAt: number) => {
   const fixed = (value: number, width: number) => String(value).padStart(width, "0");
@@ -64,6 +72,7 @@ describe("a read racing same-session replacements (#183)", () => {
     const last = 100 * (parked + 1);
     expect(readSessionPin(file, "a", 500, TTL)).toEqual({ account: `account${last}`, servedAt: last });
     expect(sessionLocks()).toEqual([]);
+    expect(readerFiles()).toEqual([]);
   }, 30_000);
 
   test("four successive replacements over an older stored pin do not fall back to the stored pin", () => {
@@ -109,8 +118,196 @@ describe("a read racing same-session replacements (#183)", () => {
   test("a pin far ahead of the read's clock is still no pin", () => {
     writeFileSync(file, JSON.stringify({ a: { account: "skewed", servedAt: 100 + 61_000 } }));
     parkDirect("b", "skewed", 100 + 61_000);
-    expect(readSessionPin(file, "a", 100, 1_000_000)).toBeUndefined();
-    expect(readSessionPin(file, "b", 100, 1_000_000)).toBeUndefined();
+    expect(readSessionPin(file, "a", 100, 1_000_000, { clock: () => 100 })).toBeUndefined();
+    expect(readSessionPin(file, "b", 100, 1_000_000, { clock: () => 100 })).toBeUndefined();
+  });
+
+  test("the allowance ends at exactly 60 s: a pin 60000 ms ahead counts, one 60001 ms ahead is no pin", () => {
+    const now = 1_000_000;
+    const still = { clock: () => now };
+    writeFileSync(file, JSON.stringify({
+      storedAt: { account: "edge", servedAt: now + 60_000 },
+      storedPast: { account: "over", servedAt: now + 60_001 },
+    }));
+    parkDirect("parkedAt", "edge", now + 60_000);
+    parkDirect("parkedPast", "over", now + 60_001);
+    expect(readSessionPin(file, "storedAt", now, 10_000_000, still)).toEqual({ account: "edge", servedAt: now + 60_000 });
+    expect(readSessionPin(file, "storedPast", now, 10_000_000, still)).toBeUndefined();
+    expect(readSessionPin(file, "parkedAt", now, 10_000_000, still)).toEqual({ account: "edge", servedAt: now + 60_000 });
+    expect(readSessionPin(file, "parkedPast", now, 10_000_000, still)).toBeUndefined();
+    // A write keeps the same edge when it rewrites the store.
+    recordSessionPin(file, "writer", "claw1", now, 10_000_000);
+    const stored = JSON.parse(readFileSync(file, "utf8"));
+    expect(stored.storedAt).toEqual({ account: "edge", servedAt: now + 60_000 });
+    expect(stored.parkedAt).toEqual({ account: "edge", servedAt: now + 60_000 });
+    expect(stored.storedPast).toBeUndefined();
+    expect(stored.parkedPast).toBeUndefined();
+  });
+
+  test("a read stopped for longer than the allowance still counts the pin that replaced its file", () => {
+    // The caller read its clock at 100; the read lists its files 100 s later.
+    // The turn that parked meanwhile is 70 s ahead of the caller's reading and
+    // behind the clock: its pin is the session's latest, not a pin from the future.
+    holdStoreLock();
+    recordSessionPin(file, "a", "account100", 100, 10_000_000);
+    let once = true;
+    const pin = readSessionPin(file, "a", 100, 10_000_000, {
+      clock: () => 100_100,
+      afterParkedList: () => {
+        if (!once) return;
+        once = false;
+        recordSessionPin(file, "a", "account70100", 70_100, 10_000_000);
+      },
+    });
+    expect(pin).toEqual({ account: "account70100", servedAt: 70_100 });
+    expect(readerFiles()).toEqual([]);
+  }, 30_000);
+});
+
+describe("removals a read holding the session's lock could not stop (#183, review of 0c4afec)", () => {
+  const BIG = 100_000;
+  /** The bound is full of other sessions' only pins, all served before session "a". */
+  const fillBound = () => { for (let i = 0; i < MAX_SESSION_PINS - 1; i++) parkDirect(`s${i}`, "claw1", 1000 + i); };
+  function readAtBound(now: number, servedAts: number[]) {
+    const queue = [...servedAts];
+    let listings = 0;
+    const pin = readSessionPin(file, "a", now, BIG, {
+      afterParkedList: () => {
+        listings++;
+        const servedAt = queue.shift();
+        if (servedAt !== undefined) recordSessionPin(file, "a", `account${servedAt}`, servedAt, BIG);
+      },
+    });
+    return { pin, listings };
+  }
+
+  test("at the 1000-file bound a replacement on every listing does not take the read's file", () => {
+    holdStoreLock();
+    fillBound();
+    recordSessionPin(file, "a", "account5000", 5000, BIG);
+    expect(pending()).toHaveLength(MAX_SESSION_PINS);
+    const { pin, listings } = readAtBound(6000, [5100, 5200, 5300, 5400, 5500, 5600]);
+    expect(pin).toBeDefined();
+    expect(pin!.servedAt).toBeGreaterThanOrEqual(5000);
+    expect(pin!.account).toBe(`account${pin!.servedAt}`);
+    expect(listings).toBeLessThanOrEqual(2);
+    // The file the announced read kept is the only one over the bound; the next park of the session removes it.
+    expect(pending()).toHaveLength(MAX_SESSION_PINS + 1);
+    expect(readerFiles()).toEqual([]);
+    recordSessionPin(file, "a", "account5900", 5900, BIG);
+    expect(pending()).toHaveLength(MAX_SESSION_PINS);
+    expect(readSessionPin(file, "a", 6000, BIG)).toEqual({ account: "account5900", servedAt: 5900 });
+    expect(readSessionPin(file, "s0", 6000, BIG)).toEqual({ account: "claw1", servedAt: 1000 });
+    expect(sessionLocks()).toEqual([]);
+  }, 60_000);
+
+  test("at the bound, over an older stored pin, the read does not fall back to the stored pin", () => {
+    writeFileSync(file, JSON.stringify({ a: { account: "old", servedAt: 4000 } }));
+    holdStoreLock();
+    fillBound();
+    recordSessionPin(file, "a", "account5000", 5000, BIG);
+    const { pin } = readAtBound(6000, [5100, 5200, 5300, 5400, 5500, 5600]);
+    expect(pin).toBeDefined();
+    expect(pin!.account).not.toBe("old");
+    expect(pin!.servedAt).toBeGreaterThanOrEqual(5000);
+  }, 60_000);
+
+  test("a parker whose clock puts the read's file past the TTL does not remove it under the read", () => {
+    holdStoreLock();
+    recordSessionPin(file, "a", "account100", 100, TTL);
+    let listings = 0;
+    const pin = readSessionPin(file, "a", 500, TTL, {
+      afterParkedList: () => {
+        listings++;
+        // First the session's own replacement, then another session's turn that read its clock at 1200: for it a@200 has expired.
+        if (listings === 1) recordSessionPin(file, "a", "account200", 200, TTL);
+        if (listings === 2) recordSessionPin(file, "b", "claw2", 1200, TTL);
+      },
+    });
+    expect(pin).toEqual({ account: "account200", servedAt: 200 });
+    expect(pending()).toHaveLength(2);
+    // With no read in the way the next parker with that clock removes the expired file.
+    recordSessionPin(file, "c", "claw3", 1200, TTL);
+    expect(pending()).toHaveLength(2);
+    expect(readSessionPin(file, "a", 1200, TTL)).toBeUndefined();
+    expect(readerFiles()).toEqual([]);
+  }, 30_000);
+});
+
+describe("a read does not depend on taking the session's lock (#183, review of 0c4afec)", () => {
+  /** One holder keeps the session's lock while the read would wait for it, then lets go, and the session parks on every later listing. */
+  function readPastOneHolder(now: number) {
+    let listings = 0;
+    const pin = readSessionPin(file, "a", now, TTL, {
+      afterParkedList: () => {
+        listings++;
+        if (listings === 1) {
+          recordSessionPin(file, "a", "account200", 200, TTL);
+          holdLive(sessionLockTarget("a"));
+          return;
+        }
+        if (listings === 2) rmSync(`${sessionLockTarget("a")}.lock`);
+        if (listings <= 5) recordSessionPin(file, "a", `account${listings * 100 + 100}`, listings * 100 + 100, TTL);
+      },
+    });
+    return { pin, listings };
+  }
+
+  test("one holder that outlasts a wait and then lets go, no store: the read returns a pin from read start or later", () => {
+    holdStoreLock();
+    recordSessionPin(file, "a", "account100", 100, TTL);
+    const { pin, listings } = readPastOneHolder(700);
+    expect(pin).toBeDefined();
+    expect(pin!.servedAt).toBeGreaterThanOrEqual(100);
+    expect(pin!.account).toBe(`account${pin!.servedAt}`);
+    expect(listings).toBeLessThanOrEqual(2);
+    expect(readerFiles()).toEqual([]);
+  }, 60_000);
+
+  test("one holder that outlasts a wait and then lets go, older stored pin: the read does not return the stored pin", () => {
+    writeFileSync(file, JSON.stringify({ a: { account: "old", servedAt: 50 } }));
+    holdStoreLock();
+    recordSessionPin(file, "a", "account100", 100, TTL);
+    const { pin } = readPastOneHolder(700);
+    expect(pin).toBeDefined();
+    expect(pin!.account).not.toBe("old");
+    expect(pin!.servedAt).toBeGreaterThanOrEqual(100);
+  }, 60_000);
+
+  test("while a live reader is announced a park removes nothing of that session; a dead reader's marker is cleared", () => {
+    holdStoreLock();
+    announce("a", process.pid);
+    recordSessionPin(file, "a", "account100", 100, TTL);
+    recordSessionPin(file, "a", "account200", 200, TTL);
+    // A turn whose clock puts both pins past the TTL removes neither.
+    recordSessionPin(file, "b", "claw2", 1300, TTL);
+    expect(pending()).toHaveLength(3);
+    expect(readSessionPin(file, "a", 500, TTL)).toEqual({ account: "account200", servedAt: 200 });
+    expect(readFileSync(readerMarker("a"), "utf8")).toContain("issue-183-reader");
+    // The same marker left by a reader that died does not hold anything up, and goes.
+    announce("a", DEAD_PID);
+    recordSessionPin(file, "a", "account300", 300, TTL);
+    expect(pending().filter((name) => name.includes(sessionKey("a")))).toHaveLength(1);
+    expect(readSessionPin(file, "a", 500, TTL)).toEqual({ account: "account300", servedAt: 300 });
+    expect(readerFiles()).toEqual([]);
+    expect(sessionLocks()).toEqual([]);
+  }, 30_000);
+
+  test("a read ends after four listings even when files are removed by something that follows no rule", () => {
+    parkDirect("a", "account400", 400);
+    let listings = 0;
+    const pin = readSessionPin(file, "a", 500, TTL, {
+      afterParkedList: () => {
+        listings++;
+        // Not a parker: the listed file is deleted outright and an older one put in its place.
+        for (const name of pending()) rmSync(join(dir, "state", name));
+        parkDirect("a", `account${400 - listings}`, 400 - listings);
+      },
+    });
+    expect(listings).toBe(4);
+    expect(pin).toBeUndefined();
+    expect(readerFiles()).toEqual([]);
+    expect(readSessionPin(file, "a", 500, TTL)).toEqual({ account: "account396", servedAt: 396 });
   });
 });
 
@@ -135,7 +332,7 @@ describe("removal of a session's superseded parked files (#183)", () => {
     expect(sessionLocks()).toEqual([]);
   }, 30_000);
 
-  test("a read that cannot take the session's lock waits a bounded time and still finds a folded pin in the store", () => {
+  test("a read does not wait for the session's lock: with it held, a file folded under the read is found in the store at once", () => {
     holdStoreLock();
     recordSessionPin(file, "a", "account100", 100, TTL);
     holdLive(sessionLockTarget("a"));
@@ -151,8 +348,10 @@ describe("removal of a session's superseded parked files (#183)", () => {
       },
     });
     expect(pin).toEqual({ account: "account100", servedAt: 100 });
-    expect(Date.now() - started).toBeLessThan(5000);
+    // The only wait in here is none: the fold in the hook takes the freed store lock at its first try.
+    expect(Date.now() - started).toBeLessThan(900);
     expect(pending()).toEqual([]);
+    expect(readerFiles()).toEqual([]);
     // The read neither took nor removed the other process's lock.
     expect(readFileSync(`${sessionLockTarget("a")}.lock`, "utf8")).toContain("issue-183-live-holder");
   }, 30_000);
@@ -178,8 +377,7 @@ describe("removal of a session's superseded parked files (#183)", () => {
 
   test("at the parked-file bound a session's superseded files go before any session's only pin", () => {
     holdStoreLock();
-    // "hot" could not be trimmed (its lock is held), so it has five parked pins, all newer than the rest.
-    holdLive(sessionLockTarget("hot"));
+    // "hot" was not trimmed (its parks found its lock busy), so it has five parked pins, all newer than the rest.
     const others = MAX_SESSION_PINS - 2;
     for (let i = 0; i < others; i++) parkDirect(`s${i}`, "claw1", 1000 + i);
     for (let i = 0; i < 5; i++) parkDirect("hot", `hot${i}`, 3000 + i);
