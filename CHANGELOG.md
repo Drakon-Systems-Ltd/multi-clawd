@@ -6,6 +6,11 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.7.3] - 2026-11-14
+
+Patch on 2.7.2: preserve the latest session-affinity pin when concurrent turns
+contend for the pin-store lock.
+
 ### Fixed
 - **A session pin could be silently dropped under concurrent turns.** With
   `sessionAffinity` on, a shim that waited the full 1 s for the pin store's
