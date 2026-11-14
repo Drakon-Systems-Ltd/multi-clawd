@@ -22,6 +22,28 @@ versioning from v1.0.
   the same lock as shim state, so a live holder's lock is no longer removed by
   age and a dead holder's is recovered at once. The wait stays bounded at 1 s.
   (#178)
+- **A read could miss a session's pin while newer pins for it were being
+  parked.** A parked pin replaces the session's older parked file. A read that
+  listed the older file and found it gone listed again, at most four times; if
+  each new listing was replaced in turn, the read returned an older stored pin
+  or none, although a valid pin was on disk throughout. A read that loses a
+  file now takes a short lock over that one session's parked files
+  (`pool-<id>.sessions.json.parked-<session key>.lock`) and reads under it, and
+  a parker removes a session's superseded files only while holding the same
+  lock, taken without waiting; when it is busy the parker still parks and
+  leaves the trim to the next one. A read therefore returns a pin at least as
+  recent as the session's latest valid pin when the read began, however many
+  pins the session parks meanwhile. A pin recorded while a read runs carries a
+  later clock reading than the read's own; reads now count pins up to 60 s
+  ahead, the allowance writes already had, instead of treating them as no pin.
+  The read's wait for the lock is bounded at 1 s. Residual: if the lock cannot
+  be taken in that time the read continues without it for four listings. A
+  process that keeps the lock that long also stops every trim of that session,
+  so such a read can still return an older pin only when different processes
+  hold the lock one after another for the whole second, each trimming the
+  session again. While a session's trim is skipped it can hold more than one
+  parked file; at the 1000-file bound those surplus files are removed before
+  any session's only pin. Nothing is signalled or killed. (#183)
 - **A session pin served earlier could replace one served later.** A writer
   delayed past a newer write for the same session overwrote the newer pin with
   its own. The pin served latest now wins whichever writer arrives last. (#178)

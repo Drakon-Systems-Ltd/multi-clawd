@@ -38,14 +38,17 @@ export function eligibleSessionAccount(
     ? pin.account : undefined;
 }
 
-/** How far past `now` a stored pin may be when a write rewrites the store. A
- * concurrent turn that captured its clock later than ours can finish first. */
-const WRITE_CLOCK_SLACK_MS = 60_000;
+/** How far past the caller's `now` a pin may be and still count. A concurrent
+ * turn that captured its clock later than ours can finish first: a write must
+ * not drop that turn's pin when it rewrites the store, and a read must not
+ * discard it either, since a pin recorded while the read runs is the session's
+ * latest (#183). */
+const CLOCK_SLACK_MS = 60_000;
 /** How long a write waits for the store lock before it parks its pin. */
 const LOCK_WAIT_MS = 1000;
 /** Parked files one write folds at most. Reads have no such limit: see readSessionPin. */
 export const MAX_PARKED_PINS = 64;
-/** Times a read lists a session's parked files again after one vanished under it. */
+/** Times a read lists a session's parked files again once one vanished under it. */
 const PARKED_READ_ATTEMPTS = 4;
 
 /** Whether a pin counts at `now`: not past the TTL, not further ahead than the slack. */
@@ -108,6 +111,18 @@ function sessionKey(sessionId: string): string {
   return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
 }
 
+/**
+ * What the lock over one session's parked files is taken on (the lock file is
+ * this path plus `.lock`). A parker removes that session's superseded files
+ * only while it holds the lock, and a read that lost a file takes it to list
+ * and open the session's files with no such removal possible. It is separate
+ * from the store lock, which a live holder may keep for a whole turn: this one
+ * is held for a listing and a few small files. The name never matches PARKED.
+ */
+function parkedLockTarget(file: string, key: string): string {
+  return `${file}.parked-${key}`;
+}
+
 function parkedName(file: string, sessionId: string, servedAt: number): string {
   const fixed = (value: number, width: number) => String(value).padStart(width, "0");
   const named = Number.isFinite(servedAt) ? Math.min(Math.max(Math.floor(servedAt), 0), MAX_NAMED_TIME) : 0;
@@ -157,19 +172,24 @@ function remove(path: string): void {
 }
 
 /**
- * Park `own`, then keep the parked files bounded without the lock, which a
- * live holder may keep for as long as it runs. Three rules, each safe for a
- * reader and for another parker running at the same moment:
+ * Park `own`, then keep the parked files bounded without the store lock, which
+ * a live holder may keep for as long as it runs. Three rules:
  *
  * - One file per session. Of the session's parked pins this writer counts as
  *   valid, the one served latest stays (for equal `servedAt`, the one parked
- *   last) and the rest are removed. A file is removed only while a file that
- *   supersedes it is already published, so the session's latest pin is on
- *   disk throughout; a reader that loses a file mid-read lists again.
+ *   last) and the rest are removed. This runs only under the session's
+ *   parked-file lock, taken without waiting: a parker that finds it held
+ *   removes nothing of that session and leaves the trim to the next one. A
+ *   file is removed only while a file that supersedes it is already published,
+ *   so the session's latest pin is on disk throughout, and a reader holding
+ *   the same lock sees none of its session's files replaced under it (#183).
  * - No expired files. A file whose every pin is past the TTL is removed. No
  *   reader would have used it.
- * - At most MAX_SESSION_PINS files, the bound the store itself keeps: beyond
- *   it the least recently served are removed, as a store rewrite does.
+ * - At most MAX_SESSION_PINS files, the bound the store itself keeps. Beyond
+ *   it files that a later-named file of the same session supersedes go first,
+ *   so a session whose trim was skipped gives up its own surplus before any
+ *   session gives up its only pin; then the least recently served, as a store
+ *   rewrite does.
  *
  * Publishing comes first and is the only step that can fail the park; the
  * rest is best effort and repeated by the next parker.
@@ -180,21 +200,29 @@ function park(file: string, sessionId: string, own: SessionPin, now: number, ttl
     const key = sessionKey(sessionId);
     const removed = new Set<string>();
     const drop = (path: string) => { remove(path); removed.add(path); };
-    const all = parkedFiles(file);
 
-    const mine: { path: string; pin: SessionPin }[] = [];
-    for (const entry of all) {
-      if (entry.key !== key) continue;
-      let pin: SessionPin | undefined;
-      try { pin = parsePins(readText(entry.path), now, ttlMs, WRITE_CLOCK_SLACK_MS)[sessionId]; } catch { continue; }
-      if (pin) mine.push({ path: entry.path, pin });
+    const lock = acquireShimLock(parkedLockTarget(file, key), 0);
+    if (lock) {
+      try {
+        const mine: { path: string; pin: SessionPin }[] = [];
+        for (const entry of parkedFiles(file)) {
+          if (entry.key !== key) continue;
+          let pin: SessionPin | undefined;
+          try { pin = parsePins(readText(entry.path), now, ttlMs, CLOCK_SLACK_MS)[sessionId]; } catch { continue; }
+          if (pin) mine.push({ path: entry.path, pin });
+        }
+        // Name order within one session and one servedAt is park order: >= keeps the last parked.
+        const latest = mine.reduce<typeof mine[number] | undefined>(
+          (best, entry) => !best || entry.pin.servedAt >= best.pin.servedAt ? entry : best, undefined);
+        for (const entry of mine) {
+          if (entry === latest) continue;
+          if (!lock.held()) break;
+          drop(entry.path);
+        }
+      } finally { lock(); }
     }
-    // Name order within one session and one servedAt is park order: >= keeps the last parked.
-    const latest = mine.reduce<typeof mine[number] | undefined>(
-      (best, entry) => !best || entry.pin.servedAt >= best.pin.servedAt ? entry : best, undefined);
-    for (const entry of mine) if (entry !== latest) drop(entry.path);
 
-    for (const entry of all) {
+    for (const entry of parkedFiles(file)) {
       if (removed.has(entry.path) || now - entry.servedAt < ttlMs) continue;
       let pins: Pins;
       try { pins = parseAllPins(readText(entry.path)); } catch { continue; }
@@ -203,7 +231,14 @@ function park(file: string, sessionId: string, own: SessionPin, now: number, ttl
     }
 
     const left = parkedFiles(file);
-    for (const entry of left.slice(0, Math.max(0, left.length - MAX_SESSION_PINS))) remove(entry.path);
+    const over = left.length - MAX_SESSION_PINS;
+    if (over > 0) {
+      const last = new Map<string, string>();
+      for (const entry of left) last.set(entry.key, entry.path);
+      const superseded = left.filter((entry) => last.get(entry.key) !== entry.path);
+      const only = left.filter((entry) => last.get(entry.key) === entry.path);
+      for (const entry of [...superseded, ...only].slice(0, over)) remove(entry.path);
+    }
   } catch { /* the pin is parked; bounding is retried by the next parker */ }
 }
 
@@ -215,13 +250,36 @@ interface ReadSessionPinHooks {
   afterParked?: () => void;
 }
 
-/** The session's parked pin served latest, from however many files the pool has parked. */
+/**
+ * The session's parked pin served latest, from however many files the pool
+ * has parked.
+ *
+ * The first pass takes no lock. A file that is listed and then gone was folded
+ * into the store, which is read next, or was superseded by a newer parked pin
+ * of the session. Listing again is not enough for the second case: each new
+ * park can replace the file the new listing shows (#183). So a read that lost
+ * a file takes the session's parked-file lock and lists again under it. A
+ * parker removes a session's superseded files only while holding that lock,
+ * and publishes the superseding file first, so under the lock every pin the
+ * session had parked when the read began is in a file this pass opens, in a
+ * newer one, or already in the store. Parkers that arrive meanwhile still
+ * park; they only skip the trim.
+ *
+ * The wait for the lock is bounded. When the lock cannot be taken in that
+ * time the read goes on without it, for a bounded number of passes. A process
+ * that keeps the lock that long also keeps every parker from trimming the
+ * session, so those passes lose a file only to a fold, to the TTL, or to the
+ * parked-file bound. Only different holders following one another for the
+ * whole wait, each trimming the session again, could still leave such a read
+ * with an older pin.
+ */
 function readParkedPin(
   file: string, sessionId: string, now: number, ttlMs: number, hooks: ReadSessionPinHooks,
 ): SessionPin | undefined {
   const key = sessionKey(sessionId);
   let latest: SessionPin | undefined;
-  for (let attempt = 0; attempt < PARKED_READ_ATTEMPTS; attempt++) {
+  /** One listing, every listed file opened. True when a listed file was gone. */
+  const pass = (): boolean => {
     const mine = parkedFiles(file).filter((entry) => entry.key === key);
     hooks.afterParkedList?.();
     let vanished = false;
@@ -229,13 +287,18 @@ function readParkedPin(
       let text: string | undefined;
       try { text = readText(path); } catch { continue; /* unreadable: no pin */ }
       if (text === undefined) { vanished = true; continue; }
-      const pin = parsePins(text, now, ttlMs, 0)[sessionId];
+      const pin = parsePins(text, now, ttlMs, CLOCK_SLACK_MS)[sessionId];
       if (pin && (!latest || pin.servedAt >= latest.servedAt)) latest = pin;
     }
-    // A file goes away when a fold has put it in the store, which is read
-    // next, or when a newer parked pin for the session has replaced it, which
-    // a fresh listing shows.
-    if (!vanished) break;
+    return vanished;
+  };
+  if (!pass()) return latest;
+  let release: ShimLockRelease | undefined;
+  try {
+    release = acquireShimLock(parkedLockTarget(file, key), LOCK_WAIT_MS);
+    for (let attempt = 0; attempt < PARKED_READ_ATTEMPTS; attempt++) if (!pass()) break;
+  } finally {
+    release?.();
   }
   return latest;
 }
@@ -245,6 +308,11 @@ function readParkedPin(
  * are read before the store because a fold replaces the store before it
  * removes a parked file: a file that vanishes under this read is already in
  * the store this read then opens.
+ *
+ * The result is at least as recent as the session's latest valid pin, stored
+ * or parked, at the moment the read began, however many pins the session
+ * parks while the read runs. A pin recorded during the read was served after
+ * the read's `now`; it counts, up to CLOCK_SLACK_MS ahead.
  *
  * Only the session's own parked files are opened, all of them, so what other
  * sessions have parked cannot hide this session's pin. A parker keeps one
@@ -257,7 +325,7 @@ export function readSessionPin(
   try { parked = readParkedPin(file, sessionId, now, ttlMs, hooks); } catch { /* store only */ }
   hooks.afterParked?.();
   let pins: Pins = {};
-  try { pins = parsePins(readText(file), now, ttlMs, 0); } catch { /* unreadable: parked pin only */ }
+  try { pins = parsePins(readText(file), now, ttlMs, CLOCK_SLACK_MS); } catch { /* unreadable: parked pin only */ }
   if (parked) fold(pins, { [sessionId]: parked });
   return pins[sessionId];
 }
@@ -285,7 +353,7 @@ export function readSessionPin(
  * files, least recently served first.
  *
  * Parked files stay bounded while no writer can take the lock at all: see
- * park(). Nothing is signalled or killed, and the wait stays bounded.
+ * park(). Nothing is signalled or killed, and every wait stays bounded.
  */
 export function recordSessionPin(file: string, sessionId: string, account: string, now: number, ttlMs: number): void {
   let release: ShimLockRelease | undefined;
@@ -298,7 +366,7 @@ export function recordSessionPin(file: string, sessionId: string, account: strin
     let pins: Pins;
     let parked: ParkedFile[];
     try {
-      pins = parsePins(readText(file), now, ttlMs, WRITE_CLOCK_SLACK_MS);
+      pins = parsePins(readText(file), now, ttlMs, CLOCK_SLACK_MS);
       parked = parkedFiles(file).slice(0, MAX_PARKED_PINS);
     } catch { return park(file, sessionId, own, now, ttlMs); }
     const stored = pins[sessionId];
@@ -308,7 +376,7 @@ export function recordSessionPin(file: string, sessionId: string, account: strin
       let text: string | undefined;
       try { text = readText(path); } catch { continue; }
       if (text === undefined) continue;
-      fold(pins, parsePins(text, now, ttlMs, WRITE_CLOCK_SLACK_MS));
+      fold(pins, parsePins(text, now, ttlMs, CLOCK_SLACK_MS));
       consumed.push(path);
     }
     const entries = Object.entries(pins);
