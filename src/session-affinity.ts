@@ -1,6 +1,6 @@
 /** Bounded pins for Claude CLI sessions. No transcripts live here. */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resumeSessionId } from "./session-handover.js";
 import { acquireShimLock, shimLockFile, type ShimLockRelease } from "./shim-lock.js";
@@ -164,10 +164,14 @@ function readerAnnounced(file: string, key: string, names: readonly string[]): b
   const prefix = `${basename(file)}.parked-${key}.reader-`;
   for (const name of names) {
     if (!name.startsWith(prefix) || !name.endsWith(".lock")) continue;
-    // Taking the marker as a lock succeeds only when its reader is gone.
-    const taken = acquireShimLock(join(dirname(file), name.slice(0, -".lock".length)), 0);
-    if (!taken) return true;
-    taken();
+    // Taking the marker as a lock succeeds only when its reader is gone. A
+    // try with no wait can also remove a dead reader's marker and then run
+    // out of time before taking it: the marker is gone then, which is what
+    // tells that case from a live reader's.
+    const marker = join(dirname(file), name);
+    const taken = acquireShimLock(marker.slice(0, -".lock".length), 0);
+    if (taken) taken();
+    else if (existsSync(marker)) return true;
   }
   return false;
 }
