@@ -1,13 +1,16 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { readSessionPin, recordSessionPin } from "../src/session-affinity.js";
 
 // Concurrent turns are separate shim processes writing one pin store. Run the
 // real store module in several child processes at once and require that no
-// pin is lost and no temp or lock file is left behind.
+// pin is lost and no temp or lock file is left behind. A writer that waits
+// out its lock budget parks its pin instead of dropping it (#178), so "kept"
+// is what the next turn reads, and one more write folds every parked pin in.
 const ROOT = join(__dirname, "..");
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "mc-affinity-procs-")); });
@@ -38,19 +41,61 @@ function runWriter(file: string, worker: number, count: number): Promise<string>
   });
 }
 
-test("simultaneous shim processes keep every session pin", async () => {
+function prepare(): string {
   writeFileSync(join(dir, "package.json"), JSON.stringify({ type: "module" }));
   transpile("session-handover");
+  transpile("shim-lock");
   transpile("session-affinity");
-  const stateDir = join(dir, "state");
-  const file = join(stateDir, "pool-clawd.sessions.json");
+  return join(dir, "state", "pool-clawd.sessions.json");
+}
+
+const leftovers = (stateDir: string) => readdirSync(stateDir).filter((name) =>
+  name.endsWith(".lock") || name.includes(".tmp-") || name.includes(".pending-"));
+
+test("simultaneous shim processes keep every session pin", async () => {
+  const file = prepare();
   const workers = 6;
   const perWorker = 25;
   await Promise.all(Array.from({ length: workers }, (_, w) => runWriter(file, w, perWorker)));
+  const now = Date.now();
+  for (let w = 0; w < workers; w++) {
+    for (let i = 0; i < perWorker; i++) expect(readSessionPin(file, `w${w}s${i}`, now, 60_000)?.account).toBe(`claw${w}`);
+  }
+  recordSessionPin(file, "last", "claw0", now, 60_000);
   const pins = JSON.parse(readFileSync(file, "utf8"));
   for (let w = 0; w < workers; w++) {
     for (let i = 0; i < perWorker; i++) expect(pins[`w${w}s${i}`]?.account).toBe(`claw${w}`);
   }
-  expect(Object.keys(pins)).toHaveLength(workers * perWorker);
-  expect(readdirSync(stateDir).filter((name) => name.endsWith(".lock") || name.includes(".tmp-"))).toEqual([]);
+  expect(Object.keys(pins)).toHaveLength(workers * perWorker + 1);
+  expect(leftovers(join(dir, "state"))).toEqual([]);
+}, 30_000);
+
+// The CI failure this guards (#178): a writer still waiting when its lock
+// budget ran out dropped its pin and exited 0. Here every writer is made to
+// wait out the budget: the lock is held for the whole of each child's run.
+test("shim processes starved of the lock for their whole run lose no pin", async () => {
+  const file = prepare();
+  const stateDir = join(dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  recordSessionPin(file, "before", "claw9", Date.now(), 60_000);
+  writeFileSync(`${file}.lock`, "held");
+  const workers = 4;
+  const perWorker = 2;
+  await Promise.all(Array.from({ length: workers }, (_, w) => runWriter(file, w, perWorker)));
+  // Nobody replaced the store without the lock, and the lock is untouched.
+  expect(Object.keys(JSON.parse(readFileSync(file, "utf8")))).toEqual(["before"]);
+  expect(readFileSync(`${file}.lock`, "utf8")).toBe("held");
+  const now = Date.now();
+  for (let w = 0; w < workers; w++) {
+    for (let i = 0; i < perWorker; i++) expect(readSessionPin(file, `w${w}s${i}`, now, 60_000)?.account).toBe(`claw${w}`);
+  }
+  rmSync(`${file}.lock`);
+  recordSessionPin(file, "after", "claw9", now, 60_000);
+  const pins = JSON.parse(readFileSync(file, "utf8"));
+  for (let w = 0; w < workers; w++) {
+    for (let i = 0; i < perWorker; i++) expect(pins[`w${w}s${i}`]?.account).toBe(`claw${w}`);
+  }
+  expect(Object.keys(pins)).toHaveLength(workers * perWorker + 2);
+  expect(existsSync(`${file}.lock`)).toBe(false);
+  expect(leftovers(stateDir)).toEqual([]);
 }, 30_000);
