@@ -22,6 +22,46 @@ versioning from v1.0.
   the same lock as shim state, so a live holder's lock is no longer removed by
   age and a dead holder's is recovered at once. The wait stays bounded at 1 s.
   (#178)
+- **A read could miss a session's pin while newer pins for it were being
+  parked.** A parked pin replaces the session's older parked file. A read that
+  listed the older file and found it gone listed again, at most four times; if
+  each new listing was replaced in turn, the read returned an older stored pin
+  or none, although a valid pin was on disk throughout. A read now returns a
+  pin at least as recent as the session's latest valid pin when the read
+  began, however many pins the session parks meanwhile and whatever another
+  process holds or however long it stops. The read never waits. How:
+  - A parker removes a parked file, for any reason (superseded, past the TTL,
+    over the 1000-file bound), only under a short lock for that file's session
+    (`pool-<id>.sessions.json.parked-<session key>.lock`), tried once without
+    waiting. When the lock is busy the file stays for the next parker.
+  - A read that finds a listed file gone, with nothing it read at least as
+    recent, announces itself with a marker
+    (`pool-<id>.sessions.json.parked-<session key>.reader-<pid>-<random>.lock`)
+    and lists again. A parker holding the session's lock removes nothing of
+    that session while a live reader's marker is there. Only the one parker
+    that already held the lock when the marker appeared can still remove
+    files, from one listing, oldest first; three more listings always include
+    one that settles the read. The marker goes when the read returns; one left
+    by a reader that died is removed by the next parker. A read that loses no
+    file writes nothing and takes no lock, as before.
+  - A read counts a pin served after its caller's clock reading: up to 60 s
+    ahead of that reading or of the clock when the read lists its files,
+    whichever is later (exactly 60 000 ms ahead counts, 60 001 ms does not).
+    Before, a read treated any pin ahead of its own reading as no pin, which
+    discarded the pin a concurrent turn had just parked.
+
+  Limits, stated plainly. While a session is being read or trimmed its files
+  are not removed, so the parked files can pass the 1000-file bound by that
+  session's files until the next park; a process stopped while it holds a
+  session's lock or marker keeps that one session's files from being removed
+  for as long as it is stopped (a write that takes the store lock still folds
+  them). A pin that passes the TTL, falls outside the 1000 most recently
+  served sessions, or is more than 60 s ahead of the clock of the writer that
+  rewrites the store ends there, as before; a read running across that moment
+  may return without it. A read ends after four listings with the latest pin
+  it saw only if the state directory refuses the marker file or parked files
+  are deleted by something other than multi-clawd. Nothing is signalled or
+  killed. (#183)
 - **A session pin served earlier could replace one served later.** A writer
   delayed past a newer write for the same session overwrote the newer pin with
   its own. The pin served latest now wins whichever writer arrives last. (#178)
