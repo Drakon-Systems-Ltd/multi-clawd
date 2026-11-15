@@ -65,6 +65,17 @@ versioning from v1.0.
 - **A session pin served earlier could replace one served later.** A writer
   delayed past a newer write for the same session overwrote the newer pin with
   its own. The pin served latest now wins whichever writer arrives last. (#178)
+- **A session whose id is a name every object inherits lost its pin.** With
+  `sessionAffinity` on, a session id such as `constructor`, `toString`,
+  `hasOwnProperty` or `valueOf` (all accepted as `--session-id` and `--resume`
+  values) was looked up in a plain object, where it found an inherited
+  function instead of "no pin". A successful turn then stored nothing and
+  returned normally, and a read returned that function instead of a pin or
+  nothing. v2.7.2 stored and read these ids; the fault came in with the
+  ordering fix above and was never released. Pin dictionaries now have no
+  prototype and every lookup is an own-property check: the write, the fold of
+  parked pins, the read, and the trim of parked files. Session ids that are
+  UUIDs, which is what Claude Code issues, were never affected. (#186)
 
 ## [2.7.2] - 2026-11-13
 

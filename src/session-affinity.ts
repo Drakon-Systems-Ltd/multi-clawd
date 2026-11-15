@@ -22,7 +22,30 @@ export function launchSessionId(argv: readonly string[]): string | undefined {
 }
 
 export interface SessionPin { account: string; servedAt: number }
+/**
+ * Pins by session id. A session id may be a name every plain object inherits
+ * (`constructor`, `toString`, ...): launchSessionId accepts those. So a pin
+ * dictionary is made without a prototype (emptyPins) and is looked up only
+ * through pinOf, an own-property check: an id with no pin is `undefined`,
+ * never an inherited function (#186).
+ */
 type Pins = Record<string, SessionPin>;
+
+function emptyPins(): Pins {
+  return Object.create(null) as Pins;
+}
+
+/** The pin stored under `id` itself, or undefined. */
+function pinOf(pins: Pins, id: string): SessionPin | undefined {
+  return Object.prototype.hasOwnProperty.call(pins, id) ? pins[id] : undefined;
+}
+
+/** A dictionary holding one pin. */
+function onePin(id: string, pin: SessionPin): Pins {
+  const pins = emptyPins();
+  pins[id] = pin;
+  return pins;
+}
 
 /** A pin may only win for a current, usable pool member. */
 export function eligibleSessionAccount(
@@ -64,7 +87,7 @@ function current(pin: SessionPin, now: number, ttlMs: number, latest: number): b
 
 /** The well-formed pins in a store or parked-pin text, whatever their age. Anything else is no pin. */
 function parseAllPins(text: string | undefined): Pins {
-  const pins: Pins = {};
+  const pins = emptyPins();
   if (text === undefined) return pins;
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return pins; }
@@ -219,7 +242,8 @@ function publish(target: string, pins: Pins): void {
 /** A parked pin replaces a stored one only when it was served strictly later. */
 function fold(into: Pins, parked: Pins): void {
   for (const [id, pin] of Object.entries(parked)) {
-    if (!into[id] || pin.servedAt > into[id].servedAt) into[id] = pin;
+    const held = pinOf(into, id);
+    if (!held || pin.servedAt > held.servedAt) into[id] = pin;
   }
 }
 
@@ -285,7 +309,7 @@ function removeParked(
  * rest is best effort and repeated by the next parker.
  */
 function park(file: string, sessionId: string, own: SessionPin, now: number, ttlMs: number): void {
-  publish(parkedName(file, sessionId, own.servedAt), { [sessionId]: own });
+  publish(parkedName(file, sessionId, own.servedAt), onePin(sessionId, own));
   try {
     const key = sessionKey(sessionId);
     const pastTtl = (entry: ParkedFile) => now - entry.servedAt >= ttlMs;
@@ -303,7 +327,7 @@ function park(file: string, sessionId: string, own: SessionPin, now: number, ttl
       for (const entry of files) {
         if (gone.has(entry)) continue;
         let pin: SessionPin | undefined;
-        try { pin = parsePins(readText(entry.path), now, ttlMs, now + CLOCK_SLACK_MS)[sessionId]; } catch { continue; }
+        try { pin = pinOf(parsePins(readText(entry.path), now, ttlMs, now + CLOCK_SLACK_MS), sessionId); } catch { continue; }
         if (pin) mine.push({ entry, pin });
       }
       // Name order within one session and one servedAt is park order: >= keeps the last parked.
@@ -416,15 +440,15 @@ export function readSessionPin(
             if (lost === undefined && servedAt <= latest && now - servedAt < ttlMs) lost = servedAt;
             continue;
           }
-          const pin = parsePins(text, now, ttlMs, latest)[sessionId];
+          const pin = pinOf(parsePins(text, now, ttlMs, latest), sessionId);
           if (pin && (!parked || pin.servedAt > parked.servedAt)) parked = pin;
         }
       } catch { /* the parked files cannot be listed: store only */ }
       hooks.afterParked?.();
-      let pins: Pins = {};
+      let pins = emptyPins();
       try { pins = parsePins(readText(file), now, ttlMs, latest); } catch { /* unreadable: parked pin only */ }
-      if (parked) fold(pins, { [sessionId]: parked });
-      const pin = pins[sessionId];
+      if (parked) fold(pins, onePin(sessionId, parked));
+      const pin = pinOf(pins, sessionId);
       if (pin && (!found || pin.servedAt >= found.servedAt)) found = pin;
       if (lost === undefined || (found && found.servedAt >= lost)) break;
       leave ??= announceReader(file, key);
@@ -474,7 +498,7 @@ export function recordSessionPin(file: string, sessionId: string, account: strin
       pins = parsePins(readText(file), now, ttlMs, now + CLOCK_SLACK_MS);
       parked = parkedFiles(file).slice(0, MAX_PARKED_PINS);
     } catch { return park(file, sessionId, own, now, ttlMs); }
-    const stored = pins[sessionId];
+    const stored = pinOf(pins, sessionId);
     if (!stored || own.servedAt >= stored.servedAt) pins[sessionId] = own;
     const consumed: string[] = [];
     for (const { path } of parked) {
