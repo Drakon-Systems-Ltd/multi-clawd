@@ -466,7 +466,19 @@ cd multi-clawd && npm install && npm run build
 openclaw plugins install "$(pwd)"
 ```
 
-npm 10 and 11 both work here because the lockfile is committed.
+**Node for a source install.** multi-clawd's own `package.json` declares no
+`engines` field, so npm will not stop you on an unsupported Node. The
+contributor `npm install` pulls in the pinned dev dependency `openclaw`
+**2026.8.1**, whose declared engines are
+`>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0`. CI builds and tests this repo on
+Node **22 and 24** only; other lines are not covered by our CI. If `npm install`
+fails with an engines or dependency error, switch to a Node version inside those
+ranges (for example with `nvm`) and re-run `npm install && npm run build`.
+
+**npm version.** CI installs npm 11 on Node 22, because npm 10 (bundled with
+Node 22) crashed while resolving this dev tree ("Cannot read properties of null
+(reading 'edgesOut')"). Use npm 11 on Node 22. We have not verified npm 10 as a
+working source-install path, so no claim is made that it works.
 
 ```powershell
 # Windows (native, PowerShell)
@@ -496,6 +508,18 @@ registration path are tested against OpenClaw **2026.8.1**. The standalone
 `multi-clawd` CLI and Hermes commands do not require the optional OpenClaw peer
 to be resolvable; plugin loading and OpenClaw-backed commands still require the
 host-provided peer.
+
+**Node on the OpenClaw host.** The Node requirement for running the plugin is
+whatever your OpenClaw host declares, not what the dev SDK above declares. The
+OpenClaw release checked for this note (2026.11.3, its published `package.json`
+and Node compatibility docs) declares `>=24.16.0 <25 || >=26.1.0`, and those docs
+list Node 22, 23 and 25 as unsupported. That differs from the 2026.8.1 dev SDK
+range used for source installs, and requirements may change between OpenClaw
+releases, so check the docs for your installed version. If OpenClaw refuses to
+start on your Node, upgrade Node per the OpenClaw install docs rather than
+changing multi-clawd. Platform notes (including macOS and native Windows) are in
+[Platform support](#platform-support); Node versions were not separately
+measured on macOS.
 
 **Upgrading:**
 
