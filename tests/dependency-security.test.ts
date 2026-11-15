@@ -6,7 +6,7 @@ const ROOT = join(__dirname, "..");
 const readJson = (path: string) => JSON.parse(readFileSync(join(ROOT, path), "utf8"));
 
 /**
- * Committed-lockfile guard for the dev tree's security floors (#157).
+ * Committed-lockfile guard for the dev tree's security floors (#157, #174).
  *
  * Every package here arrives through the pinned `openclaw` devDependency. This
  * package declares none of them as a production or npm-bundled dependency, and
@@ -26,11 +26,19 @@ const readJson = (path: string) => JSON.parse(readFileSync(join(ROOT, path), "ut
  *
  * `minimatch` has no floor on purpose: patched releases start at 11.0.1, a new
  * major, and `openclaw` pins 10.x exactly. It stays open in #157.
+ *
+ * `@hono/node-server` (#174, GHSA-jpvv-r467-5p4w) arrives through the MCP SDK's
+ * own range (`^1.19.9 || ^2.0.5`), which already admits the patched 2.1.6, so
+ * it needs a lockfile refresh and no override. The advisory also covers the
+ * 1.x line below 1.19.18; the single floor refuses every 1.x record, patched
+ * or not, so a resolver falling back to the older line gets looked at rather
+ * than waved through.
  */
 const FLOORS: Record<string, string> = {
   undici: "8.12.2",
   "@modelcontextprotocol/sdk": "1.32.0",
   "fast-uri": "3.1.9",
+  "@hono/node-server": "2.1.6",
   hono: "4.13.16",
 };
 
@@ -75,7 +83,7 @@ function lockedVersions(lock: any, name: string): Array<{ path: string; version:
     .map(([path, entry]) => ({ path, version: entry.version }));
 }
 
-describe("dev-tree security floors (#157)", () => {
+describe("dev-tree security floors (#157, #174)", () => {
   const pkg = readJson("package.json");
   const lock = readJson("package-lock.json");
 
