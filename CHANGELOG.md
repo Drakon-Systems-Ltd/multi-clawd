@@ -18,7 +18,8 @@ versioning from v1.0.
   session and no other session's, so no number of parked sessions hides a pin.
   Parked files stay bounded while a live holder keeps the lock: a session
   keeps one, holding its latest pin; files past the TTL are removed; and the
-  total never exceeds the store's own 1000-session bound. The store also takes
+  total is held to the store's own 1000-session bound (the entry below states
+  the exact limits while a session is being read or trimmed). The store also takes
   the same lock as shim state, so a live holder's lock is no longer removed by
   age and a dead holder's is recovered at once. The wait stays bounded at 1 s.
   (#178)
@@ -28,8 +29,9 @@ versioning from v1.0.
   each new listing was replaced in turn, the read returned an older stored pin
   or none, although a valid pin was on disk throughout. A read now returns a
   pin at least as recent as the session's latest valid pin when the read
-  began, however many pins the session parks meanwhile and whatever another
-  process holds or however long it stops. The read never waits. How:
+  began, whatever another process holds or however long it stops, for every
+  read during which fewer than 32 pins of its session are parked (see the
+  limits below). The read never waits. How:
   - A parker removes a parked file, for any reason (superseded, past the TTL,
     over the 1000-file bound), only under a short lock for that file's session
     (`pool-<id>.sessions.json.parked-<session key>.lock`), tried once without
@@ -50,18 +52,48 @@ versioning from v1.0.
     Before, a read treated any pin ahead of its own reading as no pin, which
     discarded the pin a concurrent turn had just parked.
 
-  Limits, stated plainly. While a session is being read or trimmed its files
-  are not removed, so the parked files can pass the 1000-file bound by that
-  session's files until the next park; a process stopped while it holds a
-  session's lock or marker keeps that one session's files from being removed
-  for as long as it is stopped (a write that takes the store lock still folds
-  them). A pin that passes the TTL, falls outside the 1000 most recently
-  served sessions, or is more than 60 s ahead of the clock of the writer that
-  rewrites the store ends there, as before; a read running across that moment
-  may return without it. A read ends after four listings with the latest pin
-  it saw only if the state directory refuses the marker file or parked files
-  are deleted by something other than multi-clawd. Nothing is signalled or
-  killed. (#183)
+  Limits, stated plainly. Parked files are bounded whatever another process
+  holds and however long it is stopped: one session has at most 32
+  (`MAX_SESSION_PARKED`), and there are at most 1032 in all
+  (`MAX_PARKED_FILES`: the store's 1000-session bound plus one session's
+  worth). A writer counts the files before it parks. What gives way at a
+  bound:
+  - While a session is being read or trimmed its superseded files are not
+    removed, so it can hold more than one, and the total can pass 1000 by
+    such files. A reader that stopped keeps its marker, and that protection
+    lasts until the session has 32 files. The next write of that session then
+    removes the superseded ones under the session's lock, marker or not,
+    keeps the file with the latest pin, and parks its own. So the read
+    guarantee above holds for every read during which fewer than 32 pins of
+    its session are parked; a read raced by 32 or more may end with the
+    latest pin it saw.
+  - If that session's lock is itself held by a process that does not let go,
+    nothing of the session can be removed, and the write is refused: no file
+    is written, the session's latest parked pin stays readable, and the shim
+    says so on stderr (`[multi-clawd shim] session pin not recorded: ...`,
+    naming no session, account or path). The turn is not affected. The
+    session's next turn is routed by the pin that is still parked.
+  - If the total is at 1032 after the usual trim (several sessions' surplus
+    is behind locks or markers that are not released), the write is refused
+    in the same way. A reader's protection never gives way for the total, and
+    no session loses its only parked pin to another session's surplus.
+  - The count and the write are two steps, because a park below the bound
+    takes no lock. A turn stopped between them still writes its one file when
+    it resumes, so each bound can be passed by one file for each turn stopped
+    at exactly that point, until that session's next park.
+
+  Parked pins reach the store only when a writer takes the store lock: while
+  a process keeps that lock, nothing is folded, and the bounds above are what
+  limits the files. No live holder's lock is removed, by age or otherwise;
+  no file is removed without its session's lock; no writer overwrites
+  another's file. A pin that passes the TTL, falls outside the 1000 most
+  recently served sessions, or is more than 60 s ahead of the clock of the
+  writer that rewrites the store ends there, as before; a read running across
+  that moment may return without it. A read ends after four listings with the
+  latest pin it saw only if the state directory refuses the marker file,
+  parked files are deleted by something other than multi-clawd, or its
+  session reaches the 32-file bound while it runs. Nothing is signalled or
+  killed, and nothing waits longer than before. (#183, #186)
 - **A session pin served earlier could replace one served later.** A writer
   delayed past a newer write for the same session overwrote the newer pin with
   its own. The pin served latest now wins whichever writer arrives last. (#178)

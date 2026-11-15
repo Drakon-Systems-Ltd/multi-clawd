@@ -72,6 +72,18 @@ const LOCK_WAIT_MS = 1000;
 /** Parked files one write folds at most. Reads have no such limit: see readSessionPin. */
 export const MAX_PARKED_PINS = 64;
 /**
+ * Parked files one session has at most (#186). A write that finds this many
+ * makes room first or is refused: see park().
+ */
+export const MAX_SESSION_PARKED = 32;
+/**
+ * Parked files in all at most (#186): the store's own bound, plus one
+ * session's worth of files that could not be removed when they were
+ * superseded. A write that finds this many makes room first or is refused:
+ * see park().
+ */
+export const MAX_PARKED_FILES = MAX_SESSION_PINS + MAX_SESSION_PARKED;
+/**
  * Listings one read makes at most: one before it announces itself and three
  * after. Three is not a tuning value. Once a read is announced at most one
  * parker can still be removing files of its session, from one listing, oldest
@@ -258,9 +270,14 @@ function remove(path: string): void {
  * files in that listing. A session is left alone when its lock is busy, when
  * a live reader has announced itself for it, or once the lock is no longer
  * ours. A session's files are removed oldest first.
+ *
+ * `full` names the one session, if any, that has reached MAX_SESSION_PARKED:
+ * for it alone an announced reader does not stop the removal (#186). Its lock
+ * is still required.
  */
 function removeParked(
   file: string, keys: Iterable<string>, choose: (key: string, files: ParkedFile[]) => ParkedFile[],
+  full?: string,
 ): void {
   const locks = new Map<string, ShimLockRelease>();
   try {
@@ -272,7 +289,7 @@ function removeParked(
     const names = stateNames(file);
     const listed = parkedFiles(file, names);
     for (const [key, lock] of locks) {
-      if (readerAnnounced(file, key, names)) continue;
+      if (key !== full && readerAnnounced(file, key, names)) continue;
       for (const entry of choose(key, listed.filter((entry) => entry.key === key))) {
         if (!lock.held()) break;
         remove(entry.path);
@@ -284,8 +301,8 @@ function removeParked(
 }
 
 /**
- * Park `own`, then keep the parked files bounded without the store lock, which
- * a live holder may keep for as long as it runs. Three rules:
+ * Keep the parked files bounded without the store lock, which a live holder
+ * may keep for as long as it runs. Three rules:
  *
  * - One file per session. Of the session's parked pins this writer counts as
  *   valid, the one served latest stays (for equal `servedAt`, the one parked
@@ -302,56 +319,136 @@ function removeParked(
  * Every one of these removals goes through removeParked: under the lock of
  * the file's session, and not while a reader of that session has announced
  * itself (#183). A file that cannot be removed now stays for the next parker,
- * so the count can pass the bound by the files of sessions that are being
- * read or trimmed at that moment, and by no other file.
+ * so the count can pass MAX_SESSION_PINS by the files of sessions that are
+ * being read or trimmed at that moment, and by no other file. How far it can
+ * pass is what park() bounds.
  *
- * Publishing comes first and is the only step that can fail the park; the
- * rest is best effort and repeated by the next parker.
+ * `full` is set when the writer's own session has reached MAX_SESSION_PARKED:
+ * the first rule then applies to it whether or not a reader is announced.
+ * Nothing else changes: the same files are chosen, under the same lock.
+ */
+function trimParked(file: string, sessionId: string, now: number, ttlMs: number, full: boolean): void {
+  const key = sessionKey(sessionId);
+  const pastTtl = (entry: ParkedFile) => now - entry.servedAt >= ttlMs;
+  const expired = (entry: ParkedFile): boolean => {
+    if (!pastTtl(entry)) return false;
+    let pins: SessionPin[];
+    try { pins = Object.values(parseAllPins(readText(entry.path))); } catch { return false; }
+    return pins.length > 0 && pins.every((pin) => now - pin.servedAt >= ttlMs);
+  };
+  const stale = parkedFiles(file).filter(pastTtl).map((entry) => entry.key);
+  removeParked(file, [key, ...stale], (session, files) => {
+    const gone = new Set(files.filter(expired));
+    if (session !== key) return [...gone];
+    const mine: { entry: ParkedFile; pin: SessionPin }[] = [];
+    for (const entry of files) {
+      if (gone.has(entry)) continue;
+      let pin: SessionPin | undefined;
+      try { pin = pinOf(parsePins(readText(entry.path), now, ttlMs, now + CLOCK_SLACK_MS), sessionId); } catch { continue; }
+      if (pin) mine.push({ entry, pin });
+    }
+    // Name order within one session and one servedAt is park order: >= keeps the last parked.
+    const latest = mine.reduce<typeof mine[number] | undefined>(
+      (best, each) => !best || each.pin.servedAt >= best.pin.servedAt ? each : best, undefined);
+    for (const each of mine) if (each !== latest) gone.add(each.entry);
+    return files.filter((entry) => gone.has(entry));
+  }, full ? key : undefined);
+
+  const left = parkedFiles(file);
+  const over = left.length - MAX_SESSION_PINS;
+  if (over > 0) {
+    const last = new Map<string, string>();
+    for (const entry of left) last.set(entry.key, entry.path);
+    const superseded = left.filter((entry) => last.get(entry.key) !== entry.path);
+    const only = left.filter((entry) => last.get(entry.key) === entry.path);
+    const surplus = new Set(superseded.slice(0, over).map((entry) => entry.path));
+    const evicted = new Set(only.slice(0, Math.max(0, over - surplus.size)).map((entry) => entry.path));
+    const chosen = [...superseded, ...only].filter((entry) => surplus.has(entry.path) || evicted.has(entry.path));
+    removeParked(file, chosen.map((entry) => entry.key), (_session, files) =>
+      // A surplus file goes only while a later file of its session is still there.
+      files.filter((entry, i) => evicted.has(entry.path) || (surplus.has(entry.path) && i < files.length - 1)));
+  }
+}
+
+/**
+ * Say that a pin was not recorded, on the channel the shim's other notes use
+ * (stderr, `[multi-clawd shim] ...`). No session id, account or path is named.
+ */
+function reportRefusal(why: string): void {
+  try { process.stderr.write(`[multi-clawd shim] session pin not recorded: ${why}\n`); }
+  catch { /* a failed write must never affect a turn */ }
+}
+
+/**
+ * Park `own` in a file of its own, within two bounds that hold whatever
+ * another process holds and however long it is stopped (#186):
+ *
+ * - one session has at most MAX_SESSION_PARKED parked files;
+ * - there are at most MAX_PARKED_FILES parked files in all.
+ *
+ * The files are counted before anything is written. Under both bounds the
+ * park is what it was: publish, then trimParked, best effort, repeated by the
+ * next parker. At a bound the trim runs first and the files are counted
+ * again, and what gives way is chosen:
+ *
+ * - The session is at its bound. That takes MAX_SESSION_PARKED parks whose
+ *   trim was skipped, which means a reader's marker or the session's lock has
+ *   been held across all of them. A marker held that long is a stopped
+ *   reader's, and its protection gives way: under the session's lock the
+ *   superseded files are removed, the latest pin's file stays, and the pin is
+ *   then parked. The read guarantee is what it was for every read during
+ *   which fewer than MAX_SESSION_PARKED pins of its session are parked (see
+ *   readSessionPin).
+ * - The session is still at its bound after that: its lock is held by a
+ *   process that is not letting go, and nothing of the session may be removed
+ *   without it. The write gives way. It is refused: no file is written, the
+ *   session's latest parked pin stays readable, and the refusal is reported.
+ * - The total is at its bound after the trim (several sessions' surplus is
+ *   behind locks or markers that are not released). The write is refused in
+ *   the same way. A reader's protection does not give way for the total.
+ *
+ * Never: a live holder's lock removed, a file of a session removed without
+ * its lock, or another writer's file overwritten. Nothing waits.
+ *
+ * The count and the publish are not one step, because a park under the bound
+ * takes no lock (it must not depend on one that a stopped process may hold).
+ * A parker stopped between the two publishes its one file when it resumes. So
+ * the exact statement is: MAX_SESSION_PARKED per session and MAX_PARKED_FILES
+ * in all, plus at most one file for each parker that was between counting and
+ * publishing at that moment. Each parker is a turn that parks once, and the
+ * next park of that session brings it back under.
+ *
+ * When the files cannot be counted the write is refused as well: a bound that
+ * is not checked is not kept.
  */
 function park(file: string, sessionId: string, own: SessionPin, now: number, ttlMs: number): void {
-  publish(parkedName(file, sessionId, own.servedAt), onePin(sessionId, own));
+  const key = sessionKey(sessionId);
+  const count = () => {
+    const all = parkedFiles(file);
+    return { session: all.filter((entry) => entry.key === key).length, total: all.length };
+  };
+  const within = (found: { session: number; total: number }) =>
+    found.session < MAX_SESSION_PARKED && found.total < MAX_PARKED_FILES;
+  let found: { session: number; total: number };
   try {
-    const key = sessionKey(sessionId);
-    const pastTtl = (entry: ParkedFile) => now - entry.servedAt >= ttlMs;
-    const expired = (entry: ParkedFile): boolean => {
-      if (!pastTtl(entry)) return false;
-      let pins: SessionPin[];
-      try { pins = Object.values(parseAllPins(readText(entry.path))); } catch { return false; }
-      return pins.length > 0 && pins.every((pin) => now - pin.servedAt >= ttlMs);
-    };
-    const stale = parkedFiles(file).filter(pastTtl).map((entry) => entry.key);
-    removeParked(file, [key, ...stale], (session, files) => {
-      const gone = new Set(files.filter(expired));
-      if (session !== key) return [...gone];
-      const mine: { entry: ParkedFile; pin: SessionPin }[] = [];
-      for (const entry of files) {
-        if (gone.has(entry)) continue;
-        let pin: SessionPin | undefined;
-        try { pin = pinOf(parsePins(readText(entry.path), now, ttlMs, now + CLOCK_SLACK_MS), sessionId); } catch { continue; }
-        if (pin) mine.push({ entry, pin });
-      }
-      // Name order within one session and one servedAt is park order: >= keeps the last parked.
-      const latest = mine.reduce<typeof mine[number] | undefined>(
-        (best, each) => !best || each.pin.servedAt >= best.pin.servedAt ? each : best, undefined);
-      for (const each of mine) if (each !== latest) gone.add(each.entry);
-      return files.filter((entry) => gone.has(entry));
-    });
-
-    const left = parkedFiles(file);
-    const over = left.length - MAX_SESSION_PINS;
-    if (over > 0) {
-      const last = new Map<string, string>();
-      for (const entry of left) last.set(entry.key, entry.path);
-      const superseded = left.filter((entry) => last.get(entry.key) !== entry.path);
-      const only = left.filter((entry) => last.get(entry.key) === entry.path);
-      const surplus = new Set(superseded.slice(0, over).map((entry) => entry.path));
-      const evicted = new Set(only.slice(0, Math.max(0, over - surplus.size)).map((entry) => entry.path));
-      const chosen = [...superseded, ...only].filter((entry) => surplus.has(entry.path) || evicted.has(entry.path));
-      removeParked(file, chosen.map((entry) => entry.key), (_session, files) =>
-        // A surplus file goes only while a later file of its session is still there.
-        files.filter((entry, i) => evicted.has(entry.path) || (surplus.has(entry.path) && i < files.length - 1)));
+    found = count();
+    if (!within(found)) {
+      try { trimParked(file, sessionId, now, ttlMs, found.session >= MAX_SESSION_PARKED); }
+      catch { /* what could not be removed is counted below */ }
+      found = count();
     }
-  } catch { /* the pin is parked; bounding is retried by the next parker */ }
+  } catch {
+    return reportRefusal("its parked pin files could not be counted");
+  }
+  if (found.session >= MAX_SESSION_PARKED) {
+    return reportRefusal(`this session already has ${MAX_SESSION_PARKED} parked pin files and none could be removed`);
+  }
+  if (found.total >= MAX_PARKED_FILES) {
+    return reportRefusal(`${MAX_PARKED_FILES} parked pin files are already waiting and none could be removed`);
+  }
+  publish(parkedName(file, sessionId, own.servedAt), onePin(sessionId, own));
+  try { trimParked(file, sessionId, now, ttlMs, false); }
+  catch { /* the pin is parked; bounding is retried by the next parker */ }
 }
 
 /** Test seams for a reader's interleavings with parkers and folders. */
@@ -374,9 +471,11 @@ interface ReadSessionPinHooks {
  * file, and a read of it takes no lock and writes nothing.
  *
  * The result is at least as recent as the session's latest valid pin, stored
- * or parked, at the moment the read began, however many pins the session
- * parks, and whatever any process holds or however long it stops, while the
- * read runs (#183). The read itself never waits.
+ * or parked, at the moment the read began, whatever any process holds or
+ * however long it stops while the read runs, for every read during which
+ * fewer than MAX_SESSION_PARKED pins of its session are parked (#183, #186:
+ * the last paragraph but two says why that number). The read itself never
+ * waits.
  *
  * How. One listing, every listed file opened, newest first, then the store,
  * is a pass. A pass settles the read when each listed file that was gone on
@@ -403,8 +502,21 @@ interface ReadSessionPinHooks {
  * So three passes after the marker always include one that settles; the
  * marker is removed on return, and a dead reader's marker by the next parker.
  * The read ends unsettled, with the latest pin it saw, only if the marker
- * cannot be written (the state directory refuses a new file) or files are
- * removed by something other than this code.
+ * cannot be written (the state directory refuses a new file), files are
+ * removed by something other than this code, or the session reaches its
+ * bound while the read runs, which is the next paragraph.
+ *
+ * A session's files are bounded even while a reader that stopped keeps its
+ * marker (#186), so there is one more remover: a parker that finds the
+ * session at MAX_SESSION_PARKED files removes the superseded ones under the
+ * session's lock, marker or not, and leaves the latest pin's file (park()).
+ * That removal leaves one file, so the session is next at its bound only
+ * after MAX_SESSION_PARKED - 1 more parks; and a file it takes from a pass
+ * was superseded by a file parked after that pass listed. A read that the
+ * removals above leave unsettled therefore needs one of these to remove the
+ * newest file of a pass after the marker: that file and at least
+ * MAX_SESSION_PARKED - 1 parked after it, all parked while the read ran. With
+ * fewer, some pass opens the newest file it listed and settles.
  *
  * What ends a pin's life is not this race: a pin past the TTL, a session
  * outside the 1000 most recently served, or a pin more than CLOCK_SLACK_MS
