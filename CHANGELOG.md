@@ -6,6 +6,11 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.7.3] - 2026-11-15
+
+Patch on 2.7.2: improve session-affinity pin handling under concurrent turns
+and update a development-tree dependency for a security advisory.
+
 ### Fixed
 - **A session pin could be silently dropped under concurrent turns.** With
   `sessionAffinity` on, a shim that waited the full 1 s for the pin store's
@@ -17,11 +22,11 @@ versioning from v1.0.
   folds them in and removes them. A read opens every parked file of its own
   session and no other session's, so no number of parked sessions hides a pin.
   Parked files stay bounded while a live holder keeps the lock: a session
-  keeps one, holding its latest pin; files past the TTL are removed; and the
-  total is held to the store's own 1000-session bound (the entry below states
-  the exact limits while a session is being read or trimmed). The store also takes
-  the same lock as shim state, so a live holder's lock is no longer removed by
-  age and a dead holder's is recovered at once. The wait stays bounded at 1 s.
+  normally keeps one, holding its latest pin; files past the TTL are removed;
+  and the limits are 32 per session and 1032 in total, with the exceptions
+  detailed below. The store also takes the same lock as shim state, so a live
+  holder's lock is no longer removed by age and a dead holder's is recovered
+  at once. The wait stays bounded at 1 s.
   (#178)
 - **A read could miss a session's pin while newer pins for it were being
   parked.** A parked pin replaces the session's older parked file. A read that
@@ -33,8 +38,8 @@ versioning from v1.0.
   read during which fewer than 32 pins of its session are parked (see the
   limits below). The read never waits. How:
   - A parker removes a parked file, for any reason (superseded, past the TTL,
-    over the 1000-file bound), only under a short lock for that file's session
-    (`pool-<id>.sessions.json.parked-<session key>.lock`), tried once without
+    during trimming past 1000 files), only under a short lock for that file's
+    session (`pool-<id>.sessions.json.parked-<session key>.lock`), tried once without
     waiting. When the lock is busy the file stays for the next parker.
   - A read that finds a listed file gone, with nothing it read at least as
     recent, announces itself with a marker
@@ -43,9 +48,10 @@ versioning from v1.0.
     that session while a live reader's marker is there. Only the one parker
     that already held the lock when the marker appeared can still remove
     files, from one listing, oldest first; three more listings always include
-    one that settles the read. The marker goes when the read returns; one left
-    by a reader that died is removed by the next parker. A read that loses no
-    file writes nothing and takes no lock, as before.
+    one that settles the read under these removal rules. The marker goes when
+    the read returns; one left by a reader that died is removed by the next
+    parker. A read that loses no file writes nothing and takes no lock, as
+    before.
   - A read counts a pin served after its caller's clock reading: up to 60 s
     ahead of that reading or of the clock when the read lists its files,
     whichever is later (exactly 60 000 ms ahead counts, 60 001 ms does not).
@@ -108,6 +114,12 @@ versioning from v1.0.
   prototype and every lookup is an own-property check: the write, the fold of
   parked pins, the read, and the trim of parked files. Session ids that are
   UUIDs, which is what Claude Code issues, were never affected. (#186)
+
+### Repository
+- Updated the development-tree-only `@hono/node-server` lockfile record from
+  2.1.5 to 2.1.6 for GHSA-jpvv-r467-5p4w / CVE-2026-126210, and raised the
+  committed-lockfile guard floor. `package.json` and runtime dependencies are
+  unchanged; this does not establish exposure in an installed plugin. (#182)
 
 ## [2.7.2] - 2026-11-13
 
