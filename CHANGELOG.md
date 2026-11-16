@@ -86,12 +86,14 @@ and update a development-tree dependency for a security advisory.
   - The count and the write are two steps, because a park below the bound
     takes no lock. A turn stopped between them still writes its one file when
     it resumes, so each bound can be passed by one file for each turn stopped
-    at exactly that point, until that session's next park.
+    at exactly that point. The surplus stays without growing until that
+    session's lock is free; the next park then trims it.
 
   Parked pins reach the store only when a writer takes the store lock: while
   a process keeps that lock, nothing is folded, and the bounds above are what
   limits the files. No live holder's lock is removed, by age or otherwise;
-  no file is removed without its session's lock; no writer overwrites
+  parkers remove files only under their session's lock; a store-lock holder
+  removes only files folded into a committed store; no writer overwrites
   another's file. A pin that passes the TTL, falls outside the 1000 most
   recently served sessions, or is more than 60 s ahead of the clock of the
   writer that rewrites the store ends there, as before; a read running across
