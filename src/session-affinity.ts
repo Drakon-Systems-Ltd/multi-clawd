@@ -416,7 +416,8 @@ function reportRefusal(why: string): void {
  * the exact statement is: MAX_SESSION_PARKED per session and MAX_PARKED_FILES
  * in all, plus at most one file for each parker that was between counting and
  * publishing at that moment. Each parker is a turn that parks once, and the
- * next park of that session brings it back under.
+ * surplus stays without growing until that session's lock is free; the next
+ * park then trims it.
  *
  * When the files cannot be counted the write is refused as well: a bound that
  * is not checked is not kept.
