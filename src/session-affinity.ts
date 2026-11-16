@@ -380,6 +380,17 @@ function reportRefusal(why: string): void {
 }
 
 /**
+ * Say that a bounded read ended unsettled and returned the latest pin it saw
+ * (#189), on the same channel. No session id, account or path is named.
+ */
+function reportUnsettledRead(): void {
+  try {
+    process.stderr.write(
+      `[multi-clawd shim] session pin read unsettled after ${PARKED_READ_LISTINGS} listings: using the latest pin seen\n`);
+  } catch { /* a failed write must never affect a turn */ }
+}
+
+/**
  * Park `own` in a file of its own, within two bounds that hold whatever
  * another process holds and however long it is stopped (#186):
  *
@@ -505,7 +516,8 @@ interface ReadSessionPinHooks {
  * The read ends unsettled, with the latest pin it saw, only if the marker
  * cannot be written (the state directory refuses a new file), files are
  * removed by something other than this code, or the session reaches its
- * bound while the read runs, which is the next paragraph.
+ * bound while the read runs, which is the next paragraph. Such a read says so
+ * on the shim's stderr channel (#189), naming no session, account or path.
  *
  * A session's files are bounded even while a reader that stopped keeps its
  * marker (#186), so there is one more remover: a parker that finds the
@@ -537,6 +549,7 @@ export function readSessionPin(
   let parked: SessionPin | undefined;
   let found: SessionPin | undefined;
   let leave: (() => void) | undefined;
+  let settled = false;
   try {
     for (let listing = 0; listing < PARKED_READ_LISTINGS; listing++) {
       /** The latest `servedAt` named by a listed file that was gone on opening and would have counted. */
@@ -563,9 +576,10 @@ export function readSessionPin(
       if (parked) fold(pins, onePin(sessionId, parked));
       const pin = pinOf(pins, sessionId);
       if (pin && (!found || pin.servedAt >= found.servedAt)) found = pin;
-      if (lost === undefined || (found && found.servedAt >= lost)) break;
+      if (lost === undefined || (found && found.servedAt >= lost)) { settled = true; break; }
       leave ??= announceReader(file, key);
     }
+    if (!settled) reportUnsettledRead();
     return found;
   } finally {
     leave?.();
