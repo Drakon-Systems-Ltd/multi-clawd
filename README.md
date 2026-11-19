@@ -1191,12 +1191,19 @@ Early but real — built for and dogfooded in production.
 - **v1.9** — one pool, both transports: accounts can also serve OpenClaw's
   direct `anthropic/*` route; the gateway keeps the `anthropic` auth order in
   pool-health order; `multi-clawd direct` / `direct sync` ✅
-- **Unreleased** — optional per-session affinity for shimmed Claude CLI
-  launches; health overrides the pin, with bounded expiring state ✅
+- **v2.4** — optional per-session affinity (`pool.sessionAffinity`) for shimmed
+  Claude CLI launches; health overrides the pin, with bounded expiring state
+  ✅ (hardened through 2.7.3; see [`CHANGELOG.md`](./CHANGELOG.md))
+
+Releases after v1.9 are not itemised here; [`CHANGELOG.md`](./CHANGELOG.md) is
+the release history.
+
 - **Next** — standalone localhost proxy (OpenAI-compatible) so Hermes and
   custom runtimes can share the pool; local
-  five-hour-window signal (turn counting); per-account lock for the shim
-  persistence race
+  five-hour-window signal (turn counting); closing the remaining shim
+  state-lock window: since 2.7.1 a live holder's lock is never reclaimed by
+  age, but the ownership check before a write still cannot make
+  check-and-write atomic (see the 2.7.0 and 2.7.1 entries in the changelog)
 
 See [`DESIGN.md`](./DESIGN.md) for the architecture, the three obvious
 approaches that *don't* work, and why.

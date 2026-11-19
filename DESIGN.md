@@ -525,8 +525,12 @@ tested (`src/watchdog-core.ts`).
   locally-derived 5h signal (per-account turn counting) is v0.4 design work.
 - Sticky selection is per-pool, not per-session — OpenClaw's
   `prepareExecution` context has no session id. The shim's resume handover
-  moves the session to the chosen account instead; true session affinity is
-  part of the v0.4 standalone-proxy track (Hermes runtimes).
+  moves the session to the chosen account instead. (Historical v0.3-era
+  limit: since 2.4.0 the opt-in `pool.sessionAffinity` pins shimmed Claude CLI
+  launches that carry a session id; see the README. Sticky selection itself
+  stays per-pool, and launches without a session id, direct Anthropic and
+  side-question launches are unchanged. Per-session affinity for non-shim
+  runtimes remains part of the v0.4 standalone-proxy track.)
 - **CLI-served turns are extension-tool-mute.** When a turn is served through
   a CLI backend (reseeded CLI harness rather than the native runtime), host
   extension and MCP tools are absent for the duration. The mute is
