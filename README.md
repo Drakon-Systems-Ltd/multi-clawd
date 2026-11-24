@@ -462,28 +462,35 @@ dependency (the host provides it), so the install stays lean.
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
-cd multi-clawd && npm install && npm run build
+cd multi-clawd && npm ci && npm run build
 openclaw plugins install "$(pwd)"
 ```
 
 **Node for a source install.** multi-clawd's own `package.json` declares no
 `engines` field, so npm will not stop you on an unsupported Node. The
-contributor `npm install` pulls in the pinned dev dependency `openclaw`
+contributor `npm ci` pulls in the pinned dev dependency `openclaw`
 **2026.8.1**, whose declared engines are
 `>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0`. CI builds and tests this repo on
-Node **22 and 24** only; other lines are not covered by our CI. If `npm install`
+Node **22 and 24** only; other lines are not covered by our CI. If `npm ci`
 fails with an engines or dependency error, switch to a Node version inside those
-ranges (for example with `nvm`) and re-run `npm install && npm run build`.
+ranges (for example with `nvm`) and re-run `npm ci && npm run build`.
 
-**npm version.** CI installs npm 11 on Node 22, because npm 10 (bundled with
-Node 22) crashed while resolving this dev tree ("Cannot read properties of null
-(reading 'edgesOut')"). Use npm 11 on Node 22. We have not verified npm 10 as a
-working source-install path, so no claim is made that it works.
+**npm version.** Use `npm ci`, not `npm install`, for a source install. On
+Linux x64 with Node 22.23.3 and npm 10.9.9 (the bundled npm; the version that
+crashed in #48), a fresh checkout resolved, installed and built with both
+commands, but `npm install` rewrote the tracked `package-lock.json`, deleting 20
+platform-specific `libc` fields (60 lines), while `npm ci` followed by
+`npm run build` left the lockfile byte-for-byte unchanged. `npm ci` installs
+exactly what the lockfile pins and never edits it. We have not verified npm 10
+on macOS or Windows. CI installs npm 11 on Node 22 and runs `npm install`; when
+you change dependencies, run `npm install` with npm 11 (a fresh `npm install` with
+npm 11.19.1 on Node 24, Linux x64, also left the lockfile unchanged) and commit
+the result.
 
 ```powershell
 # Windows (native, PowerShell)
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git
-cd multi-clawd; npm install; npm run build
+cd multi-clawd; npm ci; npm run build
 openclaw plugins install (Get-Location).Path
 ```
 
@@ -536,7 +543,7 @@ plain English), and `multi-clawd doctor` alongside.)
 
 ```bash
 # From source:
-cd multi-clawd && git pull && npm install && npm run build && npm run doctor
+cd multi-clawd && git pull && npm ci && npm run build && npm run doctor
 ```
 
 On the source path run `npm run build` explicitly — don't rely on the
