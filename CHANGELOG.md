@@ -6,6 +6,15 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **`multi-clawd account enable|disable` could fail when two changes shared a
+  timestamp (#197).** The config backup was named from the wall-clock
+  millisecond alone and created exclusively, so a second change in the same
+  millisecond stopped with `EEXIST` before writing. A backup whose timestamp
+  name is taken now gets the next free `-<n>` suffix. Creation is still
+  exclusive, an existing backup is never overwritten, and any other backup
+  failure still stops the change before the config is touched.
+
 ## [2.7.3] - 2026-11-15
 
 Patch on 2.7.2: improve session-affinity pin handling under concurrent turns

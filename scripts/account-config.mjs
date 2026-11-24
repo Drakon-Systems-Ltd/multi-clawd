@@ -95,13 +95,37 @@ export function editAccountDisabled(source, id, disabled) {
   return { edited, changed: edited !== source };
 }
 
+/** How many names one instant may use before a change is refused. */
+const BACKUP_NAME_ATTEMPTS = 100;
+
+/**
+ * Copy the config to a new backup beside it and return the backup's path.
+ * The name is the timestamp alone when that is free, so a lone change keeps
+ * the familiar name; a change that lands in the same millisecond as an
+ * earlier one takes the next free `-<n>` suffix (#197). Creation is always
+ * exclusive, so an existing backup is never overwritten, and any failure
+ * other than "that name is taken" propagates before the config is touched.
+ */
+function createBackup(configFile) {
+  const base = `${configFile}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  for (let attempt = 0; attempt < BACKUP_NAME_ATTEMPTS; attempt++) {
+    const backup = attempt === 0 ? base : `${base}-${attempt}`;
+    try {
+      copyFileSync(configFile, backup, constants.COPYFILE_EXCL);
+      return backup;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error(`could not create a unique backup of ${configFile}: ${BACKUP_NAME_ATTEMPTS} names for this instant are taken; config left unchanged`);
+}
+
 export function changeAccount(id, disabled, dryRun = false, configFile = openclawConfigPath()) {
   const source = readFileSync(configFile, "utf8");
   const { edited, changed } = editAccountDisabled(source, id, disabled);
   if (dryRun || !changed) return { changed, dryRun };
   if (readFileSync(configFile, "utf8") !== source) throw new Error("config changed during edit; retry");
-  const backup = `${configFile}.backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
-  copyFileSync(configFile, backup, constants.COPYFILE_EXCL);
+  const backup = createBackup(configFile);
   const temporary = `${configFile}.tmp-${process.pid}-${Date.now()}`;
   try {
     writeFileSync(temporary, edited, { mode: statSync(configFile).mode & 0o777 });
