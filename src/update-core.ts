@@ -29,7 +29,7 @@ export function decideUpdateAction(opts: {
 export function pluginInstallAttempts(pkg: string, version: string): string[][] {
   return [
     ["plugins", "install", `clawhub:${pkg}@${version}`, "--force"],
-    ["plugins", "install", `${pkg}@${version}`, "--pin", "--force"],
+    ["plugins", "install", `npm:${pkg}@${version}`, "--pin", "--force"],
   ];
 }
 
