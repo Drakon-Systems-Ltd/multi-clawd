@@ -58,6 +58,11 @@ jobs:
             expect: "2026.10.10"
           - openclaw: "2026.11.1"
             expect: "2026.11.1"
+          # Previous-minor lane (#200): npm extended-stable at 2026-11-24. Exact
+          # pin plus exact installed-version assertion; keep the older
+          # baselines and `latest` alongside it.
+          - openclaw: "2026.10.33"
+            expect: "2026.10.33"
           - openclaw: "latest"
             expect: ""
     steps:
