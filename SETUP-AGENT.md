@@ -88,12 +88,12 @@ secret refs instead of silently accepting them.
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git /tmp/multi-clawd
-cd /tmp/multi-clawd && npm install && npm run build
+cd /tmp/multi-clawd && npm ci --include=dev && npm run build
 openclaw plugins install "$(pwd)"
 ```
 
-(Plain `npm install`, NOT `--omit=dev` — the build needs `tsc` from
-devDependencies. Registry installs ship prebuilt `dist/`.)
+(`npm ci --include=dev` installs the locked dependencies, including
+devDependencies; the build needs `tsc`. Registry installs ship prebuilt `dist/`.)
 
 ## 3. Second-account login — **ASK YOUR HUMAN**
 

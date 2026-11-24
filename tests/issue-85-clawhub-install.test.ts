@@ -22,7 +22,7 @@ describe("ClawHub install decisions", () => {
     for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub is temporarily unavailable", "getaddrinfo ENOTFOUND clawhub.ai", "unknown option clawhub:", "unsupported spec clawhub:pkg"]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("fallback");
     }
-    for (const message of ["blocked by moderation", "ClawHub archive integrity mismatch", "clawhub_download_blocked", "clawhub_security_unavailable", "trust check failed: ETIMEDOUT", "install policy denied", "invalid signature", "Install cancelled.", "aborted", "unexpected failure"]) {
+    for (const message of ["blocked by moderation", "ClawHub archive integrity mismatch", "clawhub_download_blocked", "clawhub_security_unavailable", "trust check failed: ETIMEDOUT", "install policy denied", "invalid signature", "Install cancelled.", "aborted", "unexpected failure", "unknown option --force", "unknown command plugins", "unsupported spec npm:other-package", "getaddrinfo ENOTFOUND registry.npmjs.org"]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("stop");
     }
   });
@@ -126,6 +126,14 @@ describe("multi-clawd update OpenClaw calls", () => {
     const { result, installs } = fakeCli({ clawhubFails: true, failure: "getaddrinfo ENOTFOUND clawhub.ai" });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(installs).toEqual(pluginInstallAttempts(PKG, "2.4.1"));
+  });
+
+  test.each(["unknown option --force", "unknown option --pin"])("unrelated %s stops after one install without restart", (failure) => {
+    const { result, installs, calls } = fakeCli({ clawhubFails: true, failure });
+    expect(result.status).not.toBe(0);
+    expect(installs).toEqual([pluginInstallAttempts(PKG, "2.4.1")[0]]);
+    expect(calls.some((a) => a[0] === "gateway" && a[1] === "restart")).toBe(false);
+    expect(result.stderr).toMatch(/npm was not tried/);
   });
 
   test.each(["SIGINT", 130] as const)("ENOTFOUND followed by %s stops before npm and gateway restart", (failureTermination) => {

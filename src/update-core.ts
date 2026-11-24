@@ -48,8 +48,8 @@ export function classifyClawhubFailure(result: {
   if (result.status === 0 || result.signal || result.status === null || result.error != null || result.status >= 128) return "stop";
   if (/moderation|integrity|trust|policy|signature|security|malicious|quarantin|revoked|blocked|cancel(?:led|ed)?|abort|clawhub_(?:download_blocked|security_unavailable|archive_integrity_mismatch)/i.test(output)) return "stop";
   if (/package not found on clawhub|version not found on clawhub|\b(?:package_not_found|version_not_found)\b/i.test(output)) return "fallback";
-  if (/clawhub.{0,80}(?:unreachable|temporarily unavailable|network error|fetch failed|connection (?:failed|refused|timed out))|ClawHub .* failed \(5\d\d\)|(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT)/i.test(output)) return "fallback";
-  if (/unknown (?:option|command)|unsupported (?:spec|source|protocol)|invalid (?:spec|source).{0,80}clawhub:|clawhub:.{0,80}(?:not supported|unsupported)/i.test(output)) return "fallback";
+  if (/clawhub.{0,80}(?:unreachable|temporarily unavailable|network error|fetch failed|connection (?:failed|refused|timed out))|ClawHub .* failed \(5\d\d\)|\b(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT)\b[^\n]{0,80}\b(?:[\w-]+\.)?clawhub\.ai\b/i.test(output)) return "fallback";
+  if (/(?:unknown (?:option|command)|unsupported (?:spec|source|protocol)|invalid (?:spec|source))[ \t:=\x22\x27]*clawhub:|clawhub:[^\n]{0,80}(?:not supported|unsupported)/i.test(output)) return "fallback";
   return "stop";
 }
 

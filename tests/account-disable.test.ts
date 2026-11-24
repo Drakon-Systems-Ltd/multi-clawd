@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { changeAccount, editAccountDisabled } from "../scripts/account-config.mjs";
 
@@ -69,7 +69,7 @@ describe("account enable/disable config edits", () => {
     expect(readFileSync(enable.backup!, "utf8")).toBe(disabled);
     expect(readFileSync(again.backup!, "utf8")).toBe(source);
     expect(readdirSync(configDir).sort()).toEqual(
-      ["openclaw.json", disable.backup!, enable.backup!, again.backup!].map((p) => p.split("/").pop()).sort(),
+      ["openclaw.json", disable.backup!, enable.backup!, again.backup!].map((p) => basename(p)).sort(),
     );
   });
 
@@ -95,7 +95,7 @@ describe("account enable/disable config edits", () => {
   });
 
   test("a backup that cannot be written fails closed without retrying (#197)", (ctx) => {
-    if (process.getuid?.() === 0) ctx.skip("root ignores directory permissions");
+    if (process.platform === "win32" || process.getuid?.() === 0) ctx.skip("directory permissions require a non-root POSIX user");
     freezeClock();
     chmodSync(configDir, 0o500);
     try {
