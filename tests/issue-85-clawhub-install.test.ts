@@ -14,7 +14,7 @@ describe("ClawHub install decisions", () => {
   test("versioned ClawHub is first and has no npm-only pin flag", () => {
     expect(pluginInstallAttempts(PKG, "2.4.1")).toEqual([
       ["plugins", "install", `clawhub:${PKG}@2.4.1`, "--force"],
-      ["plugins", "install", `${PKG}@2.4.1`, "--pin", "--force"],
+      ["plugins", "install", `npm:${PKG}@2.4.1`, "--pin", "--force"],
     ]);
   });
 
@@ -91,7 +91,7 @@ function fakeCli(opts: { clawhubFails: boolean; trackedSource?: string; installe
   writeFileSync(join(plugin, "package.json"), JSON.stringify({ version: opts.installedVersion ?? "2.4.1" }));
   const log = join(dir, "calls.jsonl");
   const openclaw = join(bin, "openclaw");
-  writeFileSync(openclaw, `#!${process.execPath}\nconst { appendFileSync } = require('node:fs');\nconst a = process.argv.slice(2);\nappendFileSync(process.env.CALL_LOG, JSON.stringify(a) + '\\n');\nif (a[0] === 'plugins' && a[1] === 'inspect') { console.log(JSON.stringify({ install: ${opts.trackedSource ? JSON.stringify({ source: opts.trackedSource, version: opts.installedVersion ?? "2.4.1", installPath: plugin }) : "null"} })); process.exit(0); }\nif (a[0] === 'plugins' && a[1] === 'install' && a[2].startsWith('clawhub:') && process.env.CLAWHUB_FAIL === '1') { console.error(${JSON.stringify(opts.failure ?? "Package not found on ClawHub.")}); ${opts.failureTermination === "SIGINT" ? "process.kill(process.pid, 'SIGINT')" : `process.exit(${opts.failureTermination ?? 1})`}; }\nprocess.exit(0);\n`);
+  writeFileSync(openclaw, `#!${process.execPath}\nconst { appendFileSync } = require('node:fs');\nconst a = process.argv.slice(2);\nappendFileSync(process.env.CALL_LOG, JSON.stringify(a) + '\\n');\nif (a[0] === 'plugins' && a[1] === 'inspect') { console.log(JSON.stringify({ install: ${opts.trackedSource ? JSON.stringify({ source: opts.trackedSource, version: opts.installedVersion ?? "2.4.1", installPath: plugin }) : "null"} })); process.exit(0); }\nif (a[0] === 'plugins' && a[1] === 'install' && a[2].startsWith('clawhub:') && process.env.CLAWHUB_FAIL === '1') { console.error(${JSON.stringify(opts.failure ?? "Package not found on ClawHub.")}); ${opts.failureTermination === "SIGINT" ? "process.kill(process.pid, 'SIGINT')" : `process.exit(${opts.failureTermination ?? 1})`}; }\nif (a[0] === 'plugins' && a[1] === 'install' && a.includes('--pin') && !a[2].startsWith('npm:')) { console.error('Bare pinned specs resolve to ClawHub'); process.exit(1); }\nprocess.exit(0);\n`);
   chmodSync(openclaw, 0o755);
   const npm = join(bin, "npm");
   writeFileSync(npm, `#!${process.execPath}\nif (${JSON.stringify(opts.latestVersion ?? "2.4.1")} === 'missing') process.exit(1); console.log(${JSON.stringify(opts.latestVersion ?? "2.4.1")});\n`);
@@ -115,7 +115,10 @@ describe("multi-clawd update OpenClaw calls", () => {
   test("uses npm only after ClawHub fails and explains the caution", () => {
     const { result, installs } = fakeCli({ clawhubFails: true });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(installs).toEqual(pluginInstallAttempts(PKG, "2.4.1"));
+    expect(installs).toEqual([
+      ["plugins", "install", "clawhub:@drakon-systems/multi-clawd@2.4.1", "--force"],
+      ["plugins", "install", "npm:@drakon-systems/multi-clawd@2.4.1", "--pin", "--force"],
+    ]);
     expect(result.stdout).toMatch(/falling back to npm.*source caution/);
   });
 
