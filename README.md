@@ -497,7 +497,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.7.3/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.7.4/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -1200,7 +1200,7 @@ Early but real — built for and dogfooded in production.
   pool-health order; `multi-clawd direct` / `direct sync` ✅
 - **v2.4** — optional per-session affinity (`pool.sessionAffinity`) for shimmed
   Claude CLI launches; health overrides the pin, with bounded expiring state
-  ✅ (hardened through 2.7.3; see [`CHANGELOG.md`](./CHANGELOG.md))
+  ✅ (hardened through 2.7.4; see [`CHANGELOG.md`](./CHANGELOG.md))
 
 Releases after v1.9 are not itemised here; [`CHANGELOG.md`](./CHANGELOG.md) is
 the release history.

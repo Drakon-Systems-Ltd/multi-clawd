@@ -6,6 +6,8 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+## [2.7.4] - 2026-11-24
+
 ### Fixed
 - **`multi-clawd account enable|disable` could fail when two changes shared a
   timestamp (#197).** The config backup was named from the wall-clock
@@ -14,6 +16,24 @@ versioning from v1.0.
   name is taken now gets the next free `-<n>` suffix. Creation is still
   exclusive, an existing backup is never overwritten, and any other backup
   failure still stops the change before the config is touched.
+- **A pinned npm fallback could resolve through ClawHub (#196).** After a
+  versioned ClawHub install fails for an availability or unsupported-spec
+  reason, `multi-clawd update` now passes an explicit `npm:` source for the
+  same exact version, with `--pin --force`. The previous bare package spec
+  could resolve to ClawHub again.
+
+### Changed
+- **Unsettled session-affinity reads now report their outcome (#190).** If a
+  bounded pin read does not settle after four listings, the shim writes one
+  anonymous stderr diagnostic and returns the latest pin it saw. Settled
+  reads remain silent; the diagnostic names no session, account or path.
+
+### Documentation
+- Source-install and source-update examples now use `npm ci`; the README
+  explains the observed npm 10 lockfile rewrite and the npm 11 dependency
+  update path. The roadmap and design note clarify that optional shimmed
+  session affinity shipped in v2.4 and distinguish it from planned affinity
+  for other runtimes.
 
 ## [2.7.3] - 2026-11-15
 
