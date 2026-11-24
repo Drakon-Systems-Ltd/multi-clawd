@@ -476,7 +476,7 @@ fails with an engines or dependency error, switch to a Node version inside those
 ranges (for example with `nvm`) and re-run `npm ci && npm run build`.
 
 **npm version.** Use `npm ci`, not `npm install`, for a source install. On
-Linux x64 with Node 22.23.3 and npm 10.9.9 (the bundled npm; the version that
+Linux x64 with Node 22.23.3 and npm 10.9.9 (the npm 10 line that
 crashed in #48), a fresh checkout resolved, installed and built with both
 commands, but `npm install` rewrote the tracked `package-lock.json`, deleting 20
 platform-specific `libc` fields (60 lines), while `npm ci` followed by
