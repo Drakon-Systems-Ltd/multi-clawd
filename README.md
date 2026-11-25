@@ -894,6 +894,11 @@ multi-clawd usage           # live figures per account + what the next launch wo
 multi-clawd usage --json
 ```
 
+If `five_hour` is missing or `null` but `seven_day` has a valid utilization,
+`multi-clawd usage` shows the `weekly` percentage and omits the `5-hour` row.
+A missing row is not a reading of 0%. In `--json` output, the account's
+`snapshot.windows` contains `seven_day` but no `five_hour` key.
+
 **What "seamless" means here.** Rotation is decided per launch, so a turn that
 starts after the poll has seen 85% simply runs on the other account — the user
 sees nothing. A turn already in flight when its account runs out is covered by
