@@ -10,8 +10,9 @@ versioning from v1.0.
 - **`multi-clawd update` retries from npm only when ClawHub's final error line is
   an availability failure (#202).** The classifier now reads the last non-empty
   line of the failure text: package/version not found on ClawHub, a ClawHub
-  HTTP 5xx, or a DNS failure (`fetch failed`, `ENOTFOUND`, `EAI_AGAIN`) falls
-  back; anything else stops, even after an earlier availability line. An
+  HTTP 5xx, or a `getaddrinfo ENOTFOUND`/`EAI_AGAIN` failure for the `clawhub.ai`
+  host (or a subdomain, whole-host match) falls back. A generic `fetch failed` and DNS
+  failures for unrelated or lookalike hosts (e.g. `clawhub.ai.evil.example`) stop; anything else stops, even after an earlier availability line. An
   unsupported platform or engine is no longer read as an unsupported spec, and
   refused, reset and timed-out connections, plus the old-CLI "unknown option"
   and "temporarily unavailable" shapes (no OpenClaw message to cite), now stop

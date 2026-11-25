@@ -51,7 +51,10 @@ export function exactTargetVersion(version: string | undefined): string | undefi
  *    codes package_not_found / version_not_found: OpenClaw plugins install,
  *    clawhub install path (buildClawHubInstallFailure).
  *  - "ClawHub <path> failed (5xx): <body>": ClawHub client HTTP error text.
- *  - "fetch failed" and getaddrinfo ENOTFOUND / EAI_AGAIN: Node fetch DNS failure.
+ *  - getaddrinfo ENOTFOUND / EAI_AGAIN whose host is clawhub.ai or a subdomain
+ *    (whole-host match, optional port): Node DNS failure for ClawHub itself. A bare
+ *    "fetch failed" or DNS for any other or lookalike host is not ClawHub-specific
+ *    and stops.
  * Rule E: refused/reset/timed-out connections (ECONNREFUSED, ECONNRESET,
  * ETIMEDOUT) are not automatic; they stop.
  */
@@ -67,7 +70,7 @@ export function classifyClawhubFailure(result: {
   if (last === undefined) return "stop";
   if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?(?:package not found on clawhub\b|version not found on clawhub\b|(?:package|version)_not_found\b)/i.test(last)) return "fallback";
   if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?ClawHub \S+ failed \(5\d\d\)/.test(last)) return "fallback";
-  if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?(?:fetch failed$|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\b)/.test(last)) return "fallback";
+  if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?getaddrinfo (?:ENOTFOUND|EAI_AGAIN) (?:[a-z0-9-]+\.)*clawhub\.ai(?::\d+)?$/i.test(last)) return "fallback";
   return "stop";
 }
 

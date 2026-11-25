@@ -539,7 +539,9 @@ restart, and finishes with a doctor health check.
 
 `update` retries once from npm (the same exact version, `npm:` source) **only** when the final
 line of ClawHub's failure output is one of: package or version not found on ClawHub, a
-ClawHub HTTP 5xx failure, or a DNS failure (`fetch failed`, `ENOTFOUND`, `EAI_AGAIN`). Anything
+ClawHub HTTP 5xx failure, or a DNS failure (`getaddrinfo ENOTFOUND` / `EAI_AGAIN`) for the
+`clawhub.ai` host itself (or a subdomain). A bare `fetch failed`, DNS failure for any other or
+lookalike host, and anything
 else stops the update without trying npm, including security, integrity, policy and trust
 failures, interruption, refused, reset or timed-out connections, an unsupported platform or
 engine, an older OpenClaw rejecting the `clawhub:` spec, and any unclear error, even if an

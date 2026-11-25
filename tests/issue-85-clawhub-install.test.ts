@@ -19,7 +19,7 @@ describe("ClawHub install decisions", () => {
   });
 
   test("only identified availability failures can use npm", () => {
-    for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub /api/v1/packages failed (503): upstream down", "TypeError: fetch failed", "fetch failed\ngetaddrinfo EAI_AGAIN clawhub.ai", "getaddrinfo ENOTFOUND clawhub.ai", "Installing clawhub:pkg@2.4.1\nPackage not found on ClawHub."]) {
+    for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub /api/v1/packages failed (503): upstream down", "fetch failed\ngetaddrinfo EAI_AGAIN clawhub.ai", "getaddrinfo ENOTFOUND clawhub.ai", "getaddrinfo ENOTFOUND www.clawhub.ai", "getaddrinfo EAI_AGAIN clawhub.ai:443", "Installing clawhub:pkg@2.4.1\nPackage not found on ClawHub."]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("fallback");
     }
     for (const message of ["blocked by moderation", "ClawHub archive integrity mismatch", "clawhub_download_blocked", "clawhub_security_unavailable", "trust check failed: ETIMEDOUT", "install policy denied", "invalid signature", "Install cancelled.", "aborted", "unexpected failure",
@@ -28,6 +28,8 @@ describe("ClawHub install decisions", () => {
       "unsupported spec clawhub:pkg", "unknown option clawhub:", "ClawHub is temporarily unavailable",
       // Rule E (#202): refused, reset and timed-out connections are manual retries.
       "connect ECONNREFUSED 203.0.113.1:443", "read ECONNRESET", "connect ETIMEDOUT 203.0.113.1:443",
+      // Host boundary (#202): generic fetch failures and unrelated or lookalike hosts are not ClawHub DNS.
+      "TypeError: fetch failed", "fetch failed", "getaddrinfo ENOTFOUND registry.example.com", "getaddrinfo EAI_AGAIN github.com", "getaddrinfo ENOTFOUND", "getaddrinfo ENOTFOUND clawhub.ai.evil.example", "getaddrinfo ENOTFOUND evilclawhub.ai", "getaddrinfo ENOTFOUND clawhub.ai.", "getaddrinfo ENOTFOUND clawhub-ai.example", "getaddrinfo ENOTFOUND notclawhub.ai",
       // Rule A (#202): an earlier availability line never overrides an unrelated final error.
       "ClawHub /api/v1/x failed (503), retrying\nEACCES: permission denied, mkdir '/x'", "getaddrinfo ENOTFOUND clawhub.ai\nENOSPC: no space left on device", "Package not found on ClawHub.\nchecksum mismatch for downloaded archive"]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("stop");
@@ -142,6 +144,11 @@ describe("multi-clawd update OpenClaw calls", () => {
     "getaddrinfo ENOTFOUND clawhub.ai\nENOSPC: no space left on device",
     "Package not found on ClawHub.\nchecksum mismatch for downloaded archive",
     "connect ECONNREFUSED 203.0.113.1:443",
+    "TypeError: fetch failed",
+    "fetch failed",
+    "getaddrinfo ENOTFOUND registry.example.com",
+    "getaddrinfo EAI_AGAIN clawhub.ai.evil.example",
+    "getaddrinfo ENOTFOUND evilclawhub.ai",
   ])("ambiguous ClawHub failure stops before npm and gateway restart: %s", (failure) => {
     const { result, installs, calls } = fakeCli({ clawhubFails: true, failure });
     expect(result.status).not.toBe(0);
