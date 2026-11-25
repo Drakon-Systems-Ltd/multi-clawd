@@ -534,9 +534,21 @@ measured on macOS.
 npx @drakon-systems/multi-clawd update
 ```
 
-One command: checks the registry, installs the chosen version from ClawHub (with npm
-fallback only when ClawHub is unavailable), offers the gateway restart, and finishes with a doctor health check.
-Security, integrity, and policy failures stop the update without trying npm.
+One command: checks the registry, installs the chosen version from ClawHub, offers the gateway
+restart, and finishes with a doctor health check.
+
+`update` retries once from npm (the same exact version, `npm:` source) **only** when the final
+line of ClawHub's failure output is one of: package or version not found on ClawHub, a
+ClawHub HTTP 5xx failure, or a DNS failure (`getaddrinfo ENOTFOUND` / `EAI_AGAIN`) for the
+`clawhub.ai` host itself (or a subdomain). A bare `fetch failed`, DNS failure for any other or
+lookalike host, and anything else stops the update without trying npm, including security,
+integrity, policy and trust failures, interruption, refused, reset or timed-out connections,
+an unsupported platform or engine, an older OpenClaw rejecting the `clawhub:` spec, and any
+unclear error, even if an availability line appeared earlier. After a stop, investigate first.
+Only a confirmed ClawHub availability failure or an older OpenClaw CLI explicitly rejecting
+the `clawhub:` spec as unsupported permits a manual retry of the same exact version:
+`openclaw plugins install npm:@drakon-systems/multi-clawd@<version> --pin --force`.
+Do not retry after an unclear, interrupted, security, integrity, policy, or trust failure.
 (`npm i -g @drakon-systems/multi-clawd` once, and it's just `multi-clawd
 update` — with `multi-clawd setup`, `multi-clawd explain` (your setup in
 plain English), and `multi-clawd doctor` alongside.)

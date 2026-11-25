@@ -649,8 +649,7 @@ async function update() {
       installedOk = true;
       break;
     }
-    const failure = `${result.stderr ?? ""}\n${result.error?.message ?? ""}`;
-    if (index === 0 && uc.classifyClawhubFailure({ status: result.status, signal: result.signal, error: result.error }, failure) !== "fallback") {
+    if (index === 0 && uc.classifyClawhubFailure({ status: result.status, signal: result.signal, error: result.error }, `${result.stderr ?? ""}\n${result.error?.message ?? ""}`) === "stop") {
       console.error("\n  ❌ ClawHub install failed without a confirmed availability error; npm was not tried. Review the failure above before retrying.");
       process.exit(1);
     }
