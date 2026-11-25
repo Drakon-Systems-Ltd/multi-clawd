@@ -39,7 +39,22 @@ export function exactTargetVersion(version: string | undefined): string | undefi
     ? version : undefined;
 }
 
-/** Only known availability failures permit a change of install source. */
+/**
+ * Only a ClawHub availability failure permits a change of install source.
+ *
+ * Rule A: fallback evidence must be the last non-empty line of the captured
+ * failure text, so an availability line followed by any other final error stops.
+ * Rule B: the stop list scans the whole output and always wins.
+ * Rule D: every fallback shape below is an OpenClaw message (cited); shapes
+ * nobody can evidence were removed and fail safe to the manual `npm:` retry.
+ *  - "Package not found on ClawHub." / "Version not found on ClawHub: n@v." and
+ *    codes package_not_found / version_not_found: OpenClaw plugins install,
+ *    clawhub install path (buildClawHubInstallFailure).
+ *  - "ClawHub <path> failed (5xx): <body>": ClawHub client HTTP error text.
+ *  - "fetch failed" and getaddrinfo ENOTFOUND / EAI_AGAIN: Node fetch DNS failure.
+ * Rule E: refused/reset/timed-out connections (ECONNREFUSED, ECONNRESET,
+ * ETIMEDOUT) are not automatic; they stop.
+ */
 export function classifyClawhubFailure(result: {
   status: number | null;
   signal?: string | null;
@@ -47,9 +62,12 @@ export function classifyClawhubFailure(result: {
 }, output: string): "fallback" | "stop" {
   if (result.status === 0 || result.signal || result.status === null || result.error != null || result.status >= 128) return "stop";
   if (/moderation|integrity|trust|policy|signature|security|malicious|quarantin|revoked|blocked|cancel(?:led|ed)?|abort|clawhub_(?:download_blocked|security_unavailable|archive_integrity_mismatch)/i.test(output)) return "stop";
-  if (/package not found on clawhub|version not found on clawhub|\b(?:package_not_found|version_not_found)\b/i.test(output)) return "fallback";
-  if (/clawhub.{0,80}(?:unreachable|temporarily unavailable|network error|fetch failed|connection (?:failed|refused|timed out))|ClawHub .* failed \(5\d\d\)|(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT)/i.test(output)) return "fallback";
-  if (/unknown (?:option|command)|unsupported (?:spec|source|protocol)|invalid (?:spec|source).{0,80}clawhub:|clawhub:.{0,80}(?:not supported|unsupported)/i.test(output)) return "fallback";
+  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1];
+  if (last === undefined) return "stop";
+  if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?(?:package not found on clawhub\b|version not found on clawhub\b|(?:package|version)_not_found\b)/i.test(last)) return "fallback";
+  if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?ClawHub \S+ failed \(5\d\d\)/.test(last)) return "fallback";
+  if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?(?:fetch failed$|getaddrinfo (?:ENOTFOUND|EAI_AGAIN)\b)/.test(last)) return "fallback";
   return "stop";
 }
 

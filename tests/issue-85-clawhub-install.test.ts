@@ -19,10 +19,17 @@ describe("ClawHub install decisions", () => {
   });
 
   test("only identified availability failures can use npm", () => {
-    for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub is temporarily unavailable", "getaddrinfo ENOTFOUND clawhub.ai", "unknown option clawhub:", "unsupported spec clawhub:pkg"]) {
+    for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub /api/v1/packages failed (503): upstream down", "TypeError: fetch failed", "fetch failed\ngetaddrinfo EAI_AGAIN clawhub.ai", "getaddrinfo ENOTFOUND clawhub.ai", "Installing clawhub:pkg@2.4.1\nPackage not found on ClawHub."]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("fallback");
     }
-    for (const message of ["blocked by moderation", "ClawHub archive integrity mismatch", "clawhub_download_blocked", "clawhub_security_unavailable", "trust check failed: ETIMEDOUT", "install policy denied", "invalid signature", "Install cancelled.", "aborted", "unexpected failure"]) {
+    for (const message of ["blocked by moderation", "ClawHub archive integrity mismatch", "clawhub_download_blocked", "clawhub_security_unavailable", "trust check failed: ETIMEDOUT", "install policy denied", "invalid signature", "Install cancelled.", "aborted", "unexpected failure",
+      // Rule A/C (#202): unsupported platform or engine is not an unsupported ClawHub spec.
+      "Installing clawhub:pkg@2.4.1: unsupported platform linux-riscv64", "clawhub:pkg@2.4.1 failed: unsupported engine node 18",
+      "unsupported spec clawhub:pkg", "unknown option clawhub:", "ClawHub is temporarily unavailable",
+      // Rule E (#202): refused, reset and timed-out connections are manual retries.
+      "connect ECONNREFUSED 203.0.113.1:443", "read ECONNRESET", "connect ETIMEDOUT 203.0.113.1:443",
+      // Rule A (#202): an earlier availability line never overrides an unrelated final error.
+      "ClawHub /api/v1/x failed (503), retrying\nEACCES: permission denied, mkdir '/x'", "getaddrinfo ENOTFOUND clawhub.ai\nENOSPC: no space left on device", "Package not found on ClawHub.\nchecksum mismatch for downloaded archive"]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("stop");
     }
   });
@@ -124,6 +131,32 @@ describe("multi-clawd update OpenClaw calls", () => {
 
   test("plain ENOTFOUND with exit 1 falls back to npm", () => {
     const { result, installs } = fakeCli({ clawhubFails: true, failure: "getaddrinfo ENOTFOUND clawhub.ai" });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(installs).toEqual(pluginInstallAttempts(PKG, "2.4.1"));
+  });
+
+  test.each([
+    "Installing clawhub:@drakon-systems/multi-clawd@2.4.1: unsupported platform linux-riscv64",
+    "clawhub:@drakon-systems/multi-clawd@2.4.1 failed: unsupported engine node 18",
+    "ClawHub /api/v1/packages failed (503), retrying\nEACCES: permission denied, mkdir '/x'",
+    "getaddrinfo ENOTFOUND clawhub.ai\nENOSPC: no space left on device",
+    "Package not found on ClawHub.\nchecksum mismatch for downloaded archive",
+    "connect ECONNREFUSED 203.0.113.1:443",
+  ])("ambiguous ClawHub failure stops before npm and gateway restart: %s", (failure) => {
+    const { result, installs, calls } = fakeCli({ clawhubFails: true, failure });
+    expect(result.status).not.toBe(0);
+    expect(installs).toEqual([pluginInstallAttempts(PKG, "2.4.1")[0]]);
+    expect(calls.some((a) => a[0] === "gateway" && a[1] === "restart")).toBe(false);
+    expect(calls.some((a) => a[1] === "install" && String(a[2]).startsWith("npm:"))).toBe(false);
+    expect(result.stderr).toMatch(/npm was not tried/);
+  });
+
+  test.each([
+    "fetch failed\ngetaddrinfo ENOTFOUND clawhub.ai",
+    "Version not found on ClawHub: @drakon-systems/multi-clawd@2.4.1.",
+    "ClawHub /api/v1/packages failed (503): down",
+  ])("availability failure as the final line still falls back: %s", (failure) => {
+    const { result, installs } = fakeCli({ clawhubFails: true, failure });
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(installs).toEqual(pluginInstallAttempts(PKG, "2.4.1"));
   });
