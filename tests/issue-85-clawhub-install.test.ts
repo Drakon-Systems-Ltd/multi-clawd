@@ -18,6 +18,16 @@ describe("ClawHub install decisions", () => {
     ]);
   });
 
+  test.each(["\r\n", "\r", "\n"])("archive decisions use complete lines (%j)", (separator) => {
+    const available = "Package not found on ClawHub.";
+    const mismatch = "checksum mismatch for downloaded archive";
+    const result = { status: 1 };
+    for (const lines of [[mismatch, available], [available, mismatch]]) {
+      expect(classifyClawhubFailure(result, lines.join(separator))).toBe("stop");
+    }
+    expect(classifyClawhubFailure(result, ["Checking package", available].join(separator))).toBe("fallback");
+  });
+
   test("only identified availability failures can use npm", () => {
     for (const message of ["Package not found on ClawHub.", "Version not found on ClawHub: pkg@2.4.1.", "package_not_found", "version_not_found", "ClawHub /api/v1/packages failed (503): upstream down", "fetch failed\ngetaddrinfo EAI_AGAIN clawhub.ai", "getaddrinfo ENOTFOUND clawhub.ai", "getaddrinfo ENOTFOUND www.clawhub.ai", "getaddrinfo EAI_AGAIN clawhub.ai:443", "Installing clawhub:pkg@2.4.1\nPackage not found on ClawHub."]) {
       expect(classifyClawhubFailure({ status: 1 }, message), message).toBe("fallback");
@@ -143,6 +153,7 @@ describe("multi-clawd update OpenClaw calls", () => {
     "ClawHub /api/v1/packages failed (503), retrying\nEACCES: permission denied, mkdir '/x'",
     "getaddrinfo ENOTFOUND clawhub.ai\nENOSPC: no space left on device",
     "Package not found on ClawHub.\nchecksum mismatch for downloaded archive",
+    "checksum mismatch for downloaded archive\nPackage not found on ClawHub.",
     "connect ECONNREFUSED 203.0.113.1:443",
     "TypeError: fetch failed",
     "fetch failed",

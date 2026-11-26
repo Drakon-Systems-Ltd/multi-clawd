@@ -26,6 +26,7 @@ versioning from v1.0.
   reads remain silent; the diagnostic names no session, account or path.
 
 ### Fixed
+- Archive verification failures stop the updater without an npm retry, even if a later diagnostic reports that ClawHub is unavailable (#206, #207).
 - **`multi-clawd account enable|disable` could fail when two changes shared a
   timestamp (#197).** The config backup was named from the wall-clock
   millisecond alone and created exclusively, so a second change in the same

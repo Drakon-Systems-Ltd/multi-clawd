@@ -65,7 +65,8 @@ export function classifyClawhubFailure(result: {
 }, output: string): "fallback" | "stop" {
   if (result.status === 0 || result.signal || result.status === null || result.error != null || result.status >= 128) return "stop";
   if (/moderation|integrity|trust|policy|signature|security|malicious|quarantin|revoked|blocked|cancel(?:led|ed)?|abort|clawhub_(?:download_blocked|security_unavailable|archive_integrity_mismatch)/i.test(output)) return "stop";
-  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (/\b(?:checksum|digest|hash)[ _-]+mismatch\b|\barchive verification failed\b/i.test(output)) return "stop";
+  const lines = output.split(/\r\n|[\r\n]/).map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1];
   if (last === undefined) return "stop";
   if (/^(?:(?:[A-Za-z]*[Ee]rror|failed):\s*)?(?:package not found on clawhub\b|version not found on clawhub\b|(?:package|version)_not_found\b)/i.test(last)) return "fallback";
