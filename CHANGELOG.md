@@ -6,6 +6,9 @@ versioning from v1.0.
 
 ## [Unreleased]
 
+### Fixed
+- Archive verification failures stop the updater even if a later diagnostic reports that ClawHub is unavailable (#206).
+
 ### Changed
 - **`multi-clawd update` retries from npm only when ClawHub's final error line is
   an availability failure (#202).** The classifier now reads the last non-empty
