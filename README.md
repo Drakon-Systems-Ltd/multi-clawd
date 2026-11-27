@@ -175,6 +175,21 @@ pool distribution only. Hermes then provides native reactive failover and the
 selected distribution strategy. Proactive near-limit telemetry/rotation from
 multi-clawd's OpenClaw pool is **not implemented for Hermes yet**.
 
+#### Capability comparison
+
+Each row restates what this README already documents; follow the links for
+detail. The full import guide is the [Hermes Agent integration](#hermes-agent-integration)
+section above.
+
+| Capability | OpenClaw (multi-clawd pool) | Hermes Agent (`multi-clawd hermes sync`) |
+| --- | --- | --- |
+| Failover when a turn dies with a limit error | Reactive chain stepping by OpenClaw | Reactive, Hermes-native 401/429 handling |
+| Proactive near-limit rotation | Yes: the pool hands over before the error ([proactive rotation](#the-pool-proactive-rotation-v02)) | Not implemented for Hermes yet |
+| Account distribution | The pool's own strategy (`ordered`, `reset-aware`, `spread`) | Hermes' Anthropic pool strategy (`fill_first`, `round_robin`, `random`, `least_used`) |
+| Credentials supplied | Native, `configDir`, `oauthTokenFile` and `oauthTokenRef` accounts | Only `oauthTokenFile` setup tokens; the rest are refused (see [stable setup tokens](#only-stable-setup-tokens-are-imported)) |
+| OpenClaw skills and MCP wiring | Available through the OpenClaw plugin backend | Not copied across |
+| Claude Code harness | Used by the OpenClaw backend | Not used: Hermes calls the native Anthropic Messages API with its own tool system |
+
 ### Security model
 
 Tokens are read from real files with strict size limits, parsed locally, and
