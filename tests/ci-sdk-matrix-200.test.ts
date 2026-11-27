@@ -12,8 +12,8 @@ const entries = [...ci.matchAll(/- openclaw: "([^"]+)"\s*\n\s*expect: "([^"]*)"/
 }));
 
 describe("sdk-contract-compat matrix", () => {
-  test("covers the previous minor 2026.10.33 with an exact expectation", () => {
-    expect(entries).toContainEqual({ openclaw: "2026.10.33", expect: "2026.10.33" });
+  test("covers the previous minor 2026.10.34 with an exact expectation", () => {
+    expect(entries).toContainEqual({ openclaw: "2026.10.34", expect: "2026.10.34" });
   });
   test("keeps older baselines and the unpinned latest lane", () => {
     expect(entries).toContainEqual({ openclaw: "2026.10.10", expect: "2026.10.10" });
