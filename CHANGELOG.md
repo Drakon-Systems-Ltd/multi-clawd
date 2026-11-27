@@ -6,23 +6,27 @@ versioning from v1.0.
 
 ## [Unreleased]
 
-### Fixed
-- Archive verification failures stop the updater even if a later diagnostic reports that ClawHub is unavailable (#206).
+## [2.7.4] - 2026-11-25
 
 ### Changed
 - **`multi-clawd update` retries from npm only when ClawHub's final error line is
-  an availability failure (#202).** The classifier now reads the last non-empty
-  line of the failure text: package/version not found on ClawHub, a ClawHub
-  HTTP 5xx, or a `getaddrinfo ENOTFOUND`/`EAI_AGAIN` failure for the `clawhub.ai`
-  host (or a subdomain, whole-host match) falls back. A generic `fetch failed` and DNS
-  failures for unrelated or lookalike hosts (e.g. `clawhub.ai.evil.example`) stop; anything else stops, even after an earlier availability line. An
-  unsupported platform or engine is no longer read as an unsupported spec, and
-  refused, reset and timed-out connections, plus the old-CLI "unknown option"
-  and "temporarily unavailable" shapes (no OpenClaw message to cite), now stop
-  and need the documented manual `npm:` retry. The stop list is unchanged and
-  still wins. README documents which cases are automatic.
+  a confirmed availability failure (#202).** The last non-empty failure line
+  must report a package or version missing on ClawHub, a ClawHub HTTP 5xx, or
+  `getaddrinfo ENOTFOUND`/`EAI_AGAIN` for `clawhub.ai` or its subdomain. A bare
+  `fetch failed`, unrelated or lookalike DNS host, or a later non-availability
+  error stops the automatic retry. Security, integrity, trust and policy
+  failures still stop even when availability appeared earlier. Refused, reset
+  and timed-out connections, unsupported platform or engine, and older CLI
+  `clawhub:` rejection also stop; a manual `npm:` retry is documented only
+  after the operator confirms an eligible availability or compatibility cause.
+
+- **Unsettled session-affinity reads now report their outcome (#190).** If a
+  bounded pin read does not settle after four listings, the shim writes one
+  anonymous stderr diagnostic that says whether it returned a pin. Settled
+  reads remain silent; the diagnostic names no session, account or path.
 
 ### Fixed
+- Archive verification failures stop the updater without an npm retry, even if a later diagnostic reports that ClawHub is unavailable (#206, #207).
 - **`multi-clawd account enable|disable` could fail when two changes shared a
   timestamp (#197).** The config backup was named from the wall-clock
   millisecond alone and created exclusively, so a second change in the same
@@ -30,6 +34,18 @@ versioning from v1.0.
   name is taken now gets the next free `-<n>` suffix. Creation is still
   exclusive, an existing backup is never overwritten, and any other backup
   failure still stops the change before the config is touched.
+- **A pinned npm fallback could resolve through ClawHub (#196).** After a
+  versioned ClawHub install fails with confirmed ClawHub availability evidence,
+  `multi-clawd update` now passes an explicit `npm:` source for the
+  same exact version, with `--pin --force`. The previous bare package spec
+  could resolve to ClawHub again.
+
+### Documentation
+- Source-install and source-update examples now use `npm ci`; the README
+  explains the observed npm 10 lockfile rewrite and the npm 11 dependency
+  update path. The roadmap and design note clarify that optional shimmed
+  session affinity shipped in v2.4 and distinguish it from planned affinity
+  for other runtimes.
 
 ## [2.7.3] - 2026-11-15
 

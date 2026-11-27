@@ -29,8 +29,9 @@ const parkDirect = (id: string, account: string, servedAt: number) => {
 };
 const notes = () => stderr.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[multi-clawd shim]") && l.includes("unsettled"));
 
-function run(schedule: number[], seedCount: number) {
+function run(schedule: number[], seedCount: number, stored?: { account: string; servedAt: number }) {
   holdStoreLock();
+  if (stored) writeFileSync(file, JSON.stringify({ a: stored }));
   for (let i = 0; i < seedCount; i++) parkDirect("a", `seed${1000 + i}`, 1000 + i);
   let next = 5000, listing = 0;
   const pin = readSessionPin(file, "a", 9000, TTL, {
@@ -43,8 +44,8 @@ function run(schedule: number[], seedCount: number) {
 }
 
 /** Every note the shim wrote about an unsettled read must name no session, account, key or path. */
-const expectNoIdentity = (line: string) => {
-  expect(line).toBe("[multi-clawd shim] session pin read unsettled after 4 listings: using the latest pin seen\n");
+const expectNoIdentity = (line: string, outcome: "no pin seen" | "using the latest pin seen") => {
+  expect(line).toBe(`[multi-clawd shim] session pin read unsettled after 4 listings: ${outcome}\n`);
   for (const secret of [dir, sessionKey("a"), "account", "seed", "pool-clawd"]) expect(line).not.toContain(secret);
 };
 
@@ -62,7 +63,7 @@ describe("a bounded read that ends unsettled is reported (#189)", () => {
     expect(pendingOf("a").length).toBeLessThanOrEqual(K);
     expect(readerFiles()).toEqual([]);
     expect(notes()).toHaveLength(1);
-    expectNoIdentity(notes()[0]);
+    expectNoIdentity(notes()[0], "no pin seen");
   }, 180_000);
 
   test("a read that starts above the bound ends the same way: bounded, one anonymous note", () => {
@@ -73,7 +74,17 @@ describe("a bounded read that ends unsettled is reported (#189)", () => {
     expect(pendingOf("a").length).toBeLessThanOrEqual(K);
     expect(readerFiles()).toEqual([]);
     expect(notes()).toHaveLength(1);
-    expectNoIdentity(notes()[0]);
+    expectNoIdentity(notes()[0], "no pin seen");
+  }, 180_000);
+
+  test("an unsettled read reports that it returned an observed pin", () => {
+    const stored = { account: "stored", servedAt: 999 };
+    const { pin, listing } = run([1, 32, 31, 31], 1, stored);
+    expect(listing).toBe(4);
+    expect(pin).toEqual(stored);
+    expect(readerFiles()).toEqual([]);
+    expect(notes()).toHaveLength(1);
+    expectNoIdentity(notes()[0], "using the latest pin seen");
   }, 180_000);
 
   test("a read that settles says nothing", () => {

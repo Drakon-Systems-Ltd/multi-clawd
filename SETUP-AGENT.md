@@ -55,10 +55,10 @@ If the cause is unclear, stop and investigate; do not switch sources or restart
 the gateway after a failed or interrupted install.
 
 Only after the availability/unsupported-spec check above, an unversioned fresh
-install may use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+install may use `openclaw plugins install npm:@drakon-systems/multi-clawd --pin`.
 For a versioned install, retain the same selected exact target: if ClawHub was
 `clawhub:@drakon-systems/multi-clawd@X.Y.Z`, the permitted npm retry is
-`openclaw plugins install @drakon-systems/multi-clawd@X.Y.Z --pin`.
+`openclaw plugins install npm:@drakon-systems/multi-clawd@X.Y.Z --pin`.
 Replace `X.Y.Z` with that same exact version; never drop it, re-resolve latest,
 or substitute a different version during fallback.
 
@@ -88,12 +88,12 @@ secret refs instead of silently accepting them.
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/multi-clawd.git /tmp/multi-clawd
-cd /tmp/multi-clawd && npm install && npm run build
+cd /tmp/multi-clawd && npm ci --include=dev && npm run build
 openclaw plugins install "$(pwd)"
 ```
 
-(Plain `npm install`, NOT `--omit=dev` — the build needs `tsc` from
-devDependencies. Registry installs ship prebuilt `dist/`.)
+(`npm ci --include=dev` installs the locked dependencies, including
+devDependencies; the build needs `tsc`. Registry installs ship prebuilt `dist/`.)
 
 ## 3. Second-account login — **ASK YOUR HUMAN**
 

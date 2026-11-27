@@ -28,8 +28,9 @@ for (const file of files) {
     });
     test("preserves the selected version in the actual npm command", () => {
       expect(boundary).toContain("Only after the availability/unsupported-spec check above, an unversioned fresh install may use");
+      expect(boundary).toContain("`openclaw plugins install npm:@drakon-systems/multi-clawd --pin`");
       expect(boundary).toContain("For a versioned install, retain the same selected exact target");
-      const pair = boundary.match(/`clawhub:@drakon-systems\/multi-clawd@([^`]+)`, the permitted npm retry is `openclaw plugins install @drakon-systems\/multi-clawd@([^ `]+) --pin`/);
+      const pair = boundary.match(/`clawhub:@drakon-systems\/multi-clawd@([^`]+)`, the permitted npm retry is `openclaw plugins install npm:@drakon-systems\/multi-clawd@([^ `]+) --pin`/);
       expect(pair).not.toBeNull();
       expect(pair?.[1]).toBe("X.Y.Z");
       expect(pair?.[2]).toBe(pair?.[1]);

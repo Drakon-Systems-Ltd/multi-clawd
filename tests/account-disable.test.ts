@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { changeAccount, editAccountDisabled } from "../scripts/account-config.mjs";
 
@@ -69,7 +69,7 @@ describe("account enable/disable config edits", () => {
     expect(readFileSync(enable.backup!, "utf8")).toBe(disabled);
     expect(readFileSync(again.backup!, "utf8")).toBe(source);
     expect(readdirSync(configDir).sort()).toEqual(
-      ["openclaw.json", disable.backup!, enable.backup!, again.backup!].map((p) => p.split("/").pop()).sort(),
+      ["openclaw.json", disable.backup!, enable.backup!, again.backup!].map((p) => basename(p)).sort(),
     );
   });
 
@@ -95,7 +95,7 @@ describe("account enable/disable config edits", () => {
   });
 
   test("a backup that cannot be written fails closed without retrying (#197)", (ctx) => {
-    if (process.getuid?.() === 0) ctx.skip("root ignores directory permissions");
+    if (process.platform === "win32" || process.getuid?.() === 0) ctx.skip("directory permissions require a non-root POSIX user");
     freezeClock();
     chmodSync(configDir, 0o500);
     try {
@@ -127,11 +127,10 @@ describe("account enable/disable config edits", () => {
   });
 
   test("CLI command round-trip, dry-run, and unknown id exit status", (ctx) => {
-    // The child must resolve the fixture config only: drop any inherited
-    // OpenClaw path override so a developer or CI environment that exports one
-    // can never point this test at a real instance.
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: temp };
-    for (const name of ["OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_CONFIG_PATH"]) delete env[name];
+    // Select the fixture explicitly, including on Windows where HOME does not
+    // determine OpenClaw's default config path.
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: temp, OPENCLAW_CONFIG_PATH: configFile };
+    for (const name of ["OPENCLAW_HOME", "OPENCLAW_STATE_DIR"]) delete env[name];
     const run = (...args: string[]) => spawnSync(process.execPath, [cli, "account", ...args], {
       encoding: "utf8", env,
     });
@@ -140,6 +139,7 @@ describe("account enable/disable config edits", () => {
     expect(preview.status).toBe(0);
     expect(readFileSync(configFile, "utf8")).toBe(source);
     expect(run("disable", "work").status).toBe(0);
+    expect(readFileSync(configFile, "utf8")).toBe(source.replace('"disabled": false', '"disabled": true'));
     expect(run("enable", "work").status).toBe(0);
     expect(readFileSync(configFile, "utf8")).toBe(source);
     const unknown = run("disable", "missing");

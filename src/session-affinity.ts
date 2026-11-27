@@ -380,13 +380,13 @@ function reportRefusal(why: string): void {
 }
 
 /**
- * Say that a bounded read ended unsettled and returned the latest pin it saw
- * (#189), on the same channel. No session id, account or path is named.
+ * Say that a bounded read ended unsettled, distinguishing whether it saw a
+ * pin (#189), on the same channel. No session id, account or path is named.
  */
-function reportUnsettledRead(): void {
+function reportUnsettledRead(sawPin: boolean): void {
   try {
     process.stderr.write(
-      `[multi-clawd shim] session pin read unsettled after ${PARKED_READ_LISTINGS} listings: using the latest pin seen\n`);
+      `[multi-clawd shim] session pin read unsettled after ${PARKED_READ_LISTINGS} listings: ${sawPin ? "using the latest pin seen" : "no pin seen"}\n`);
   } catch { /* a failed write must never affect a turn */ }
 }
 
@@ -579,7 +579,7 @@ export function readSessionPin(
       if (lost === undefined || (found && found.servedAt >= lost)) { settled = true; break; }
       leave ??= announceReader(file, key);
     }
-    if (!settled) reportUnsettledRead();
+    if (!settled) reportUnsettledRead(found !== undefined);
     return found;
   } finally {
     leave?.();

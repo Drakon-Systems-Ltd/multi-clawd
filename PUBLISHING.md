@@ -236,10 +236,10 @@ If the cause is unclear, stop and investigate; do not switch sources or restart
 the gateway after a failed or interrupted install.
 
 Only after the availability/unsupported-spec check above, an unversioned fresh
-install may use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+install may use `openclaw plugins install npm:@drakon-systems/multi-clawd --pin`.
 For a versioned install, retain the same selected exact target: if ClawHub was
 `clawhub:@drakon-systems/multi-clawd@X.Y.Z`, the permitted npm retry is
-`openclaw plugins install @drakon-systems/multi-clawd@X.Y.Z --pin`.
+`openclaw plugins install npm:@drakon-systems/multi-clawd@X.Y.Z --pin`.
 Replace `X.Y.Z` with that same exact version; never drop it, re-resolve latest,
 or substitute a different version during fallback.
 A host moving from a path-installed `multi-clawd` to the registry package

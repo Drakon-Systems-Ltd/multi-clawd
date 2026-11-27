@@ -463,10 +463,10 @@ If the cause is unclear, stop and investigate; do not switch sources or restart
 the gateway after a failed or interrupted install.
 
 Only after the availability/unsupported-spec check above, an unversioned fresh
-install may use `openclaw plugins install @drakon-systems/multi-clawd --pin`.
+install may use `openclaw plugins install npm:@drakon-systems/multi-clawd --pin`.
 For a versioned install, retain the same selected exact target: if ClawHub was
 `clawhub:@drakon-systems/multi-clawd@X.Y.Z`, the permitted npm retry is
-`openclaw plugins install @drakon-systems/multi-clawd@X.Y.Z --pin`.
+`openclaw plugins install npm:@drakon-systems/multi-clawd@X.Y.Z --pin`.
 Replace `X.Y.Z` with that same exact version; never drop it, re-resolve latest,
 or substitute a different version during fallback.
 An unversioned ClawHub spec follows newer releases; add `@X.Y.Z` to keep a specific release.
@@ -513,7 +513,7 @@ openclaw plugins install (Get-Location).Path
 **Or let your agent install it.** Running an OpenClaw assistant or Claude
 Code on the target machine already? Paste it this and go make coffee:
 
-> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.7.3/SETUP-AGENT.md
+> Read https://raw.githubusercontent.com/Drakon-Systems-Ltd/multi-clawd/v2.7.4/SETUP-AGENT.md
 > and follow it to set up multi-clawd on this machine. I own a second
 > Claude account — ask me when you need me to log in.
 
@@ -557,12 +557,14 @@ restart, and finishes with a doctor health check.
 line of ClawHub's failure output is one of: package or version not found on ClawHub, a
 ClawHub HTTP 5xx failure, or a DNS failure (`getaddrinfo ENOTFOUND` / `EAI_AGAIN`) for the
 `clawhub.ai` host itself (or a subdomain). A bare `fetch failed`, DNS failure for any other or
-lookalike host, and anything
-else stops the update without trying npm, including security, integrity, policy and trust
-failures, interruption, refused, reset or timed-out connections, an unsupported platform or
-engine, an older OpenClaw rejecting the `clawhub:` spec, and any unclear error, even if an
-availability line appeared earlier. After a stop, retry by hand once you have read the failure:
+lookalike host, and anything else stops the update without trying npm, including security,
+integrity, policy and trust failures, interruption, refused, reset or timed-out connections,
+an unsupported platform or engine, an older OpenClaw rejecting the `clawhub:` spec, and any
+unclear error, even if an availability line appeared earlier. After a stop, investigate first.
+Only a confirmed ClawHub availability failure or an older OpenClaw CLI explicitly rejecting
+the `clawhub:` spec as unsupported permits a manual retry of the same exact version:
 `openclaw plugins install npm:@drakon-systems/multi-clawd@<version> --pin --force`.
+Do not retry after an unclear, interrupted, security, integrity, policy, or trust failure.
 (`npm i -g @drakon-systems/multi-clawd` once, and it's just `multi-clawd
 update` — with `multi-clawd setup`, `multi-clawd explain` (your setup in
 plain English), and `multi-clawd doctor` alongside.)
@@ -1231,7 +1233,7 @@ Early but real — built for and dogfooded in production.
   pool-health order; `multi-clawd direct` / `direct sync` ✅
 - **v2.4** — optional per-session affinity (`pool.sessionAffinity`) for shimmed
   Claude CLI launches; health overrides the pin, with bounded expiring state
-  ✅ (hardened through 2.7.3; see [`CHANGELOG.md`](./CHANGELOG.md))
+  ✅ (hardened through 2.7.4; see [`CHANGELOG.md`](./CHANGELOG.md))
 
 Releases after v1.9 are not itemised here; [`CHANGELOG.md`](./CHANGELOG.md) is
 the release history.
