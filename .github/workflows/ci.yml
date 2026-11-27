@@ -78,3 +78,34 @@ jobs:
       - run: npx vitest run tests/openclaw-sdk-contract.test.ts
         env:
           MULTI_CLAWD_EXPECT_OPENCLAW: ${{ matrix.expect }}
+
+  macos-source-install:
+    name: macOS source install (Node ${{ matrix.node }}, npm ${{ matrix.npm }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: 22
+            npm: 10
+            install: ci
+          - node: 24
+            npm: 11
+            install: install
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Select and verify npm major
+        env:
+          EXPECTED_NPM: ${{ matrix.npm }}
+        run: |
+          npm install -g "npm@$EXPECTED_NPM" --no-audit --no-fund
+          version=$(npm --version)
+          echo "Using npm $version"
+          test "${version%%.*}" = "$EXPECTED_NPM"
+      - run: npm ${{ matrix.install }} --no-audit --no-fund
+      - run: npm run build
